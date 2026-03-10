@@ -24,6 +24,9 @@ jobs:
       - name: Lint
         run: make lint
 
+      - name: Generate Manifests
+        run: make manifests generate
+
       - name: Unit Tests
         run: make test
 
@@ -32,3 +35,9 @@ jobs:
 
       - name: Docker Build
         run: make docker-build
+
+      - name: Generate Helm Chart
+        run: make helmify
+
+      - name: Helm Lint
+        run: helm lint charts/curity-operator --strict

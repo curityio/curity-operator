@@ -13,6 +13,7 @@ endif
 
 VERSION ?= 0.0.1
 OPERATOR_NAME ?= curity-operator
+OPERATOR_NS ?= curity-operator
 DOCKER_REPO_BASE ?= ghcr.io/curityio
 IMG ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME):v$(VERSION)$(GIT_TAG)
 CONTAINER_TOOL ?= docker
@@ -21,6 +22,22 @@ BINARY_NAME ?= curity-operator
 LOCALBIN = $(shell pwd)/bin
 TEST_CLUSTER_NAME ?= e2e-test-cluster
 KIND_VERSION ?= v0.27.0
+
+## Tool Versions
+KUSTOMIZE_VERSION ?= v5.6.0
+CONTROLLER_TOOLS_VERSION ?= v0.17.3
+HELMIFY_VERSION ?= v0.4.19
+
+## Tool Binaries
+KUBECTL ?= kubectl
+KUSTOMIZE ?= $(LOCALBIN)/kustomize
+CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+HELMIFY ?= $(LOCALBIN)/helmify
+
+## Helm
+HELM_CHART_DIR ?= charts/curity-operator
+HELM_CHART_NAME ?= curity-operator
+HELM_REGISTRY ?= ghcr.io/curityio/charts
 
 .PHONY: all
 all: build
@@ -31,10 +48,20 @@ all: build
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
+##@ Generation
+
+.PHONY: manifests
+manifests: controller-gen ## Generate CRD and RBAC manifests from Go markers.
+	$(CONTROLLER_GEN) rbac:roleName=manager-role crd paths="./..." output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/rbac
+
+.PHONY: generate
+generate: controller-gen ## Generate DeepCopy methods.
+	$(CONTROLLER_GEN) object paths="./..."
+
 ##@ Build
 
 .PHONY: build
-build: ## Build the operator binary.
+build: generate ## Build the operator binary.
 	go build -o $(LOCALBIN)/$(BINARY_NAME) ./cmd/manager/
 
 .PHONY: run
@@ -94,6 +121,57 @@ docker-buildx: ## Build and push multi-arch docker image.
 	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag $(IMG) .
 	- $(CONTAINER_TOOL) buildx rm curity-builder
 
+##@ Deployment
+
+ifndef ignore-not-found
+  ignore-not-found = false
+endif
+
+.PHONY: install
+install: manifests kustomize ## Install CRDs into the K8s cluster.
+	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
+
+.PHONY: uninstall
+uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster.
+	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+
+.PHONY: kustomize-deploy
+kustomize-deploy: manifests kustomize ## Deploy operator to the K8s cluster via Kustomize.
+	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
+	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
+
+.PHONY: undeploy
+undeploy: kustomize ## Undeploy operator from the K8s cluster.
+	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+
+.PHONY: build-installer
+build-installer: manifests kustomize ## Generate a consolidated install.yaml.
+	mkdir -p dist
+	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
+	$(KUSTOMIZE) build config/default > dist/install.yaml
+
+##@ Helm
+
+.PHONY: helmify
+helmify: manifests kustomize helmify-bin ## Generate Helm chart from Kustomize manifests.
+	$(KUSTOMIZE) build config/default | $(HELMIFY) $(HELM_CHART_DIR)
+
+.PHONY: helm-lint
+helm-lint: ## Lint the generated Helm chart.
+	helm lint $(HELM_CHART_DIR) --strict
+
+.PHONY: helm-template
+helm-template: ## Render Helm templates locally (dry-run).
+	helm template $(HELM_CHART_NAME) $(HELM_CHART_DIR)
+
+.PHONY: helm-package
+helm-package: helm-lint ## Package the Helm chart.
+	helm package $(HELM_CHART_DIR)
+
+.PHONY: helm-push
+helm-push: helm-package ## Push Helm chart to OCI registry.
+	helm push $(HELM_CHART_NAME)-*.tgz oci://$(HELM_REGISTRY)
+
 ##@ Cluster
 
 .PHONY: kind
@@ -126,8 +204,56 @@ cluster-destroy: kind ## Destroy the Kind e2e cluster.
 deploy: docker-build cluster ## Build, load into Kind, and deploy the operator.
 	$(KIND) load docker-image $(IMG) --name $(TEST_CLUSTER_NAME)
 
+.PHONY: deploy-helm
+deploy-helm: deploy helmify ## Build, load into Kind, and deploy via Helm.
+	helm upgrade --install curity-operator $(HELM_CHART_DIR) \
+		--namespace $(OPERATOR_NS) \
+		--create-namespace \
+		--set controllerManager.manager.image.repository=$(DOCKER_REPO_BASE)/$(OPERATOR_NAME) \
+		--set controllerManager.manager.image.tag=v$(VERSION)$(GIT_TAG) \
+		--wait --timeout 120s
+
+.PHONY: undeploy-helm
+undeploy-helm: ## Uninstall the operator Helm release.
+	helm uninstall curity-operator --namespace $(OPERATOR_NS)
+
+##@ Tools
+
+.PHONY: kustomize
+kustomize: ## Download kustomize locally if necessary.
+ifeq (,$(wildcard $(KUSTOMIZE)))
+	@{ \
+	set -e ;\
+	mkdir -p $(LOCALBIN) ;\
+	curl -sSLo $(LOCALBIN)/kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/$(KUSTOMIZE_VERSION)/kustomize_$(KUSTOMIZE_VERSION)_$(OS)_$(ARCH).tar.gz ;\
+	tar -xzf $(LOCALBIN)/kustomize.tar.gz -C $(LOCALBIN) ;\
+	rm -f $(LOCALBIN)/kustomize.tar.gz ;\
+	chmod +x $(KUSTOMIZE) ;\
+	}
+endif
+
+.PHONY: controller-gen
+controller-gen: ## Download controller-gen locally if necessary.
+ifeq (,$(wildcard $(CONTROLLER_GEN)))
+	@{ \
+	set -e ;\
+	mkdir -p $(LOCALBIN) ;\
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION) ;\
+	}
+endif
+
+.PHONY: helmify-bin
+helmify-bin: ## Download helmify locally if necessary.
+ifeq (,$(wildcard $(HELMIFY)))
+	@{ \
+	set -e ;\
+	mkdir -p $(LOCALBIN) ;\
+	GOBIN=$(LOCALBIN) go install github.com/arttor/helmify/cmd/helmify@$(HELMIFY_VERSION) ;\
+	}
+endif
+
 ##@ Clean
 
 .PHONY: clean
 clean: ## Remove build artifacts.
-	rm -rf $(LOCALBIN)/$(BINARY_NAME)
+	rm -rf $(LOCALBIN)/$(BINARY_NAME) dist/

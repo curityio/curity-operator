@@ -43,7 +43,7 @@ func setup() {
 }
 
 func teardown(m *testing.M) {
-	snaps.Clean(m)
+	_, _ = snaps.Clean(m)
 	err := utils.TestEnvironment.Teardown()
 	if err != nil {
 		GinkgoWriter.Println(fmt.Sprintf("Test teardown failed: %v", err.Error()))

@@ -7,7 +7,7 @@ import (
 	"reflect"
 	"strings"
 
-	. "github.com/onsi/ginkgo/v2" //nolint:golint,revive
+	. "github.com/onsi/ginkgo/v2" //nolint:revive,staticcheck
 	"github.com/onsi/gomega"
 )
 
@@ -56,7 +56,7 @@ func GetProjectDir() (string, error) {
 	if err != nil {
 		return wd, err
 	}
-	wd = strings.Replace(wd, "/test/e2e", "", -1)
+	wd = strings.ReplaceAll(wd, "/test/e2e", "")
 	return wd, nil
 }
 

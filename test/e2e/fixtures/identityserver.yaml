@@ -1,0 +1,6 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServer
+metadata:
+  name: {{ .name }}
+spec:
+  replicas: {{ .replicas }}

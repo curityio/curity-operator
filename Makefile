@@ -97,11 +97,15 @@ endif
 
 .PHONY: test
 test: ## Run unit tests.
-	go test ./... -v -count=1
+	go test $$(go list ./... | grep -v /test/) -v -count=1
 
 .PHONY: test-e2e
-test-e2e: deploy ## Create Kind cluster, build and load operator, then run e2e tests.
-	./tests/run_tests.sh
+test-e2e: deploy install ## Create Kind cluster, build, load, install CRDs, run e2e tests.
+	go test -v -timeout 300s ./test/e2e/...
+
+.PHONY: test-e2e-update-snapshots
+test-e2e-update-snapshots: deploy install ## Run e2e tests and update snapshots.
+	UPDATE_SNAPS=true go test -v -timeout 300s ./test/e2e/...
 
 ##@ Docker
 

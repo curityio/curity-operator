@@ -3,7 +3,7 @@ name: Push
 on:
   push:
     branches:
-      - bootstrap
+      - main
     paths-ignore:
       - '*.md'
       - 'docs/'

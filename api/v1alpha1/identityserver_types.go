@@ -4,10 +4,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// +kubebuilder:object:generate=true
 type IdentityServerSpec struct {
 	Replicas *int32 `json:"replicas,omitempty"`
 }
 
+// +kubebuilder:object:generate=true
 type IdentityServerStatus struct {
 	Conditions    []metav1.Condition `json:"conditions,omitempty"`
 	ReadyReplicas int32              `json:"readyReplicas,omitempty"`

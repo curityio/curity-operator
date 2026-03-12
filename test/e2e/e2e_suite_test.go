@@ -1,0 +1,59 @@
+package e2e
+
+import (
+	"fmt"
+	"os"
+	"testing"
+
+	"github.com/gkampitakis/go-snaps/snaps"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"github.com/curityio/curity-operator/api/v1alpha1"
+	"github.com/curityio/curity-operator/test/utils"
+)
+
+func TestMain(m *testing.M) {
+	setup()
+
+	code := m.Run()
+
+	teardown(m)
+
+	os.Exit(code)
+}
+
+func setup() {
+	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
+	utils.TestEnvironment = utils.NewE2ETestEnv("curity")
+
+	err := v1alpha1.AddToScheme(utils.TestEnvironment.Scheme)
+	if err != nil {
+		fmt.Printf("Test setup failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	err = utils.TestEnvironment.Setup()
+	if err != nil {
+		fmt.Printf("Test setup failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func teardown(m *testing.M) {
+	_, _ = snaps.Clean(m)
+	err := utils.TestEnvironment.Teardown()
+	if err != nil {
+		GinkgoWriter.Println(fmt.Sprintf("Test teardown failed: %v", err.Error()))
+		os.Exit(1)
+	}
+}
+
+// TestE2E runs the e2e test suite.
+func TestE2E(t *testing.T) {
+	RegisterFailHandler(Fail)
+	GinkgoWriter.Println("Starting curity-operator e2e suite")
+	RunSpecs(t, "e2e suite")
+}

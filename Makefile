@@ -27,12 +27,15 @@ KIND_VERSION ?= v0.27.0
 KUSTOMIZE_VERSION ?= v5.6.0
 CONTROLLER_TOOLS_VERSION ?= v0.20.1
 HELMIFY_VERSION ?= v0.4.19
+ENVTEST_VERSION ?= release-0.19
+ENVTEST_K8S_VERSION ?= 1.31.0
 
 ## Tool Binaries
 KUBECTL ?= kubectl
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 HELMIFY ?= $(LOCALBIN)/helmify
+ENVTEST ?= $(LOCALBIN)/setup-envtest
 
 ## Helm
 HELM_CHART_DIR ?= charts/curity-operator
@@ -96,8 +99,8 @@ endif
 ##@ Testing
 
 .PHONY: test
-test: ## Run unit tests.
-	go test $$(go list ./... | grep -v /test/) -v -count=1
+test: envtest ## Run unit tests.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /test/) -v -count=1
 
 .PHONY: test-e2e
 test-e2e: generate deploy install ## Create Kind cluster, build, load, install CRDs, run e2e tests.
@@ -243,6 +246,16 @@ ifeq (,$(wildcard $(CONTROLLER_GEN)))
 	set -e ;\
 	mkdir -p $(LOCALBIN) ;\
 	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION) ;\
+	}
+endif
+
+.PHONY: envtest
+envtest: ## Download setup-envtest locally if necessary.
+ifeq (,$(wildcard $(ENVTEST)))
+	@{ \
+	set -e ;\
+	mkdir -p $(LOCALBIN) ;\
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION) ;\
 	}
 endif
 

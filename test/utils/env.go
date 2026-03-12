@@ -31,7 +31,7 @@ var TestEnvironment *E2ETestEnv
 func NewE2ETestEnv(operatorName string) *E2ETestEnv {
 	return &E2ETestEnv{
 		Scheme:            scheme.Scheme,
-		operatorNamespace: fmt.Sprintf("%s-operator-system", operatorName),
+		operatorNamespace: fmt.Sprintf("%s-operator", operatorName),
 	}
 }
 

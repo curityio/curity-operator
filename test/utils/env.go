@@ -11,6 +11,8 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+
+	"github.com/curityio/curity-operator/api/v1alpha1"
 )
 
 // E2ETestEnv holds the test environment configuration and clients.
@@ -29,8 +31,10 @@ var TestEnvironment *E2ETestEnv
 
 // NewE2ETestEnv creates a new test environment for the given operator.
 func NewE2ETestEnv(operatorName string) *E2ETestEnv {
+	s := scheme.Scheme
+	_ = v1alpha1.AddToScheme(s)
 	return &E2ETestEnv{
-		Scheme:            scheme.Scheme,
+		Scheme:            s,
 		operatorNamespace: fmt.Sprintf("%s-operator", operatorName),
 	}
 }

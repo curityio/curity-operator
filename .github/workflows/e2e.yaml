@@ -24,7 +24,16 @@ jobs:
           go-version-file: go.mod
 
       - name: Run E2E Tests
-        run: make test-e2e
+        run: UPDATE_SNAPS=always make test-e2e
+
+      - name: Verify snapshots are committed
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "E2E snapshot files were created or updated but are not committed."
+            echo "Run 'make test-e2e-update-snapshots' locally and commit the snapshot files."
+            git status --short
+            exit 1
+          fi
 
       - name: Destroy Cluster
         if: always()

@@ -105,7 +105,7 @@ test-e2e: generate deploy install ## Create Kind cluster, build, load, install C
 
 .PHONY: test-e2e-update-snapshots
 test-e2e-update-snapshots: generate deploy install ## Run e2e tests and update snapshots.
-	UPDATE_SNAPS=true go test -v -timeout 300s ./test/e2e/...
+	UPDATE_SNAPS=always go test -v -timeout 300s ./test/e2e/...
 
 ##@ Docker
 

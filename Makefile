@@ -100,11 +100,11 @@ test: ## Run unit tests.
 	go test $$(go list ./... | grep -v /test/) -v -count=1
 
 .PHONY: test-e2e
-test-e2e: deploy install ## Create Kind cluster, build, load, install CRDs, run e2e tests.
+test-e2e: generate deploy install ## Create Kind cluster, build, load, install CRDs, run e2e tests.
 	go test -v -timeout 300s ./test/e2e/...
 
 .PHONY: test-e2e-update-snapshots
-test-e2e-update-snapshots: deploy install ## Run e2e tests and update snapshots.
+test-e2e-update-snapshots: generate deploy install ## Run e2e tests and update snapshots.
 	UPDATE_SNAPS=true go test -v -timeout 300s ./test/e2e/...
 
 ##@ Docker

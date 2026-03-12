@@ -21,11 +21,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Lint
-        run: make lint
-
       - name: Generate Manifests
         run: make manifests generate
+
+      - name: Lint
+        run: make lint
 
       - name: Unit Tests
         run: make test

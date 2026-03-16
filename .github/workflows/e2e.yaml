@@ -51,18 +51,18 @@ jobs:
         run: kubectl cluster-info
 
       - name: Create operator namespace
-        run: kubectl create namespace curity-operator --dry-run=client -o yaml | kubectl apply -f -
+        run: kubectl get namespace curity-operator || kubectl create namespace curity-operator
 
       - name: Create image pull secret
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          kubectl get secret ghcr-pull-secret -n curity-operator || \
           kubectl create secret docker-registry ghcr-pull-secret \
             --docker-server=ghcr.io \
             --docker-username=${{ github.actor }} \
             --docker-password="${GITHUB_TOKEN}" \
-            --namespace=curity-operator \
-            --dry-run=client -o yaml | kubectl apply -f -
+            --namespace=curity-operator
 
       - name: Run E2E Tests
         run: make test-e2e-remote IMG=ghcr.io/curityio/curity-operator:pr-${{ github.event.pull_request.number }}-${{ github.sha }}

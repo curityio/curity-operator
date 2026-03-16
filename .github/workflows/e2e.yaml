@@ -4,11 +4,21 @@ on:
   pull_request:
     types: [labeled]
 
+concurrency:
+  group: e2e-aks
+  cancel-in-progress: false
+
 jobs:
   e2e-tests:
-    name: Run E2E Tests
+    name: Run E2E Tests (AKS)
     if: ${{ github.event.label.name == 'ok-to-test/e2e' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    env:
+      IMG: ghcr.io/curityio/curity-operator:pr-${{ github.event.pull_request.number }}-${{ github.sha }}
     steps:
       - name: Remove test label
         uses: actions-ecosystem/action-remove-labels@v1
@@ -23,9 +33,45 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run E2E Tests
-        run: make test-e2e
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Destroy Cluster
+      - name: Configure kubeconfig
+        env:
+          KUBE_SERVER: ${{ secrets.KUBE_SERVER }}
+          KUBE_TOKEN: ${{ secrets.KUBE_TOKEN }}
+          KUBE_CA_CERT: ${{ secrets.KUBE_CA_CERT }}
+        run: |
+          echo "${KUBE_CA_CERT}" | base64 -d > /tmp/ca.crt
+          kubectl config set-cluster aks --server="${KUBE_SERVER}" --certificate-authority=/tmp/ca.crt --embed-certs=true
+          kubectl config set-credentials aks-user --token="${KUBE_TOKEN}"
+          kubectl config set-context aks --cluster=aks --user=aks-user
+          kubectl config use-context aks
+
+      - name: Verify cluster connectivity
+        run: kubectl cluster-info
+
+      - name: Create operator namespace
+        run: kubectl get namespace curity-operator || kubectl create namespace curity-operator
+
+      - name: Create image pull secret
+        run: |
+          kubectl delete secret ghcr-pull-secret -n curity-operator --ignore-not-found
+          kubectl create secret docker-registry ghcr-pull-secret \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --namespace=curity-operator
+
+      - name: Run E2E Tests
+        run: make test-e2e-remote IMG=${{ env.IMG }}
+
+      - name: Cleanup
         if: always()
-        run: make cluster-destroy
+        run: |
+          make undeploy ignore-not-found=true || true
+          kubectl delete namespace curity-e2e --ignore-not-found

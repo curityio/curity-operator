@@ -13,6 +13,12 @@ jobs:
     name: Run E2E Tests (AKS)
     if: ${{ github.event.label.name == 'ok-to-test/e2e' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+    env:
+      IMG: ghcr.io/curityio/curity-operator:pr-${{ github.event.pull_request.number }}-${{ github.sha }}
     steps:
       - name: Remove test label
         uses: actions-ecosystem/action-remove-labels@v1
@@ -40,7 +46,6 @@ jobs:
           KUBE_TOKEN: ${{ secrets.KUBE_TOKEN }}
           KUBE_CA_CERT: ${{ secrets.KUBE_CA_CERT }}
         run: |
-          kubectl config set-cluster aks --server="${KUBE_SERVER}" --certificate-authority=/dev/null --insecure-skip-tls-verify=false
           echo "${KUBE_CA_CERT}" | base64 -d > /tmp/ca.crt
           kubectl config set-cluster aks --server="${KUBE_SERVER}" --certificate-authority=/tmp/ca.crt --embed-certs=true
           kubectl config set-credentials aks-user --token="${KUBE_TOKEN}"
@@ -54,18 +59,16 @@ jobs:
         run: kubectl get namespace curity-operator || kubectl create namespace curity-operator
 
       - name: Create image pull secret
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          kubectl get secret ghcr-pull-secret -n curity-operator || \
+          kubectl delete secret ghcr-pull-secret -n curity-operator --ignore-not-found
           kubectl create secret docker-registry ghcr-pull-secret \
             --docker-server=ghcr.io \
             --docker-username=${{ github.actor }} \
-            --docker-password="${GITHUB_TOKEN}" \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
             --namespace=curity-operator
 
       - name: Run E2E Tests
-        run: make test-e2e-remote IMG=ghcr.io/curityio/curity-operator:pr-${{ github.event.pull_request.number }}-${{ github.sha }}
+        run: make test-e2e-remote IMG=${{ env.IMG }}
 
       - name: Cleanup
         if: always()

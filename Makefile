@@ -27,6 +27,7 @@ KIND_VERSION ?= v0.27.0
 KUSTOMIZE_VERSION ?= v5.6.0
 CONTROLLER_TOOLS_VERSION ?= v0.20.1
 HELMIFY_VERSION ?= v0.4.19
+YQ_VERSION ?= v4.44.1
 ENVTEST_VERSION ?= release-0.19
 ENVTEST_K8S_VERSION ?= 1.31.0
 
@@ -35,12 +36,14 @@ KUBECTL ?= kubectl
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 HELMIFY ?= $(LOCALBIN)/helmify
+YQ ?= $(LOCALBIN)/yq
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 
 ## Helm
 HELM_CHART_DIR ?= charts/curity-operator
 HELM_CHART_NAME ?= curity-operator
 HELM_REGISTRY ?= ghcr.io/curityio/charts
+HELMIFY_POSTPROCESS ?= hack/helm/postprocess.sh
 
 .PHONY: all
 all: build
@@ -164,8 +167,12 @@ build-installer: manifests kustomize ## Generate a consolidated install.yaml.
 ##@ Helm
 
 .PHONY: helmify
-helmify: manifests kustomize helmify-bin ## Generate Helm chart from Kustomize manifests.
-	$(KUSTOMIZE) build config/default | $(HELMIFY) $(HELM_CHART_DIR)
+helmify: manifests kustomize helmify-bin yq ## Generate Helm chart from Kustomize manifests.
+	$(KUSTOMIZE) build config/default | $(YQ) 'del(.. | .imagePullSecrets?)' | $(HELMIFY) -image-pull-secrets $(HELM_CHART_DIR)
+	@if [ -n "$(HELMIFY_POSTPROCESS)" ] && [ -x "$(HELMIFY_POSTPROCESS)" ]; then \
+		echo "Running Helm postprocessing..."; \
+		HELM_CHART_DIR=$(HELM_CHART_DIR) $(HELMIFY_POSTPROCESS); \
+	fi
 
 .PHONY: helm-lint
 helm-lint: ## Lint the generated Helm chart.
@@ -276,6 +283,17 @@ ifeq (,$(wildcard $(HELMIFY)))
 	set -e ;\
 	mkdir -p $(LOCALBIN) ;\
 	GOBIN=$(LOCALBIN) go install github.com/arttor/helmify/cmd/helmify@$(HELMIFY_VERSION) ;\
+	}
+endif
+
+.PHONY: yq
+yq: ## Download yq locally if necessary.
+ifeq (,$(wildcard $(YQ)))
+	@{ \
+	set -e ;\
+	mkdir -p $(LOCALBIN) ;\
+	curl -sSLo $(YQ) https://github.com/mikefarah/yq/releases/download/$(YQ_VERSION)/yq_$(OS)_$(ARCH) ;\
+	chmod +x $(YQ) ;\
 	}
 endif
 

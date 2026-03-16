@@ -15,7 +15,7 @@ VERSION ?= 0.0.1
 OPERATOR_NAME ?= curity-operator
 OPERATOR_NS ?= curity-operator
 DOCKER_REPO_BASE ?= ghcr.io/curityio
-IMG ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME):v$(VERSION)$(GIT_TAG)
+IMG ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME):v$(VERSION)
 CONTAINER_TOOL ?= docker
 
 BINARY_NAME ?= curity-operator
@@ -121,7 +121,7 @@ test-e2e-update-snapshots: generate deploy-kind install ## Run e2e tests and upd
 
 .PHONY: docker-build
 docker-build: ## Build docker image.
-	$(CONTAINER_TOOL) build -t $(IMG) .
+	$(CONTAINER_TOOL) build --build-arg VERSION=$(VERSION) -t $(IMG) .
 
 .PHONY: docker-push
 docker-push: ## Push docker image.
@@ -132,7 +132,7 @@ PLATFORMS ?= linux/arm64,linux/amd64
 docker-buildx: ## Build and push multi-arch docker image.
 	- $(CONTAINER_TOOL) buildx create --name curity-builder
 	$(CONTAINER_TOOL) buildx use curity-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag $(IMG) .
+	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --build-arg VERSION=$(VERSION) --tag $(IMG) .
 	- $(CONTAINER_TOOL) buildx rm curity-builder
 
 ##@ Deployment
@@ -184,11 +184,19 @@ helm-template: ## Render Helm templates locally (dry-run).
 
 .PHONY: helm-package
 helm-package: helm-lint ## Package the Helm chart.
+	rm -f $(HELM_CHART_NAME)-*.tgz
 	helm package $(HELM_CHART_DIR)
 
 .PHONY: helm-push
 helm-push: helm-package ## Push Helm chart to OCI registry.
 	helm push $(HELM_CHART_NAME)-*.tgz oci://$(HELM_REGISTRY)
+
+.PHONY: version-sync
+version-sync: yq ## Patch all version references to VERSION.
+	$(SED) -i 's/^version: .*/version: $(VERSION)/' $(HELM_CHART_DIR)/Chart.yaml
+	$(SED) -i 's/^appVersion: .*/appVersion: "$(VERSION)"/' $(HELM_CHART_DIR)/Chart.yaml
+	$(YQ) -i '.controllerManager.manager.image.tag = "v$(VERSION)"' $(HELM_CHART_DIR)/values.yaml
+	$(SED) -i 's/newTag: .*/newTag: v$(VERSION)/' config/manager/kustomization.yaml
 
 ##@ Cluster
 
@@ -234,7 +242,7 @@ deploy-helm: deploy-kind helmify ## Build, load into Kind, and deploy via Helm.
 		--namespace $(OPERATOR_NS) \
 		--create-namespace \
 		--set controllerManager.manager.image.repository=$(DOCKER_REPO_BASE)/$(OPERATOR_NAME) \
-		--set controllerManager.manager.image.tag=v$(VERSION)$(GIT_TAG) \
+		--set controllerManager.manager.image.tag=v$(VERSION) \
 		--wait --timeout 120s
 
 .PHONY: undeploy-helm

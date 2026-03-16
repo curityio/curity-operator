@@ -13,3 +13,5 @@ resources:
 patches:
 # Protect the /metrics endpoint by putting it behind auth.
 - path: manager_auth_proxy_patch.yaml
+# Add imagePullSecrets for pulling from private registries.
+- path: manager_pull_secret_patch.yaml

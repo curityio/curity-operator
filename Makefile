@@ -103,11 +103,15 @@ test: envtest ## Run unit tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /test/) -v -count=1
 
 .PHONY: test-e2e
-test-e2e: generate deploy install ## Create Kind cluster, build, load, install CRDs, run e2e tests.
+test-e2e: generate deploy-kind install ## Build, load into Kind, install CRDs, run e2e tests.
+	go test -v -timeout 300s ./test/e2e/...
+
+.PHONY: test-e2e-remote
+test-e2e-remote: generate deploy-remote install ## Build, push to registry, install CRDs, run e2e tests.
 	go test -v -timeout 300s ./test/e2e/...
 
 .PHONY: test-e2e-update-snapshots
-test-e2e-update-snapshots: generate deploy install ## Run e2e tests and update snapshots.
+test-e2e-update-snapshots: generate deploy-kind install ## Run e2e tests and update snapshots.
 	go test -v -timeout 300s ./test/e2e/...
 
 ##@ Docker
@@ -207,12 +211,18 @@ cluster: kind ## Create a Kind cluster for e2e testing.
 cluster-destroy: kind ## Destroy the Kind e2e cluster.
 	$(KIND) delete cluster --name $(TEST_CLUSTER_NAME)
 
-.PHONY: deploy
-deploy: docker-build cluster ## Build, load into Kind, and deploy the operator.
+.PHONY: deploy-kind
+deploy-kind: docker-build cluster ## Build and load image into Kind cluster.
 	$(KIND) load docker-image $(IMG) --name $(TEST_CLUSTER_NAME)
 
+.PHONY: deploy-remote
+deploy-remote: docker-build docker-push ## Build and push image to registry.
+
+.PHONY: deploy
+deploy: deploy-kind ## Alias for deploy-kind (backward compat).
+
 .PHONY: deploy-helm
-deploy-helm: deploy helmify ## Build, load into Kind, and deploy via Helm.
+deploy-helm: deploy-kind helmify ## Build, load into Kind, and deploy via Helm.
 	helm upgrade --install curity-operator $(HELM_CHART_DIR) \
 		--namespace $(OPERATOR_NS) \
 		--create-namespace \

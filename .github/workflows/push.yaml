@@ -13,9 +13,14 @@ jobs:
     name: Build and Push
     if: "! contains(toJSON(github.event.commits.*.message), '[skip-ci]')"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -38,12 +43,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image tag
+        id: tag
+        uses: ./.github/actions/compute-tag
+
       - name: Docker Build and Push
+        env:
+          IMG: ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.tag }}
         run: |
-          make docker-build
-          make docker-push
+          make docker-build IMG=$IMG
+          make docker-push IMG=$IMG
 
       - name: Generate and Push Helm Chart
         run: |
           make helmify
+          make version-sync VERSION=${{ steps.tag.outputs.version }}
           make helm-push

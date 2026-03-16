@@ -17,8 +17,6 @@ jobs:
       contents: read
       packages: write
       pull-requests: write
-    env:
-      IMG: ghcr.io/curityio/curity-operator:pr-${{ github.event.pull_request.number }}-${{ github.sha }}
     steps:
       - name: Remove test label
         uses: actions-ecosystem/action-remove-labels@v1
@@ -27,6 +25,14 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute image tag
+        id: tag
+        uses: ./.github/actions/compute-tag
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -68,7 +74,7 @@ jobs:
             --namespace=curity-operator
 
       - name: Run E2E Tests
-        run: make test-e2e-remote IMG=${{ env.IMG }}
+        run: make test-e2e-remote IMG=ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.tag }}
 
       - name: Cleanup
         if: always()

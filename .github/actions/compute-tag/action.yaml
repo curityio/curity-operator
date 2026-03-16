@@ -1,0 +1,36 @@
+name: Compute Image Tag
+description: Compute a versioned image tag based on the latest git tag.
+
+inputs:
+  pr-number:
+    description: 'PR number to include in the tag (omit for non-PR builds)'
+    required: false
+    default: ''
+
+outputs:
+  tag:
+    description: 'Full image tag (e.g. v0.2.0-pr-42-abc123d or v0.2.0-abc123d)'
+    value: ${{ steps.compute.outputs.tag }}
+  version:
+    description: 'SemVer-ish version without v prefix (e.g. 0.2.0-pr-42-abc123d)'
+    value: ${{ steps.compute.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute tag
+      id: compute
+      shell: bash
+      run: |
+        SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+        LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+        BASE="${LATEST_TAG#v}"
+
+        if [ -n "${{ inputs.pr-number }}" ]; then
+          VERSION="${BASE}-pr-${{ inputs.pr-number }}-${SHORT_SHA}"
+        else
+          VERSION="${BASE}-${SHORT_SHA}"
+        fi
+
+        echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"

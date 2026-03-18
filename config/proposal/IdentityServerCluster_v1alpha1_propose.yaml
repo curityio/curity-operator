@@ -1,14 +1,12 @@
 apiVersion: curity.io/v1alpha1
-kind: IdentityServer
+kind: IdentityServerCluster
 metadata:
-  name: curity-idsvr
+  name: cluster-1
   namespace: curity
 spec:
   version: "11.0"
   # image: ""                        # override when using a private mirror
   # imagePullSecret: curity-registry-secret
-
-  replicas: 3                        # ignored when autoscaling is enabled
 
   # Operator create if not exists and dont delete this secret
   adminCredentials:
@@ -25,25 +23,17 @@ spec:
 
   # XML config files mounted at startup. Accepts ConfigMap and Secret refs.
   configuration:
-    - configMapRef:
+    valueFrom:
+      configMapRef:
         name: curity-base-config
         items:
           - key: base-config.xml
             path: base-config.xml
-    - secretRef:
+      secretRef:
         name: curity-datasource-config
         items:
           - key: base-config.xml
             path: base-config.xml
-  # Converts a Kubernetes TLS Secret into a PKCS12 keystore. Works with cert-manager.
-  keystore:
-    - secretRef:
-        name: curity-tls-secret
-        items:
-          - key: tls.key
-            path: tls.key
-          - key: tls.crt
-            path: tls.crt
 
   # Database configuration
   dataSource:
@@ -64,44 +54,26 @@ spec:
             path: password
 
 # ------------------------------------------------------------
-# COMMON WORKLOAD CONFIGURATION
+# COMMON WORKLOAD CONFIGURATION FOR ALL NODES
+# Node can override these configurations.
 # ------------------------------------------------------------
-
----
-# Optional. Deploy to expose the Admin UI or REST configuration API.
-apiVersion: curity.io/v1alpha1
-kind: AdminConsole # IdentityServerUI/Console
-metadata:
-  name: curity-admin
-  namespace: curity
-spec:
-  # IdentityServer this console manages.
-  identityServerRef:
-    name: curity-idsvr
-    namespace: curity
-
-  replicas: 1
-
-
-# ------------------------------------------------------------
-# COMMON WORKLOAD CONFIGURATION
-# ------------------------------------------------------------
-
-CommonWorkloadConfig:
-  service:
-    type: ClusterIP                  # LoadBalancer or NodePort to expose externally
-    port: 8443
-
-  # ENV mapping to override config
-  # Example:
-  # - name: ADMIN_UI_LOGGING_LEVEL
-  #   value: DEBUG
-  # Remove completely and use api config instead.
-  environmentVariables:
-    enablex: true
-    county: 3
 
   logging: {}
+  
+  podAnnotations: {}
+  podLabels: {}
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  probes:
+    liveness: {}
+    readiness: {}
 
   # ------------------------------------------------------------
   # Advanced Configurations
@@ -117,21 +89,6 @@ CommonWorkloadConfig:
   # Minimum pods available during node drains and rolling upgrades.
   podDisruptionBudget:
     minAvailable: 1
-
-  resources:
-    requests:
-      cpu: "1"
-      memory: 1Gi
-    limits:
-      cpu: "2"
-      memory: 2Gi
-
-  probes:
-    liveness: {}
-    readiness: {}
-
-  podAnnotations: {}
-  podLabels: {}
   
   nodeSelector: {}
   tolerations: []

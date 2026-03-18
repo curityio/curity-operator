@@ -1,0 +1,80 @@
+# Optional. Deploy to expose the Admin UI or REST configuration API.
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerNode
+metadata:
+  name: curity-admin
+  namespace: curity
+spec:
+  # Only one admin type node is allowed per cluster.
+  # All other nodes must be runtime type.
+  type: admin
+
+  # Role must be unique per cluster.
+  role: node-role-1
+
+  # Only available for admin type nodes.
+  ui:
+    enabled: true
+    # False means http.
+    secure: true
+
+  # IdentityServerCluster managing this node.
+  identityServerClusterRef:
+    name: cluster-1
+    namespace: curity
+
+  replicas: 1
+
+
+# ------------------------------------------------------------
+# COMMON WORKLOAD CONFIGURATION
+# ------------------------------------------------------------
+  podAnnotations: {}
+  podLabels: {}
+  
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  probes:
+    liveness: {}
+    readiness: {}
+
+  service:
+    type: ClusterIP                  # LoadBalancer or NodePort to expose externally
+    port: 8443
+
+  # ENV mapping to override config
+  # Example:
+  # - name: ADMIN_UI_LOGGING_LEVEL
+  #   value: DEBUG
+  # Remove completely and use api config instead.
+  environmentVariables:
+    enablex: true
+    county: 3
+
+  logging: {}
+
+  # ------------------------------------------------------------
+  # Advanced Configurations
+  # ------------------------------------------------------------
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2                   # keep ≥ 2 for high availability
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+    customMetrics: []
+
+  # Minimum pods available during node drains and rolling upgrades.
+  podDisruptionBudget:
+    minAvailable: 1
+  
+  nodeSelector: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  affinity: {}

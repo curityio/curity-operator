@@ -1,0 +1,196 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServer
+metadata:
+  name: curity-idsvr
+  namespace: curity
+spec:
+  version: "11.0"
+  # image: ""                        # override when using a private mirror
+  imagePullSecret: curity-registry-secret
+
+  runtime:
+    replicas: 2                      # ignored when autoscaling is enabled
+
+    autoscaling:
+      enabled: true
+      minReplicas: 2                 # keep ≥ 2 for high availability
+      maxReplicas: 10
+      targetCPUUtilizationPercentage: 80
+      customMetrics: []
+      # - type: External
+      #   external:
+      #     metric:
+      #       name: idsvr_http_server_request_rate
+      #     target:
+      #       type: Value
+      #       value: 100m
+
+    # Minimum pods available during node drains and rolling upgrades.
+    podDisruptionBudget:
+      minAvailable: 1
+
+    resources:
+      requests:
+        cpu: "1"
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+
+    service:
+      type: ClusterIP                # LoadBalancer or NodePort to expose externally
+      port: 8443
+
+    logging:
+      level: INFO                    # DEBUG | INFO | WARN | ERROR
+      stdout: true
+      logs: [audit, request]         # audit | request | cluster | confsvc | confsvc-internal
+
+    probes:
+      liveness:
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 1
+        failureThreshold: 3
+      readiness:
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 1
+        failureThreshold: 3
+        successThreshold: 3
+
+    podAnnotations: {}
+    podLabels: {}
+    extraVolumes: []
+    extraVolumeMounts: []
+
+  admin:
+    # Secret injected as env vars into both nodes.
+    # Required keys: ADMIN_PASSWORD. Production: add CONFIG_ENCRYPTION_KEY, KEYSTORE_PASSWORD.
+    credentialSecretName: curity-admin-secret
+    # password: changeme             # dev-only; never use in production
+
+    ui:
+      enabled: true
+      http: false                    # set true only in development environments
+
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+    service:
+      type: ClusterIP                # LoadBalancer or NodePort to expose externally
+      port: 6749
+
+    logging:
+      level: INFO
+      stdout: true
+      logs: [audit, confsvc]         # audit | request | cluster | confsvc | confsvc-internal | post-commit-scripts
+
+    probes:
+      liveness:
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 1
+        failureThreshold: 3
+      readiness:
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 1
+        failureThreshold: 3
+        successThreshold: 3
+
+    podAnnotations: {}
+    podLabels: {}
+    extraVolumes: []
+    extraVolumeMounts: []
+    extraEnv: []
+    # - name: ADMIN_UI_LOGGING_LEVEL
+    #   value: DEBUG
+
+  config:
+    # XML config files mounted at startup. Accepts ConfigMap and Secret refs.
+    configuration:
+      - configMapRef:
+          name: curity-base-config
+          items:
+            - key: base-config.xml
+              path: base-config.xml
+      - secretRef:
+          name: curity-datasource-config
+          items:
+            - key: datasource.xml
+              path: datasource.xml
+
+    # Converts a Kubernetes TLS Secret into a PKCS12 keystore. Works with cert-manager.
+    keystore:
+      - secretRef:
+          name: curity-tls-secret
+          items:
+            - key: tls.key
+              path: tls.key
+            - key: tls.crt
+              path: tls.crt
+
+    # Snapshot config to a Secret after every commit. Restore by adding the
+    # backup Secret (<name>-config-backup) to configuration sources above.
+    backup: true
+
+    # Scripts run in the admin node after each commit. Keep under ~15 s.
+    postCommitScripts:
+      - name: notify-commit
+        script: |
+          #!/bin/bash
+          echo "Configuration committed at $(date)"
+
+    # PVC-backed config persistence. Useful for local exploration only.
+    persistentVolume:
+      enabled: false
+      storageClass: standard
+      size: 800Mi
+      accessMode: ReadWriteOnce
+      # existingClaim: my-pvc
+
+    # Set true only when a fully initialised config is loaded via configuration
+    # sources or baked into the image.
+    skipInstall: false
+
+  # Injected into both admin and runtime containers. Takes precedence over all config.
+  extraEnv: []
+  # - name: IDSVR_LOGGING_LEVEL
+  #   value: DEBUG
+  # - name: DB_PASSWORD
+  #   valueFrom:
+  #     secretKeyRef:
+  #       name: curity-db-secret
+  #       key: password
+
+  # Applied to both admin and runtime pods.
+  scheduling:
+    nodeSelector:
+      kubernetes.io/os: linux
+    tolerations: []
+    # - key: dedicated
+    #   operator: Equal
+    #   value: curity
+    #   effect: NoSchedule
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/component: runtime
+    affinity:
+      podAntiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/component: runtime
+              topologyKey: kubernetes.io/hostname

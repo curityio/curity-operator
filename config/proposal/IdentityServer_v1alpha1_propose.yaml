@@ -1,0 +1,139 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServer
+metadata:
+  name: curity-idsvr
+  namespace: curity
+spec:
+  version: "11.0"
+  # image: ""                        # override when using a private mirror
+  # imagePullSecret: curity-registry-secret
+
+  replicas: 3                        # ignored when autoscaling is enabled
+
+  # Operator create if not exists and dont delete this secret
+  adminCredentials:
+    valueFrom:
+      secretKeyRef:
+        name: curity-admin-secret
+        items:
+          - key: ADMIN_PASSWORD
+            path: ADMIN_PASSWORD
+          - key: CONFIG_ENCRYPTION_KEY
+            path: CONFIG_ENCRYPTION_KEY
+          - key: KEYSTORE_PASSWORD
+            path: KEYSTORE_PASSWORD
+
+  # XML config files mounted at startup. Accepts ConfigMap and Secret refs.
+  configuration:
+    - configMapRef:
+        name: curity-base-config
+        items:
+          - key: base-config.xml
+            path: base-config.xml
+    - secretRef:
+        name: curity-datasource-config
+        items:
+          - key: base-config.xml
+            path: base-config.xml
+  # Converts a Kubernetes TLS Secret into a PKCS12 keystore. Works with cert-manager.
+  keystore:
+    - secretRef:
+        name: curity-tls-secret
+        items:
+          - key: tls.key
+            path: tls.key
+          - key: tls.crt
+            path: tls.crt
+
+  # Database configuration
+  dataSource:
+    type: postgres
+    valueFrom:
+      secretKeyRef:
+        name: curity-datasource-secret
+        items:
+          - key: host
+            path: host
+          - key: port
+            path: port
+          - key: database
+            path: database
+          - key: username
+            path: username
+          - key: password
+            path: password
+
+# ------------------------------------------------------------
+# COMMON WORKLOAD CONFIGURATION
+# ------------------------------------------------------------
+
+---
+# Optional. Deploy to expose the Admin UI or REST configuration API.
+apiVersion: curity.io/v1alpha1
+kind: AdminConsole # IdentityServerUI/Console
+metadata:
+  name: curity-admin
+  namespace: curity
+spec:
+  # IdentityServer this console manages.
+  identityServerRef:
+    name: curity-idsvr
+    namespace: curity
+
+  replicas: 1
+
+
+# ------------------------------------------------------------
+# COMMON WORKLOAD CONFIGURATION
+# ------------------------------------------------------------
+
+CommonWorkloadConfig:
+  service:
+    type: ClusterIP                  # LoadBalancer or NodePort to expose externally
+    port: 8443
+
+  # ENV mapping to override config
+  # Example:
+  # - name: ADMIN_UI_LOGGING_LEVEL
+  #   value: DEBUG
+  # Remove completely and use api config instead.
+  environmentVariables:
+    enablex: true
+    county: 3
+
+  logging: {}
+
+  # ------------------------------------------------------------
+  # Advanced Configurations
+  # ------------------------------------------------------------
+
+  autoscaling:
+    enabled: true
+    minReplicas: 2                   # keep ≥ 2 for high availability
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 80
+    customMetrics: []
+
+  # Minimum pods available during node drains and rolling upgrades.
+  podDisruptionBudget:
+    minAvailable: 1
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  probes:
+    liveness: {}
+    readiness: {}
+
+  podAnnotations: {}
+  podLabels: {}
+  
+  nodeSelector: {}
+  tolerations: []
+  topologySpreadConstraints: []
+  affinity: {}

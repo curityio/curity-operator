@@ -413,10 +413,14 @@ var _ = Describe("Test 10: Update replicas", Ordered, func() {
 		utils.WaitForResource(deploy, func() bool { return true }, e2eTimeout, e2eInterval)
 		Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
 
-		node := &v1alpha1.IdentityServerNode{}
-		Expect(k().Get(ctx, client.ObjectKey{Name: "upd-node", Namespace: ns}, node)).To(Succeed())
-		node.Spec.Replicas = ptr.To(int32(3))
-		Expect(k().Update(ctx, node)).To(Succeed())
+		Eventually(func() error {
+			node := &v1alpha1.IdentityServerNode{}
+			if err := k().Get(ctx, client.ObjectKey{Name: "upd-node", Namespace: ns}, node); err != nil {
+				return err
+			}
+			node.Spec.Replicas = ptr.To(int32(3))
+			return k().Update(ctx, node)
+		}, e2eTimeout, e2eInterval).Should(Succeed())
 
 		Eventually(func() int32 {
 			_ = k().Get(ctx, client.ObjectKey{Name: "upd-node", Namespace: ns}, deploy)
@@ -766,7 +770,7 @@ var _ = Describe("Test 21: Idempotency", Ordered, func() {
 		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "idem-node", Namespace: ns}}
 		utils.WaitForResource(deploy, func() bool { return true }, e2eTimeout, e2eInterval)
 
-		rv := deploy.ResourceVersion
+		gen := deploy.Generation
 
 		// Trigger a reconcile by adding a label to the node (retry on conflict)
 		Eventually(func() error {
@@ -784,9 +788,9 @@ var _ = Describe("Test 21: Idempotency", Ordered, func() {
 		// Give reconciler time to process
 		time.Sleep(3 * time.Second)
 
-		// Deployment resourceVersion should not change
+		// Deployment generation should not change (only increments on spec changes)
 		Expect(k().Get(ctx, client.ObjectKey{Name: "idem-node", Namespace: ns}, deploy)).To(Succeed())
-		Expect(deploy.ResourceVersion).To(Equal(rv), "Deployment should not be updated when spec unchanged")
+		Expect(deploy.Generation).To(Equal(gen), "Deployment should not be updated when spec unchanged")
 	})
 })
 

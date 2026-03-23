@@ -1,0 +1,14 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerNode
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  type: admin
+  role: admin-ui-role
+  identityServerClusterRef:
+    name: {{ .clusterName }}
+  replicas: 1
+  ui:
+    enabled: {{ .uiEnabled }}
+    secure: {{ .uiSecure }}

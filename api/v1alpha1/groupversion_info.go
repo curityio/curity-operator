@@ -17,8 +17,10 @@ var (
 
 func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(GroupVersion,
-		&IdentityServer{},
-		&IdentityServerList{},
+		&IdentityServerCluster{},
+		&IdentityServerClusterList{},
+		&IdentityServerNode{},
+		&IdentityServerNodeList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

@@ -21,6 +21,8 @@ var excludeFields = []string{
 	"$.metadata.ownerReferences",
 	"$.spec.selector",
 	"$.spec.template.metadata",
+	"$.spec.clusterIP",
+	"$.spec.clusterIPs",
 	"$.status.conditions[*].lastTransitionTime",
 	"$.status.conditions[*].lastProbeTime",
 	"$.status.conditions[*].lastUpdateTime",

@@ -1,0 +1,142 @@
+package v1alpha1
+
+import (
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// IdentityServerNodeSpec defines the desired state of IdentityServerNode.
+// Each node creates a Deployment and Service for a Curity Identity Server instance.
+// +kubebuilder:object:generate=true
+type IdentityServerNodeSpec struct {
+	// Type determines whether this is an admin or runtime node.
+	// Only one admin node is allowed per cluster.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Enum=admin;runtime
+	Type NodeType `json:"type"`
+
+	// Role is a unique identifier for this node within the cluster.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Role string `json:"role"`
+
+	// UI configures the admin UI. Only applicable for admin-type nodes.
+	UI *UISpec `json:"ui,omitempty"`
+
+	// IdentityServerClusterRef references the IdentityServerCluster managing this node.
+	// +kubebuilder:validation:Required
+	IdentityServerClusterRef ObjectReference `json:"identityServerClusterRef"`
+
+	// Replicas is the number of pods (Deployment replicas) for this node.
+	// For admin-type nodes, this is always forced to 1 regardless of the value.
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=0
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// PodAnnotations are annotations applied to pods.
+	// Merged with cluster-level annotations; node values win on conflict.
+	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
+
+	// PodLabels are labels applied to pods.
+	// Merged with cluster-level labels; node values win on conflict.
+	PodLabels map[string]string `json:"podLabels,omitempty"`
+
+	// Resources defines CPU and memory requests/limits for pods.
+	// Overrides cluster-level resources when set.
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Probes configures liveness and readiness probes.
+	// Overrides cluster-level probes when set.
+	Probes *ProbeSpec `json:"probes,omitempty"`
+
+	// Service configures the Kubernetes Service for this node.
+	Service *ServiceSpec `json:"service,omitempty"`
+
+	// EnvironmentVariables are additional environment variables passed to the
+	// Curity container. Uses standard Kubernetes env var format with support
+	// for valueFrom (secretKeyRef, configMapKeyRef).
+	EnvironmentVariables []corev1.EnvVar `json:"environmentVariables,omitempty"`
+
+	// Logging configures logging behavior.
+	Logging *LoggingSpec `json:"logging,omitempty"`
+
+	// Autoscaling configures horizontal pod autoscaling.
+	Autoscaling *AutoscalingSpec `json:"autoscaling,omitempty"`
+
+	// PodDisruptionBudget configures the minimum available pods during disruptions.
+	PodDisruptionBudget *PDBSpec `json:"podDisruptionBudget,omitempty"`
+
+	// NodeSelector constrains pods to nodes with matching labels.
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations allow pods to schedule onto nodes with matching taints.
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// TopologySpreadConstraints describe how pods should be spread across topology domains.
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// Affinity defines scheduling constraints for pods.
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+}
+
+// IdentityServerNodeStatus defines the observed state of IdentityServerNode.
+// Fields mirror Deployment status for ArgoCD health assessment.
+// +kubebuilder:object:generate=true
+type IdentityServerNodeStatus struct {
+	// Conditions represent the latest available observations of the node's state.
+	// Condition types: Ready, Available, Progressing, Degraded.
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// ObservedGeneration is the most recent generation observed by the controller.
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Replicas is the desired number of pod replicas.
+	Replicas int32 `json:"replicas,omitempty"`
+
+	// UpdatedReplicas is the number of pods with the current spec applied.
+	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`
+
+	// ReadyReplicas is the number of pods that have passed the readiness probe.
+	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
+
+	// AvailableReplicas is the number of pods available to serve traffic.
+	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
+
+	// UnavailableReplicas is the number of pods that are not yet available.
+	UnavailableReplicas int32 `json:"unavailableReplicas,omitempty"`
+
+	// DeploymentName is the name of the Deployment created by this node.
+	DeploymentName string `json:"deploymentName,omitempty"`
+
+	// ServiceName is the name of the Service created by this node.
+	ServiceName string `json:"serviceName,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=isn
+// +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".spec.type"
+// +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".spec.role"
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status"
+// +kubebuilder:printcolumn:name="Replicas",type="integer",JSONPath=".status.replicas"
+// +kubebuilder:printcolumn:name="Available",type="integer",JSONPath=".status.availableReplicas"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+
+// IdentityServerNode is the Schema for the identityservernodes API.
+// It defines a single Curity Identity Server node deployment.
+type IdentityServerNode struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec   IdentityServerNodeSpec   `json:"spec,omitempty"`
+	Status IdentityServerNodeStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// IdentityServerNodeList contains a list of IdentityServerNode.
+type IdentityServerNodeList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []IdentityServerNode `json:"items"`
+}

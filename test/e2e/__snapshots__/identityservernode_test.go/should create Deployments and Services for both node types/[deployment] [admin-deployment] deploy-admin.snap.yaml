@@ -1,0 +1,129 @@
+
+[Test 1: Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
+metadata:
+  name: deploy-admin
+  namespace: e2e-deploy
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    app.kubernetes.io/component: admin
+    app.kubernetes.io/instance: deploy-admin
+    app.kubernetes.io/managed-by: curity-operator
+    app.kubernetes.io/name: curity-identity-server
+    app.kubernetes.io/version: "11.0"
+    curity.io/cluster: deploy-cluster
+    curity.io/role: admin-role
+  annotations: <Any value>
+  ownerReferences: <Any value>
+  managedFields: <Any value>
+spec:
+  replicas: 1
+  selector: <Any value>
+  template:
+    metadata: <Any value>
+    spec:
+      containers:
+        - name: curity
+          image: curity.azurecr.io/curity/idsvr:11.0
+          args:
+            - /opt/idsvr/bin/idsvr
+            - -s
+            - admin-role
+            - -N
+            - deploy-admin
+            - --admin
+          ports:
+            - name: health-check
+              containerPort: 4465
+              protocol: TCP
+            - name: metrics
+              containerPort: 4466
+              protocol: TCP
+            - name: config
+              containerPort: 6789
+              protocol: TCP
+            - name: ds-port
+              containerPort: 6790
+              protocol: TCP
+            - name: admin-ui
+              containerPort: 6749
+              protocol: TCP
+          env:
+            - name: STATUS_CMD_PORT
+              value: "4465"
+            - name: LOGGING_LEVEL
+              value: INFO
+            - name: ADMIN_UI_HTTP_MODE
+              value: "false"
+          livenessProbe:
+            httpGet:
+              path: /
+              port:
+                type: 0
+                intval: 4465
+                strval: ""
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port:
+                type: 0
+                intval: 4465
+                strval: ""
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 3
+            failureThreshold: 3
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10000
+        fsGroup: 10000
+      schedulerName: default-scheduler
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable:
+        type: 1
+        intval: 0
+        strval: 25%
+      maxSurge:
+        type: 1
+        intval: 0
+        strval: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+status:
+  observedGeneration: 1
+  replicas: 1
+  updatedReplicas: 1
+  unavailableReplicas: 1
+  conditions:
+    - type: Available
+      status: "False"
+      lastUpdateTime: <Any value>
+      lastTransitionTime: <Any value>
+      reason: MinimumReplicasUnavailable
+      message: Deployment does not have minimum availability.
+    - type: Progressing
+      status: "True"
+      lastUpdateTime: <Any value>
+      lastTransitionTime: <Any value>
+      reason: ReplicaSetUpdated
+      message: ReplicaSet "deploy-admin-cd7cbd648" is progressing.
+
+---

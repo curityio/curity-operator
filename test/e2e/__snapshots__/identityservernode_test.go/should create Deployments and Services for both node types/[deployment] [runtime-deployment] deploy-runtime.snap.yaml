@@ -97,11 +97,6 @@ spec:
         strval: 25%
   revisionHistoryLimit: 10
   progressDeadlineSeconds: 600
-status:
-  observedGeneration: 1
-  replicas: <Any value>
-  updatedReplicas: <Any value>
-  unavailableReplicas: <Any value>
-  conditions: <Any value>
+status: <Any value>
 
 ---

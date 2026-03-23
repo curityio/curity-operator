@@ -23,12 +23,7 @@ var excludeFields = []string{
 	"$.spec.template.metadata",
 	"$.spec.clusterIP",
 	"$.spec.clusterIPs",
-	"$.status.replicas",
-	"$.status.updatedReplicas",
-	"$.status.readyReplicas",
-	"$.status.availableReplicas",
-	"$.status.unavailableReplicas",
-	"$.status.conditions",
+	"$.status",
 }
 
 var excludeJobFields = append(excludeFields, []string{

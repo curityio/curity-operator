@@ -26,6 +26,7 @@ var excludeFields = []string{
 	"$.status.conditions[*].lastTransitionTime",
 	"$.status.conditions[*].lastProbeTime",
 	"$.status.conditions[*].lastUpdateTime",
+	"$.status.conditions[*].message",
 }
 
 var excludeJobFields = append(excludeFields, []string{

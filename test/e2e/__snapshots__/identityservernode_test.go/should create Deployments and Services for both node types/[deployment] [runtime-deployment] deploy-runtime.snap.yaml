@@ -108,12 +108,12 @@ status:
       lastUpdateTime: <Any value>
       lastTransitionTime: <Any value>
       reason: MinimumReplicasUnavailable
-      message: Deployment does not have minimum availability.
+      message: <Any value>
     - type: Progressing
       status: "True"
       lastUpdateTime: <Any value>
       lastTransitionTime: <Any value>
       reason: ReplicaSetUpdated
-      message: ReplicaSet "deploy-runtime-8699977987" is progressing.
+      message: <Any value>
 
 ---

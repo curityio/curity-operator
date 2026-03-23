@@ -60,7 +60,11 @@ jobs:
           kubectl config use-context aks
 
       - name: Verify cluster connectivity
-        run: kubectl cluster-info
+        run: |
+          kubectl cluster-info
+          echo "=== Node architectures ==="
+          kubectl get nodes -o wide
+          kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.architecture}{"\n"}{end}'
 
       - name: Create operator namespace
         run: kubectl get namespace curity-operator || kubectl create namespace curity-operator

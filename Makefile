@@ -119,9 +119,11 @@ test-e2e-update-snapshots: generate deploy-kind install ## Run e2e tests and upd
 
 ##@ Docker
 
+TARGET_PLATFORM ?= linux/amd64
+
 .PHONY: docker-build
 docker-build: ## Build docker image.
-	$(CONTAINER_TOOL) build --build-arg VERSION=$(VERSION) -t $(IMG) .
+	$(CONTAINER_TOOL) build --platform $(TARGET_PLATFORM) --build-arg VERSION=$(VERSION) -t $(IMG) .
 
 .PHONY: docker-push
 docker-push: ## Push docker image.

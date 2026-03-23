@@ -768,14 +768,18 @@ var _ = Describe("Test 21: Idempotency", Ordered, func() {
 
 		rv := deploy.ResourceVersion
 
-		// Trigger a reconcile by adding a label to the node
-		node := &v1alpha1.IdentityServerNode{}
-		Expect(k().Get(ctx, client.ObjectKey{Name: "idem-node", Namespace: ns}, node)).To(Succeed())
-		if node.Labels == nil {
-			node.Labels = map[string]string{}
-		}
-		node.Labels["trigger"] = "reconcile"
-		Expect(k().Update(ctx, node)).To(Succeed())
+		// Trigger a reconcile by adding a label to the node (retry on conflict)
+		Eventually(func() error {
+			node := &v1alpha1.IdentityServerNode{}
+			if err := k().Get(ctx, client.ObjectKey{Name: "idem-node", Namespace: ns}, node); err != nil {
+				return err
+			}
+			if node.Labels == nil {
+				node.Labels = map[string]string{}
+			}
+			node.Labels["trigger"] = "reconcile"
+			return k().Update(ctx, node)
+		}, e2eTimeout, e2eInterval).Should(Succeed())
 
 		// Give reconciler time to process
 		time.Sleep(3 * time.Second)

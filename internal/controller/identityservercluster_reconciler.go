@@ -79,6 +79,9 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 
 			controllerutil.RemoveFinalizer(&cluster, v1alpha1.ClusterFinalizer)
 			if err := r.Update(ctx, &cluster); err != nil {
+				if apierrors.IsConflict(err) {
+					return ctrl.Result{Requeue: true}, nil
+				}
 				return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
 			}
 			log.Info("cluster finalizer removed, deletion proceeding")
@@ -89,6 +92,9 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 	if !controllerutil.ContainsFinalizer(&cluster, v1alpha1.ClusterFinalizer) {
 		controllerutil.AddFinalizer(&cluster, v1alpha1.ClusterFinalizer)
 		if err := r.Update(ctx, &cluster); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil

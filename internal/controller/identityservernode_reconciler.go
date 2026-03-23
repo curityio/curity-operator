@@ -55,29 +55,35 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			r.Recorder.Event(&node, corev1.EventTypeNormal, "Deleting", "Node is being deleted")
 			controllerutil.RemoveFinalizer(&node, v1alpha1.NodeFinalizer)
 			if err := r.Update(ctx, &node); err != nil {
+				if apierrors.IsConflict(err) {
+					return ctrl.Result{Requeue: true}, nil
+				}
 				return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
 			}
 		}
 		return ctrl.Result{}, nil
 	}
 
+	// 3. Ensure finalizer and cluster label are set (combined to reduce API round trips)
+	clusterRef := node.Spec.IdentityServerClusterRef
+	needsUpdate := false
 	if !controllerutil.ContainsFinalizer(&node, v1alpha1.NodeFinalizer) {
 		controllerutil.AddFinalizer(&node, v1alpha1.NodeFinalizer)
-		if err := r.Update(ctx, &node); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
-		}
-		return ctrl.Result{Requeue: true}, nil
+		needsUpdate = true
 	}
-
-	// 3. Ensure the cluster label is set for server-side filtering
-	clusterRef := node.Spec.IdentityServerClusterRef
 	if node.Labels == nil || node.Labels["curity.io/cluster"] != clusterRef.Name {
 		if node.Labels == nil {
 			node.Labels = make(map[string]string)
 		}
 		node.Labels["curity.io/cluster"] = clusterRef.Name
+		needsUpdate = true
+	}
+	if needsUpdate {
 		if err := r.Update(ctx, &node); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to set cluster label: %w", err)
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("failed to update node metadata: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}

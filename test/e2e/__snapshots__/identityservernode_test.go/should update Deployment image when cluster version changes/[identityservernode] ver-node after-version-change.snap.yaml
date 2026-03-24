@@ -1,0 +1,51 @@
+
+[Test 25: Cluster version change updates nodes should update Deployment image when cluster version changes - 1]
+metadata:
+  name: ver-node
+  namespace: e2e-version
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: ver-cluster
+  annotations: <Any value>
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: runtime-role
+  identityServerClusterRef:
+    name: ver-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ReplicasNotReady
+      message: Not all replicas are ready
+    - type: Available
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NoReplicaAvailable
+      message: No replicas are available
+    - type: Progressing
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ReplicaUnavailable
+      message: 2 replica(s) unavailable
+    - type: Degraded
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: Healthy
+      message: All replicas are healthy
+  observedGeneration: <Any value>
+  replicas: 1
+  updatedReplicas: 1
+  unavailableReplicas: 2
+  deploymentName: ver-node
+  serviceName: ver-node
+
+---

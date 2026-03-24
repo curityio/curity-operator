@@ -1,0 +1,42 @@
+
+[Test 13: Admin replicas forced to 1 should force admin Deployment to 1 replica - 1]
+metadata:
+  name: rep-cluster
+  namespace: e2e-admin-rep
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  annotations: <Any value>
+  finalizers:
+    - curity.io/cluster-protection
+  managedFields: <Any value>
+spec:
+  version: "11.0"
+status:
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NodesNotReady
+      message: Not all nodes are ready
+    - type: Available
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NodesUnavailable
+      message: Not all nodes have minimum availability
+    - type: Progressing
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NodesProgressing
+      message: Some nodes are not yet ready
+    - type: Degraded
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: Healthy
+      message: Cluster is healthy
+  observedGeneration: <Any value>
+  nodeCount: 1
+  version: "11.0"
+
+---

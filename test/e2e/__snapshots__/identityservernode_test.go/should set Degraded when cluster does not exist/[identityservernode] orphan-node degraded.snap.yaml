@@ -1,0 +1,35 @@
+
+[Test 11: Orphan node should set Degraded when cluster does not exist - 1]
+metadata:
+  name: orphan-node
+  namespace: e2e-orphan
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: does-not-exist
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: orphan-role
+  identityServerClusterRef:
+    name: does-not-exist
+  replicas: 1
+status:
+  conditions:
+    - type: Degraded
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ClusterNotFound
+      message: Referenced cluster "does-not-exist" not found
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ClusterNotFound
+      message: Referenced cluster not found
+  observedGeneration: <Any value>
+
+---

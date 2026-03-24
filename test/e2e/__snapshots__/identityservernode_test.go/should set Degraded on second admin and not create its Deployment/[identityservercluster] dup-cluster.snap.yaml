@@ -1,0 +1,42 @@
+
+[Test 7: Duplicate admin node rejection should set Degraded on second admin and not create its Deployment - 1]
+metadata:
+  name: dup-cluster
+  namespace: e2e-dup-admin
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  annotations: <Any value>
+  finalizers:
+    - curity.io/cluster-protection
+  managedFields: <Any value>
+spec:
+  version: "11.0"
+status:
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NodesNotReady
+      message: Not all nodes are ready
+    - type: Available
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NodesUnavailable
+      message: Not all nodes have minimum availability
+    - type: Progressing
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NodesProgressing
+      message: Some nodes are not yet ready
+    - type: Degraded
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: MultipleAdminNodes
+      message: More than one admin node exists for this cluster
+  observedGeneration: <Any value>
+  nodeCount: 2
+  version: "11.0"
+
+---

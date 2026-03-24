@@ -1,0 +1,50 @@
+
+[Test 28: Logging sidecars should create sidecar containers when stdout logging enabled - 1]
+metadata:
+  name: log-node
+  namespace: e2e-logging
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: log-cluster
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: log-role
+  identityServerClusterRef:
+    name: log-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ReplicasNotReady
+      message: Not all replicas are ready
+    - type: Available
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NoReplicaAvailable
+      message: No replicas are available
+    - type: Progressing
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ReplicaUnavailable
+      message: 1 replica(s) unavailable
+    - type: Degraded
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: Healthy
+      message: All replicas are healthy
+  observedGeneration: <Any value>
+  replicas: 1
+  updatedReplicas: 1
+  unavailableReplicas: 1
+  deploymentName: log-node
+  serviceName: log-node
+
+---

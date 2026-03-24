@@ -1,0 +1,52 @@
+
+[Test 23: Secret survives cluster deletion should keep secret after cluster is deleted - 1]
+metadata:
+  name: surv-cluster
+  namespace: e2e-secret-survive
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  annotations: <Any value>
+  finalizers:
+    - curity.io/cluster-protection
+  managedFields: <Any value>
+spec:
+  version: "11.0"
+  adminCredentials:
+    valueFrom:
+      secretKeyRef:
+        name: surv-secret
+        items:
+          - key: ADMIN_PASSWORD
+            path: PASSWORD
+          - key: CONFIG_ENCRYPTION_KEY
+            path: CONFIG_ENCRYPTION_KEY
+          - key: KEYSTORE_PASSWORD
+            path: KEYSTORE_PASSWORD
+status:
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NoNodes
+      message: No nodes reference this cluster
+    - type: Available
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NoNodes
+      message: No nodes reference this cluster
+    - type: Progressing
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: WaitingForNodes
+      message: Waiting for nodes to be created
+    - type: Degraded
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NoNodes
+      message: No nodes reference this cluster
+  observedGeneration: <Any value>
+  version: "11.0"
+
+---

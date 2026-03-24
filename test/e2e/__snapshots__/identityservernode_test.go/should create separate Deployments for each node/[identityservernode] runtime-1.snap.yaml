@@ -1,0 +1,50 @@
+
+[Test 12: Multiple runtime nodes should create separate Deployments for each node - 1]
+metadata:
+  name: runtime-1
+  namespace: e2e-multi
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: multi-cluster
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: role-1
+  identityServerClusterRef:
+    name: multi-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ReplicasNotReady
+      message: Not all replicas are ready
+    - type: Available
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NoReplicaAvailable
+      message: No replicas are available
+    - type: Progressing
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ReplicaUnavailable
+      message: 1 replica(s) unavailable
+    - type: Degraded
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: Healthy
+      message: All replicas are healthy
+  observedGeneration: <Any value>
+  replicas: 1
+  updatedReplicas: 1
+  unavailableReplicas: 1
+  deploymentName: runtime-1
+  serviceName: runtime-1
+
+---

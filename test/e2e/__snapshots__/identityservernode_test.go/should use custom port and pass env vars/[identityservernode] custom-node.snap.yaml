@@ -1,0 +1,57 @@
+
+[Test 9: Custom service port and env vars should use custom port and pass env vars - 1]
+metadata:
+  name: custom-node
+  namespace: e2e-custom
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: custom-cluster
+  annotations: <Any value>
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: custom-role
+  identityServerClusterRef:
+    name: custom-cluster
+  replicas: 2
+  service:
+    type: ClusterIP
+    port: 9443
+  environmentVariables:
+    - name: CUSTOM_ENV
+      value: hello-e2e
+status:
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ReplicasNotReady
+      message: Not all replicas are ready
+    - type: Available
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NoReplicaAvailable
+      message: No replicas are available
+    - type: Progressing
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ReplicaUnavailable
+      message: 2 replica(s) unavailable
+    - type: Degraded
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: Healthy
+      message: All replicas are healthy
+  observedGeneration: <Any value>
+  replicas: 2
+  updatedReplicas: 2
+  unavailableReplicas: 2
+  deploymentName: custom-node
+  serviceName: custom-node
+
+---

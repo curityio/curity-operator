@@ -111,7 +111,7 @@ test-e2e: generate deploy-kind install ## Build, load into Kind, install CRDs, r
 
 .PHONY: test-e2e-remote
 test-e2e-remote: generate deploy-remote install ## Build, push to registry, install CRDs, run e2e tests.
-	go test -v -timeout 600s ./test/e2e/...
+	E2E_REMOTE=true go test -v -timeout 600s ./test/e2e/...
 
 .PHONY: test-e2e-update-snapshots
 test-e2e-update-snapshots: generate deploy-kind install ## Run e2e tests and update snapshots.

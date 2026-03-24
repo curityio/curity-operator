@@ -1,0 +1,42 @@
+
+[Test 8: Admin UI port configuration should expose admin-ui port and set ADMIN_UI_HTTP_MODE - 1]
+metadata:
+  name: ui-cluster
+  namespace: e2e-admin-ui
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  annotations: <Any value>
+  finalizers:
+    - curity.io/cluster-protection
+  managedFields: <Any value>
+spec:
+  version: "11.0"
+status:
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NodesNotReady
+      message: Not all nodes are ready
+    - type: Available
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NodesUnavailable
+      message: Not all nodes have minimum availability
+    - type: Progressing
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: NodesProgressing
+      message: Some nodes are not yet ready
+    - type: Degraded
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: Healthy
+      message: Cluster is healthy
+  observedGeneration: <Any value>
+  nodeCount: 1
+  version: "11.0"
+
+---

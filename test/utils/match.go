@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 
+	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 	"github.com/gkampitakis/go-snaps/match"
 	"github.com/gkampitakis/go-snaps/snaps"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/ginkgo/v2/dsl/core"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var excludeFields = []string{
@@ -30,8 +32,21 @@ var excludeJobFields = append(excludeFields, []string{
 	"$.metadata.name",
 }...)
 
+var excludeCRDFields = []string{
+	"$.metadata.uid",
+	"$.metadata.resourceVersion",
+	"$.metadata.generation",
+	"$.metadata.creationTimestamp",
+	"$.metadata.annotations",
+	"$.metadata.managedFields",
+	"$.metadata.ownerReferences",
+	"$.status.observedGeneration",
+}
+
 var excludeFieldMap = map[string][]string{
-	"job": excludeJobFields,
+	"job":                   excludeJobFields,
+	"identityservercluster": excludeCRDFields,
+	"identityservernode":    excludeCRDFields,
 }
 
 // MatchYAMLResource takes a snapshot of the resource and compares it.
@@ -59,6 +74,37 @@ func MatchYAMLResource(resource interface{}, snapshotName ...string) {
 		resource,
 		match.Any(exclude...).ErrOnMissingPath(false),
 	)
+}
+
+// MatchCRDResource takes a snapshot of a CRD resource with status included.
+// It deep-copies the resource and zeroes volatile condition fields
+// (LastTransitionTime, ObservedGeneration) before snapshotting.
+func MatchCRDResource(resource interface{}, snapshotName ...string) {
+	var sanitized interface{}
+
+	switch r := resource.(type) {
+	case *v1alpha1.IdentityServerCluster:
+		c := r.DeepCopy()
+		sanitizeConditions(c.Status.Conditions)
+		sanitized = c
+	case *v1alpha1.IdentityServerNode:
+		c := r.DeepCopy()
+		sanitizeConditions(c.Status.Conditions)
+		sanitized = c
+	default:
+		sanitized = resource
+	}
+
+	MatchYAMLResource(sanitized, snapshotName...)
+}
+
+// sanitizeConditions zeroes volatile fields on each condition
+// so snapshots remain deterministic across test runs.
+func sanitizeConditions(conditions []metav1.Condition) {
+	for i := range conditions {
+		conditions[i].LastTransitionTime = metav1.Time{}
+		conditions[i].ObservedGeneration = 0
+	}
 }
 
 // MatchResource takes a snapshot with an explicit kind parameter.

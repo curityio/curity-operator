@@ -320,11 +320,13 @@ func TestBuildDeployment_ConfigurationVolumes(t *testing.T) {
 
 	deploy := buildDeployment(cluster, node)
 
-	if len(deploy.Spec.Template.Spec.Volumes) != 2 {
-		t.Fatalf("expected 2 volumes, got %d", len(deploy.Spec.Template.Spec.Volumes))
+	// 1 cluster-config + 1 configmap + 1 secret = 3 volumes
+	if len(deploy.Spec.Template.Spec.Volumes) != 3 {
+		t.Fatalf("expected 3 volumes (cluster-config + configmap + secret), got %d", len(deploy.Spec.Template.Spec.Volumes))
 	}
-	if len(deploy.Spec.Template.Spec.Containers[0].VolumeMounts) != 2 {
-		t.Fatalf("expected 2 volume mounts, got %d", len(deploy.Spec.Template.Spec.Containers[0].VolumeMounts))
+	// 1 cluster.xml + 1 base.xml + 1 ds.xml = 3 mounts
+	if len(deploy.Spec.Template.Spec.Containers[0].VolumeMounts) != 3 {
+		t.Fatalf("expected 3 volume mounts, got %d", len(deploy.Spec.Template.Spec.Containers[0].VolumeMounts))
 	}
 }
 
@@ -662,6 +664,299 @@ func TestBuildDeployment_AdminCredentialsNoSpecialMapping(t *testing.T) {
 
 	// Should use Path as-is, not rename to PASSWORD
 	assertEnvVarFromSecret(t, envVars, "MY_CUSTOM_NAME", "admin-secret", "ADMIN_PASSWORD")
+}
+
+// --- Cluster Config Builder Tests ---
+
+func TestClusterConfigSecretName(t *testing.T) {
+	name := clusterConfigSecretName("my-cluster")
+	if name != "my-cluster-cluster-config" {
+		t.Errorf("expected 'my-cluster-cluster-config', got %q", name)
+	}
+}
+
+func TestFindAdminNodeName_NoAdmin(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		{Spec: v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeRuntime}},
+	}
+	if got := findAdminNodeName(nodes); got != "" {
+		t.Errorf("expected empty, got %q", got)
+	}
+}
+
+func TestFindAdminNodeName_WithAdmin(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		{ObjectMeta: metav1.ObjectMeta{Name: "rt-1"}, Spec: v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeRuntime}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "admin-1"}, Spec: v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeAdmin}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "rt-2"}, Spec: v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeRuntime}},
+	}
+	if got := findAdminNodeName(nodes); got != "admin-1" {
+		t.Errorf("expected 'admin-1', got %q", got)
+	}
+}
+
+func TestFindAdminNodeName_Empty(t *testing.T) {
+	if got := findAdminNodeName(nil); got != "" {
+		t.Errorf("expected empty, got %q", got)
+	}
+}
+
+func TestIsClusterConfigReady_Placeholder(t *testing.T) {
+	secret := &corev1.Secret{Data: map[string][]byte{"cluster.xml": []byte("placeholder")}}
+	if isClusterConfigReady(secret) {
+		t.Error("placeholder should not be ready")
+	}
+}
+
+func TestIsClusterConfigReady_RealData(t *testing.T) {
+	secret := &corev1.Secret{Data: map[string][]byte{"cluster.xml": []byte("<config>real xml</config>")}}
+	if !isClusterConfigReady(secret) {
+		t.Error("real data should be ready")
+	}
+}
+
+func TestIsClusterConfigReady_MissingKey(t *testing.T) {
+	secret := &corev1.Secret{Data: map[string][]byte{"other-key": []byte("data")}}
+	if isClusterConfigReady(secret) {
+		t.Error("missing key should not be ready")
+	}
+}
+
+func TestIsClusterConfigReady_EmptyData(t *testing.T) {
+	secret := &corev1.Secret{Data: map[string][]byte{"cluster.xml": {}}}
+	if isClusterConfigReady(secret) {
+		t.Error("empty data should not be ready")
+	}
+}
+
+func TestBuildClusterConfigSecret_Placeholder(t *testing.T) {
+	cluster := newTestCluster()
+	secret := buildClusterConfigSecret(cluster, nil, "admin-1", "abc123")
+
+	if secret.Name != "cluster-1-cluster-config" {
+		t.Errorf("expected name 'cluster-1-cluster-config', got %q", secret.Name)
+	}
+	if secret.Namespace != "test-ns" {
+		t.Errorf("expected namespace 'test-ns', got %q", secret.Namespace)
+	}
+	if string(secret.Data["cluster.xml"]) != "placeholder" {
+		t.Errorf("expected placeholder data, got %q", secret.Data["cluster.xml"])
+	}
+	if secret.Labels["curity.io/cluster"] != "cluster-1" {
+		t.Errorf("expected cluster label 'cluster-1', got %q", secret.Labels["curity.io/cluster"])
+	}
+	if secret.Labels["curity.io/component"] != "cluster-config" {
+		t.Errorf("expected component label 'cluster-config'")
+	}
+	if secret.Annotations["curity.io/admin-node"] != "admin-1" {
+		t.Errorf("expected admin-node annotation 'admin-1'")
+	}
+	if secret.Annotations["curity.io/encryption-key-hash"] != "abc123" {
+		t.Errorf("expected encryption-key-hash annotation 'abc123'")
+	}
+	if secret.Annotations["argocd.argoproj.io/compare-options"] != "IgnoreExtraneous" {
+		t.Errorf("expected ArgoCD IgnoreExtraneous annotation")
+	}
+}
+
+func TestBuildClusterConfigSecret_WithData(t *testing.T) {
+	cluster := newTestCluster()
+	xmlData := []byte("<config>test</config>")
+	secret := buildClusterConfigSecret(cluster, xmlData, "admin-1", "")
+
+	if string(secret.Data["cluster.xml"]) != "<config>test</config>" {
+		t.Errorf("expected real data, got %q", secret.Data["cluster.xml"])
+	}
+}
+
+func TestBuildClusterConfigJob_BasicSpec(t *testing.T) {
+	cluster := newTestCluster()
+	job := buildClusterConfigJob(cluster, "admin-1")
+
+	if job.Name != "cluster-1-cluster-config-job" {
+		t.Errorf("expected job name 'cluster-1-cluster-config-job', got %q", job.Name)
+	}
+	if job.Namespace != "test-ns" {
+		t.Errorf("expected namespace 'test-ns', got %q", job.Namespace)
+	}
+	if *job.Spec.BackoffLimit != jobBackoffLimit {
+		t.Errorf("expected backoff limit %d, got %d", jobBackoffLimit, *job.Spec.BackoffLimit)
+	}
+
+	// Container spec
+	container := job.Spec.Template.Spec.Containers[0]
+	if container.Name != "genclust" {
+		t.Errorf("expected container name 'genclust', got %q", container.Name)
+	}
+	if container.Image != "curity.azurecr.io/curity/idsvr:11.0" {
+		t.Errorf("expected default image, got %q", container.Image)
+	}
+
+	// Env vars
+	assertEnvVar(t, container.Env, "CONFIG_SERVICE_HOST", "admin-1")
+	assertEnvVar(t, container.Env, "CONFIG_SERVICE_PORT", "6789")
+
+	// Security context
+	sc := job.Spec.Template.Spec.SecurityContext
+	if *sc.RunAsUser != 10001 {
+		t.Errorf("expected runAsUser 10001, got %d", *sc.RunAsUser)
+	}
+
+	// No SA token
+	if *job.Spec.Template.Spec.AutomountServiceAccountToken != false {
+		t.Error("expected automountServiceAccountToken=false")
+	}
+
+	// Restart policy
+	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("expected RestartPolicyNever")
+	}
+}
+
+func TestBuildClusterConfigJob_ImagePullSecret(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.ImagePullSecret = "my-registry-secret"
+	job := buildClusterConfigJob(cluster, "admin-1")
+
+	if len(job.Spec.Template.Spec.ImagePullSecrets) != 1 {
+		t.Fatalf("expected 1 imagePullSecret, got %d", len(job.Spec.Template.Spec.ImagePullSecrets))
+	}
+	if job.Spec.Template.Spec.ImagePullSecrets[0].Name != "my-registry-secret" {
+		t.Errorf("expected 'my-registry-secret', got %q", job.Spec.Template.Spec.ImagePullSecrets[0].Name)
+	}
+}
+
+func TestBuildClusterConfigJob_NoImagePullSecret(t *testing.T) {
+	cluster := newTestCluster()
+	job := buildClusterConfigJob(cluster, "admin-1")
+
+	if len(job.Spec.Template.Spec.ImagePullSecrets) != 0 {
+		t.Errorf("expected 0 imagePullSecrets, got %d", len(job.Spec.Template.Spec.ImagePullSecrets))
+	}
+}
+
+func TestBuildClusterConfigJob_EncryptionKey(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name:  "admin-secret",
+				Items: []v1alpha1.KeyToPath{{Key: "ADMIN_PASSWORD", Path: "PASSWORD"}},
+			},
+		},
+	}
+	job := buildClusterConfigJob(cluster, "admin-1")
+
+	container := job.Spec.Template.Spec.Containers[0]
+	found := false
+	for _, env := range container.Env {
+		if env.Name == "CONFIG_ENCRYPTION_KEY" {
+			found = true
+			if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+				t.Error("expected secretKeyRef for CONFIG_ENCRYPTION_KEY")
+			} else if env.ValueFrom.SecretKeyRef.Name != "admin-secret" {
+				t.Errorf("expected secret name 'admin-secret', got %q", env.ValueFrom.SecretKeyRef.Name)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected CONFIG_ENCRYPTION_KEY env var")
+	}
+}
+
+func TestBuildClusterConfigJob_SchedulingConstraints(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.NodeSelector = map[string]string{"disk": "ssd"}
+	cluster.Spec.Tolerations = []corev1.Toleration{
+		{Key: "special", Operator: corev1.TolerationOpExists},
+	}
+
+	job := buildClusterConfigJob(cluster, "admin-1")
+
+	if job.Spec.Template.Spec.NodeSelector["disk"] != "ssd" {
+		t.Error("expected nodeSelector to be inherited")
+	}
+	if len(job.Spec.Template.Spec.Tolerations) != 1 {
+		t.Error("expected tolerations to be inherited")
+	}
+}
+
+func TestBuildClusterConfigJob_CustomImage(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Image = "myregistry.io/curity:custom"
+	job := buildClusterConfigJob(cluster, "admin-1")
+
+	if job.Spec.Template.Spec.Containers[0].Image != "myregistry.io/curity:custom" {
+		t.Errorf("expected custom image, got %q", job.Spec.Template.Spec.Containers[0].Image)
+	}
+}
+
+func TestBuildClusterConfigJob_Labels(t *testing.T) {
+	cluster := newTestCluster()
+	job := buildClusterConfigJob(cluster, "admin-1")
+
+	if job.Labels["curity.io/cluster"] != "cluster-1" {
+		t.Error("expected curity.io/cluster label")
+	}
+	if job.Labels["curity.io/component"] != "cluster-config" {
+		t.Error("expected curity.io/component label")
+	}
+}
+
+func TestBuildVolumes_IncludesClusterConfig(t *testing.T) {
+	cluster := newTestCluster()
+	volumes, mounts := buildVolumes(cluster)
+
+	if len(volumes) < 1 {
+		t.Fatal("expected at least 1 volume")
+	}
+	if volumes[0].Name != "cluster-config" {
+		t.Errorf("expected first volume 'cluster-config', got %q", volumes[0].Name)
+	}
+	if volumes[0].Secret.SecretName != "cluster-1-cluster-config" {
+		t.Errorf("expected secret name 'cluster-1-cluster-config', got %q", volumes[0].Secret.SecretName)
+	}
+	if *volumes[0].Secret.Optional != true {
+		t.Error("expected cluster-config volume to be optional")
+	}
+
+	if len(mounts) < 1 {
+		t.Fatal("expected at least 1 mount")
+	}
+	if mounts[0].MountPath != "/opt/idsvr/etc/init/cluster.xml" {
+		t.Errorf("expected mount path '/opt/idsvr/etc/init/cluster.xml', got %q", mounts[0].MountPath)
+	}
+	if mounts[0].SubPath != "cluster.xml" {
+		t.Errorf("expected subPath 'cluster.xml', got %q", mounts[0].SubPath)
+	}
+	if !mounts[0].ReadOnly {
+		t.Error("expected cluster-config mount to be read-only")
+	}
+}
+
+func TestBuildVolumes_ClusterConfigPlusUserConfig(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRef: &v1alpha1.ConfigMapRefSource{
+				Name:  "my-config",
+				Items: []v1alpha1.KeyToPath{{Key: "config.xml", Path: "config.xml"}},
+			},
+		},
+	}
+	volumes, mounts := buildVolumes(cluster)
+
+	// Should have cluster-config + user config = 2 volumes
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(volumes))
+	}
+	if volumes[0].Name != "cluster-config" {
+		t.Errorf("expected first volume 'cluster-config', got %q", volumes[0].Name)
+	}
+	// cluster-config mount + user config mount = 2 mounts
+	if len(mounts) != 2 {
+		t.Fatalf("expected 2 mounts, got %d", len(mounts))
+	}
 }
 
 // --- test helpers ---

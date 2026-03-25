@@ -8,10 +8,13 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
@@ -20,6 +23,27 @@ var nodeTestCounter atomic.Int64
 
 func nodeTestNamespace() string {
 	return fmt.Sprintf("node-test-%d", nodeTestCounter.Add(1))
+}
+
+func testCreateCluster(ns, name string) {
+	cluster := &v1alpha1.IdentityServerCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec:       v1alpha1.IdentityServerClusterSpec{Version: "11.0"},
+	}
+	Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+}
+
+func testCreateNode(ns, name string, nodeType v1alpha1.NodeType, clusterName string) {
+	node := &v1alpha1.IdentityServerNode{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Spec: v1alpha1.IdentityServerNodeSpec{
+			Type:                     nodeType,
+			Role:                     name + "-role",
+			IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
+			Replicas:                 ptr.To(int32(1)),
+		},
+	}
+	Expect(k8sClient.Create(ctx, node)).To(Succeed())
 }
 
 var _ = Describe("IdentityServerNode Reconciler", func() {
@@ -447,6 +471,193 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			}
 			err := k8sClient.Create(ctx, cluster)
 			Expect(err).To(HaveOccurred(), "empty Items should be rejected by MinItems=1 validation")
+		})
+	})
+
+	Context("Cluster config generation", func() {
+		It("should create placeholder Secret and Job when admin node exists", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cc-cluster", Namespace: ns},
+				Spec:       v1alpha1.IdentityServerClusterSpec{Version: "11.0"},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "cc-admin", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeAdmin,
+					Role:                     "cc-admin-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cc-cluster"},
+					Replicas:                 ptr.To(int32(1)),
+				},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+			// Verify placeholder Secret is created
+			secret := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "cc-cluster-cluster-config", Namespace: ns}, secret)
+			}, timeout, interval).Should(Succeed())
+			Expect(string(secret.Data["cluster.xml"])).To(Equal("placeholder"))
+			Expect(secret.Annotations).To(HaveKeyWithValue("argocd.argoproj.io/compare-options", "IgnoreExtraneous"))
+			Expect(secret.Annotations).To(HaveKey("curity.io/admin-node"))
+			Expect(secret.OwnerReferences).To(BeEmpty())
+
+			// Verify Job is created
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "cc-cluster-cluster-config-job", Namespace: ns}, job)
+			}, timeout, interval).Should(Succeed())
+			Expect(job.Labels["curity.io/cluster"]).To(Equal("cc-cluster"))
+			Expect(*job.Spec.Template.Spec.AutomountServiceAccountToken).To(BeFalse())
+		})
+
+		It("should set WaitingForAdmin when no admin node exists", func() {
+			testCreateCluster(ns, "wait-cluster")
+
+			// Wait for cluster to be reconciled with condition
+			cluster := &v1alpha1.IdentityServerCluster{}
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wait-cluster", Namespace: ns}, cluster); err != nil {
+					return false
+				}
+				for _, c := range cluster.Status.Conditions {
+					if c.Type == "ClusterConfigReady" && c.Reason == "WaitingForAdmin" {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue())
+		})
+
+		It("should skip Job when cluster config Secret already populated", func() {
+			// Pre-create a populated Secret
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "skip-cluster-cluster-config",
+					Namespace: ns,
+					Annotations: map[string]string{
+						"curity.io/admin-node":               "skip-admin",
+						"argocd.argoproj.io/compare-options": "IgnoreExtraneous",
+						"curity.io/encryption-key-hash":      "",
+					},
+					Labels: map[string]string{
+						"curity.io/cluster":   "skip-cluster",
+						"curity.io/component": "cluster-config",
+					},
+				},
+				Data: map[string][]byte{"cluster.xml": []byte("<config>real data</config>")},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+
+			testCreateCluster(ns, "skip-cluster")
+			testCreateNode(ns, "skip-admin", v1alpha1.NodeTypeAdmin, "skip-cluster")
+
+			// Verify ClusterConfigReady=True
+			cluster := &v1alpha1.IdentityServerCluster{}
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "skip-cluster", Namespace: ns}, cluster); err != nil {
+					return false
+				}
+				for _, c := range cluster.Status.Conditions {
+					if c.Type == "ClusterConfigReady" && c.Status == metav1.ConditionTrue {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue())
+			Expect(cluster.Status.ClusterConfigSecretName).To(Equal("skip-cluster-cluster-config"))
+
+			// Verify NO Job was created
+			job := &batchv1.Job{}
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: "skip-cluster-cluster-config-job", Namespace: ns}, job)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Job should not be created when Secret is already populated")
+		})
+
+		It("should delete failed Job and create a new one", func() {
+			testCreateCluster(ns, "fail-cluster")
+			testCreateNode(ns, "fail-admin", v1alpha1.NodeTypeAdmin, "fail-cluster")
+
+			// Wait for Job to be created
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster-cluster-config-job", Namespace: ns}, job)
+			}, timeout, interval).Should(Succeed())
+
+			origUID := job.UID
+
+			// Manually set Job as Failed (envtest has no Job controller)
+			job.Status.Conditions = []batchv1.JobCondition{
+				{
+					Type:    batchv1.JobFailed,
+					Status:  corev1.ConditionTrue,
+					Message: "ImagePullBackOff",
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			// Verify operator deletes failed Job and creates a new one
+			// (the new Job will have a different UID)
+			Eventually(func() bool {
+				newJob := &batchv1.Job{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster-cluster-config-job", Namespace: ns}, newJob); err != nil {
+					return false
+				}
+				return newJob.UID != origUID
+			}, timeout, interval).Should(BeTrue())
+		})
+
+		It("should not create duplicate Job on concurrent reconcile", func() {
+			testCreateCluster(ns, "race-cluster")
+			testCreateNode(ns, "race-admin", v1alpha1.NodeTypeAdmin, "race-cluster")
+
+			// Wait for Job to be created
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "race-cluster-cluster-config-job", Namespace: ns}, job)
+			}, timeout, interval).Should(Succeed())
+
+			// Only one Job should exist (AlreadyExists guard)
+			jobList := &batchv1.JobList{}
+			Expect(k8sClient.List(ctx, jobList,
+				client.InNamespace(ns),
+				client.MatchingLabels{"curity.io/cluster": "race-cluster"},
+			)).To(Succeed())
+			Expect(jobList.Items).To(HaveLen(1))
+		})
+
+		It("should inherit scheduling constraints on Job", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "sched-cluster", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version:      "11.0",
+					NodeSelector: map[string]string{"disk": "ssd"},
+					Tolerations: []corev1.Toleration{
+						{Key: "special", Operator: corev1.TolerationOpExists},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			testCreateNode(ns, "sched-admin", v1alpha1.NodeTypeAdmin, "sched-cluster")
+
+			// Wait for Job
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "sched-cluster-cluster-config-job", Namespace: ns}, job)
+			}, timeout, interval).Should(Succeed())
+
+			Expect(job.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("disk", "ssd"))
+			Expect(job.Spec.Template.Spec.Tolerations).To(HaveLen(1))
+		})
+
+		It("should add ArgoCD annotation on cluster config Secret", func() {
+			testCreateCluster(ns, "argo-cluster")
+			testCreateNode(ns, "argo-admin", v1alpha1.NodeTypeAdmin, "argo-cluster")
+
+			secret := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "argo-cluster-cluster-config", Namespace: ns}, secret)
+			}, timeout, interval).Should(Succeed())
+			Expect(secret.Annotations["argocd.argoproj.io/compare-options"]).To(Equal("IgnoreExtraneous"))
 		})
 	})
 

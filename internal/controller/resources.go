@@ -272,6 +272,28 @@ func buildVolumes(cluster *v1alpha1.IdentityServerCluster) ([]corev1.Volume, []c
 	var volumes []corev1.Volume
 	var mounts []corev1.VolumeMount
 
+	// Cluster config (cluster.xml) — always mounted for inter-node TLS.
+	// Optional so pods can start before the genclust Job completes.
+	secretName := cluster.Name + "-cluster-config"
+	volumes = append(volumes, corev1.Volume{
+		Name: "cluster-config",
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{
+				SecretName: secretName,
+				Items: []corev1.KeyToPath{
+					{Key: "cluster.xml", Path: "cluster.xml"},
+				},
+				Optional: ptr.To(true),
+			},
+		},
+	})
+	mounts = append(mounts, corev1.VolumeMount{
+		Name:      "cluster-config",
+		MountPath: "/opt/idsvr/etc/init/cluster.xml",
+		SubPath:   "cluster.xml",
+		ReadOnly:  true,
+	})
+
 	if cluster.Spec.Configuration == nil {
 		return volumes, mounts
 	}

@@ -88,6 +88,9 @@ type IdentityServerClusterStatus struct {
 
 	// Version is the currently observed Curity version from the spec.
 	Version string `json:"version,omitempty"`
+
+	// ClusterConfigSecretName is the name of the Secret containing cluster.xml.
+	ClusterConfigSecretName string `json:"clusterConfigSecretName,omitempty"`
 }
 
 // +kubebuilder:object:root=true

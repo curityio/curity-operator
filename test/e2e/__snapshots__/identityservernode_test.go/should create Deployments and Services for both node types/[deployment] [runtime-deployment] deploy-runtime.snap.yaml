@@ -24,6 +24,15 @@ spec:
   template:
     metadata: <Any value>
     spec:
+      volumes:
+        - name: cluster-config
+          secret:
+            secretName: deploy-cluster-cluster-config
+            items:
+              - key: cluster.xml
+                path: cluster.xml
+            defaultMode: 420
+            optional: true
       containers:
         - name: curity
           image: curity.azurecr.io/curity/idsvr:11.0
@@ -47,6 +56,11 @@ spec:
               value: "4465"
             - name: LOGGING_LEVEL
               value: INFO
+          volumeMounts:
+            - name: cluster-config
+              readOnly: true
+              mountPath: /opt/idsvr/etc/init/cluster.xml
+              subPath: cluster.xml
           livenessProbe:
             httpGet:
               path: /

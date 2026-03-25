@@ -26,27 +26,27 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ReplicasNotReady
-      message: Not all replicas are ready
+      reason: ""
+      message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: NoReplicaAvailable
-      message: No replicas are available
+      reason: ""
+      message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ReplicaUnavailable
-      message: 1 replica(s) unavailable
+      reason: ""
+      message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: Healthy
-      message: All replicas are healthy
+      reason: ""
+      message: ""
   observedGeneration: <Any value>
   replicas: 1
-  updatedReplicas: 1
-  unavailableReplicas: 1
+  updatedReplicas: <Any value>
+  unavailableReplicas: <Any value>
   deploymentName: lbl-node
   serviceName: lbl-node
 

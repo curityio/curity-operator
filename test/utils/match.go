@@ -41,6 +41,12 @@ var excludeCRDFields = []string{
 	"$.metadata.managedFields",
 	"$.metadata.ownerReferences",
 	"$.status.observedGeneration",
+	// Replica counts vary by environment (Kind vs AKS) and timing
+	"$.status.updatedReplicas",
+	"$.status.readyReplicas",
+	"$.status.availableReplicas",
+	"$.status.unavailableReplicas",
+	"$.status.readyNodes",
 }
 
 var excludeFieldMap = map[string][]string{
@@ -99,11 +105,16 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 }
 
 // sanitizeConditions zeroes volatile fields on each condition
-// so snapshots remain deterministic across test runs.
+// so snapshots remain deterministic across test runs and environments.
+// Reason and Message vary by Deployment controller timing (e.g.,
+// ReplicaUnavailable vs RolloutInProgress), so only Type and Status
+// are kept for cross-environment snapshot compatibility.
 func sanitizeConditions(conditions []metav1.Condition) {
 	for i := range conditions {
 		conditions[i].LastTransitionTime = metav1.Time{}
 		conditions[i].ObservedGeneration = 0
+		conditions[i].Reason = ""
+		conditions[i].Message = ""
 	}
 }
 

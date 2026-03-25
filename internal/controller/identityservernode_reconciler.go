@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -168,6 +170,20 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 6. Build and reconcile the Deployment
 	desiredDeploy := buildDeployment(&cluster, &node)
+
+	// Inject cluster config hash annotation for rolling restart when Secret changes
+	configSecretName := cluster.Name + "-cluster-config"
+	var configSecret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Name: configSecretName, Namespace: node.Namespace}, &configSecret); err == nil {
+		if data, ok := configSecret.Data["cluster.xml"]; ok && len(data) > 0 {
+			h := sha256.Sum256(data)
+			if desiredDeploy.Spec.Template.Annotations == nil {
+				desiredDeploy.Spec.Template.Annotations = make(map[string]string)
+			}
+			desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = hex.EncodeToString(h[:])
+		}
+	}
+
 	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}}
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {

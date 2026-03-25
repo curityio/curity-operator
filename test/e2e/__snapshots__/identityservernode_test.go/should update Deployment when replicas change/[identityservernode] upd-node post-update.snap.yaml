@@ -24,27 +24,27 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ReplicasNotReady
-      message: Not all replicas are ready
+      reason: ""
+      message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: NoReplicaAvailable
-      message: No replicas are available
+      reason: ""
+      message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ReplicaUnavailable
-      message: 3 replica(s) unavailable
+      reason: ""
+      message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: Healthy
-      message: All replicas are healthy
+      reason: ""
+      message: ""
   observedGeneration: <Any value>
   replicas: 3
-  updatedReplicas: 3
-  unavailableReplicas: 3
+  updatedReplicas: <Any value>
+  unavailableReplicas: <Any value>
   deploymentName: upd-node
   serviceName: upd-node
 

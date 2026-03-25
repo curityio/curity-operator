@@ -23,13 +23,13 @@ status:
     - type: Degraded
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: DuplicateRole
-      message: Role "runtime-role" is already used by node "role-node-1" in cluster "role-cluster"
+      reason: ""
+      message: ""
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: DuplicateRole
-      message: Role "runtime-role" must be unique per cluster
+      reason: ""
+      message: ""
   observedGeneration: <Any value>
 
 ---

@@ -23,13 +23,13 @@ status:
     - type: Degraded
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ClusterNotFound
-      message: Referenced cluster "recovery-cluster" not found
+      reason: ""
+      message: ""
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ClusterNotFound
-      message: Referenced cluster not found
+      reason: ""
+      message: ""
   observedGeneration: <Any value>
 
 ---

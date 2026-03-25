@@ -23,23 +23,28 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: NodesNotReady
-      message: Not all nodes are ready
+      reason: ""
+      message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: NodesUnavailable
-      message: Not all nodes have minimum availability
+      reason: ""
+      message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: NodesProgressing
-      message: Some nodes are not yet ready
+      reason: ""
+      message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: Healthy
-      message: Cluster is healthy
+      reason: ""
+      message: ""
+    - type: ClusterConfigReady
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
   observedGeneration: <Any value>
   nodeCount: 1
   version: "11.0"

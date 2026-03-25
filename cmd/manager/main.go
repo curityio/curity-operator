@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -29,6 +30,7 @@ var (
 func init() {
 	utilruntime.Must(corev1.AddToScheme(scheme))
 	utilruntime.Must(appsv1.AddToScheme(scheme))
+	utilruntime.Must(batchv1.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 }
 
@@ -53,7 +55,8 @@ func run(cmd *cobra.Command, _ []string) error {
 
 	log.Info("starting curity-operator")
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	cfg := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: healthAddr,
 		Metrics: metricsserver.Options{
@@ -79,9 +82,10 @@ func run(cmd *cobra.Command, _ []string) error {
 	//nolint:staticcheck // TODO: migrate to events.EventRecorder
 	clusterRecorder := mgr.GetEventRecorderFor("identityservercluster-controller")
 	if err := (&controller.IdentityServerClusterReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: clusterRecorder,
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		Recorder:   clusterRecorder,
+		RestConfig: cfg,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("failed to setup IdentityServerCluster controller: %w", err)
 	}

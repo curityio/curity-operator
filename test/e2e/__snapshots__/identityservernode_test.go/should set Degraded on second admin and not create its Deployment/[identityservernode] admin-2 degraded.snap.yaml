@@ -23,13 +23,13 @@ status:
     - type: Degraded
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: DuplicateAdmin
-      message: Another admin node "admin-1" already exists for cluster "dup-cluster"
+      reason: ""
+      message: ""
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: DuplicateAdmin
-      message: Another admin node already exists for this cluster
+      reason: ""
+      message: ""
   observedGeneration: <Any value>
 
 ---

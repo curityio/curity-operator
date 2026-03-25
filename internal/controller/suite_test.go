@@ -7,6 +7,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -48,6 +49,7 @@ var _ = BeforeSuite(func() {
 	scheme := runtime.NewScheme()
 	Expect(corev1.AddToScheme(scheme)).To(Succeed())
 	Expect(appsv1.AddToScheme(scheme)).To(Succeed())
+	Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 	Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})
@@ -75,9 +77,10 @@ var _ = BeforeSuite(func() {
 	//nolint:staticcheck // TODO: migrate to events.EventRecorder
 	clusterRec := mgr.GetEventRecorderFor("identityservercluster-controller")
 	err = (&controller.IdentityServerClusterReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: clusterRec,
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		Recorder:   clusterRec,
+		RestConfig: cfg,
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

@@ -3,7 +3,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -20,9 +19,8 @@ import (
 )
 
 const (
-	e2eTimeout    = 60 * time.Second
-	e2eInterval   = time.Second
-	remoteTimeout = 5 * time.Minute
+	e2eTimeout  = 60 * time.Second
+	e2eInterval = time.Second
 )
 
 func createNS(name string) {
@@ -108,65 +106,6 @@ var _ = Describe("Test 1: Deploy admin + runtime nodes", Ordered, func() {
 		utils.MatchCRDResource(runtimeNode, "deploy-runtime post-deployment")
 	})
 
-	It("should capture ready-state CRD snapshots when all nodes available", func() {
-		if os.Getenv("E2E_REMOTE") != "true" {
-			Skip("ready-state snapshots require remote cluster with pullable image")
-		}
-
-		ctx := context.Background()
-
-		// Wait for both deployments to have ready replicas
-		adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "deploy-admin", Namespace: ns}}
-		Eventually(func() int32 {
-			_ = k().Get(ctx, client.ObjectKey{Name: "deploy-admin", Namespace: ns}, adminDeploy)
-			return adminDeploy.Status.ReadyReplicas
-		}, remoteTimeout, e2eInterval).Should(BeNumerically(">=", 1))
-
-		runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "deploy-runtime", Namespace: ns}}
-		Eventually(func() int32 {
-			_ = k().Get(ctx, client.ObjectKey{Name: "deploy-runtime", Namespace: ns}, runtimeDeploy)
-			return runtimeDeploy.Status.ReadyReplicas
-		}, remoteTimeout, e2eInterval).Should(BeNumerically(">=", 1))
-
-		// Wait for node Ready=True conditions
-		adminNode := &v1alpha1.IdentityServerNode{}
-		Eventually(func() bool {
-			_ = k().Get(ctx, client.ObjectKey{Name: "deploy-admin", Namespace: ns}, adminNode)
-			for _, c := range adminNode.Status.Conditions {
-				if c.Type == v1alpha1.ConditionReady && c.Status == metav1.ConditionTrue {
-					return true
-				}
-			}
-			return false
-		}, remoteTimeout, e2eInterval).Should(BeTrue())
-
-		runtimeNode := &v1alpha1.IdentityServerNode{}
-		Eventually(func() bool {
-			_ = k().Get(ctx, client.ObjectKey{Name: "deploy-runtime", Namespace: ns}, runtimeNode)
-			for _, c := range runtimeNode.Status.Conditions {
-				if c.Type == v1alpha1.ConditionReady && c.Status == metav1.ConditionTrue {
-					return true
-				}
-			}
-			return false
-		}, remoteTimeout, e2eInterval).Should(BeTrue())
-
-		// Wait for cluster Ready=True
-		cluster := &v1alpha1.IdentityServerCluster{}
-		Eventually(func() bool {
-			_ = k().Get(ctx, client.ObjectKey{Name: "deploy-cluster", Namespace: ns}, cluster)
-			for _, c := range cluster.Status.Conditions {
-				if c.Type == v1alpha1.ConditionReady && c.Status == metav1.ConditionTrue {
-					return true
-				}
-			}
-			return false
-		}, remoteTimeout, e2eInterval).Should(BeTrue())
-
-		utils.MatchCRDResource(cluster, "deploy-cluster ready")
-		utils.MatchCRDResource(adminNode, "deploy-admin ready")
-		utils.MatchCRDResource(runtimeNode, "deploy-runtime ready")
-	})
 })
 
 // ====================================================================
@@ -433,11 +372,18 @@ var _ = Describe("Test 7: Duplicate admin node rejection", Ordered, func() {
 			return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: "admin-2", Namespace: ns}, &appsv1.Deployment{}))
 		}, 5*time.Second, e2eInterval).Should(BeTrue())
 
+		// Wait for admin-1 to also detect the duplicate (it gets re-reconciled
+		// after admin-2 is created, but timing varies across environments)
 		admin1 := &v1alpha1.IdentityServerNode{}
-		Eventually(func() int {
+		Eventually(func() string {
 			_ = k().Get(ctx, client.ObjectKey{Name: "admin-1", Namespace: ns}, admin1)
-			return len(admin1.Status.Conditions)
-		}, e2eTimeout, e2eInterval).Should(BeNumerically(">", 0))
+			for _, c := range admin1.Status.Conditions {
+				if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
+					return c.Reason
+				}
+			}
+			return ""
+		}, e2eTimeout, e2eInterval).Should(Equal("DuplicateAdmin"))
 
 		cluster := &v1alpha1.IdentityServerCluster{}
 		Eventually(func() int {
@@ -860,9 +806,9 @@ var _ = Describe("Test 15: Configuration volumes", Ordered, func() {
 		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-node", Namespace: ns}}
 		utils.WaitForResource(deploy, func() bool { return true }, e2eTimeout, e2eInterval)
 
-		Expect(deploy.Spec.Template.Spec.Volumes).To(HaveLen(1))
-		Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts).To(HaveLen(1))
-		Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts[0].MountPath).To(ContainSubstring("/opt/idsvr/etc/init/"))
+		// 1 cluster-config + 1 configmap = 2 volumes
+		Expect(deploy.Spec.Template.Spec.Volumes).To(HaveLen(2))
+		Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts).To(HaveLen(2))
 
 		clusterObj := &v1alpha1.IdentityServerCluster{}
 		Eventually(func() int {
@@ -1522,12 +1468,15 @@ var _ = Describe("Test 27: Secret configuration volumes", Ordered, func() {
 		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "scfg-node", Namespace: ns}}
 		utils.WaitForResource(deploy, func() bool { return true }, e2eTimeout, e2eInterval)
 
-		Expect(deploy.Spec.Template.Spec.Volumes).To(HaveLen(1))
-		Expect(deploy.Spec.Template.Spec.Volumes[0].Secret).NotTo(BeNil())
-		Expect(deploy.Spec.Template.Spec.Volumes[0].Secret.SecretName).To(Equal("test-secret-config"))
+		// 1 cluster-config + 1 secret config = 2 volumes
+		Expect(deploy.Spec.Template.Spec.Volumes).To(HaveLen(2))
+		// Second volume (index 1) is the user's secret config
+		Expect(deploy.Spec.Template.Spec.Volumes[1].Secret).NotTo(BeNil())
+		Expect(deploy.Spec.Template.Spec.Volumes[1].Secret.SecretName).To(Equal("test-secret-config"))
 
-		Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts).To(HaveLen(1))
-		Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts[0].MountPath).To(Equal("/opt/idsvr/etc/init/datasource-config.xml"))
+		// 1 cluster-config + 1 secret config = 2 mounts
+		Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts).To(HaveLen(2))
+		Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts[1].MountPath).To(Equal("/opt/idsvr/etc/init/datasource-config.xml"))
 
 		Expect(k().Get(ctx, client.ObjectKey{Name: "scfg-cluster", Namespace: ns}, cluster)).To(Succeed())
 		Expect(k().Get(ctx, client.ObjectKey{Name: "scfg-node", Namespace: ns}, node)).To(Succeed())

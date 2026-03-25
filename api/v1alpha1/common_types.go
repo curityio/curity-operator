@@ -17,10 +17,11 @@ const (
 
 // Condition type constants for status reporting.
 const (
-	ConditionReady       = "Ready"
-	ConditionAvailable   = "Available"
-	ConditionProgressing = "Progressing"
-	ConditionDegraded    = "Degraded"
+	ConditionReady              = "Ready"
+	ConditionAvailable          = "Available"
+	ConditionProgressing        = "Progressing"
+	ConditionDegraded           = "Degraded"
+	ConditionClusterConfigReady = "ClusterConfigReady"
 )
 
 // Finalizer names.

@@ -27,27 +27,27 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: DuplicateAdmin
-      message: Another admin node already exists for this cluster
+      reason: ""
+      message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: NoReplicaAvailable
-      message: No replicas are available
+      reason: ""
+      message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ReplicaUnavailable
-      message: 1 replica(s) unavailable
+      reason: ""
+      message: ""
     - type: Degraded
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: DuplicateAdmin
-      message: Another admin node "admin-2" already exists for cluster "dup-cluster"
+      reason: ""
+      message: ""
   observedGeneration: <Any value>
   replicas: 1
-  updatedReplicas: 1
-  unavailableReplicas: 1
+  updatedReplicas: <Any value>
+  unavailableReplicas: <Any value>
   deploymentName: admin-1
   serviceName: admin-1
 

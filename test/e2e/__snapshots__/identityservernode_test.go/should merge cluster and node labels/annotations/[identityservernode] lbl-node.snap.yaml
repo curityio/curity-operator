@@ -1,0 +1,53 @@
+
+[Test 16: Labels and annotations merge should merge cluster and node labels/annotations - 1]
+metadata:
+  name: lbl-node
+  namespace: e2e-labels
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: lbl-cluster
+  annotations: <Any value>
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: label-test-role
+  identityServerClusterRef:
+    name: lbl-cluster
+  replicas: 1
+  podLabels:
+    team: identity
+status:
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  updatedReplicas: <Any value>
+  unavailableReplicas: <Any value>
+  deploymentName: lbl-node
+  serviceName: lbl-node
+
+---

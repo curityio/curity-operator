@@ -1,0 +1,50 @@
+
+[Test 26: Orphan node recovery should recover when missing cluster is created - 1]
+metadata:
+  name: recovery-node
+  namespace: e2e-recovery
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: recovery-cluster
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: recovery-role
+  identityServerClusterRef:
+    name: recovery-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  updatedReplicas: <Any value>
+  unavailableReplicas: <Any value>
+  deploymentName: recovery-node
+  serviceName: recovery-node
+
+---

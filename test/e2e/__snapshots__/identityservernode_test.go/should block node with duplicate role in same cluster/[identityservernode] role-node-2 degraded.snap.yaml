@@ -1,0 +1,35 @@
+
+[Test 24: Duplicate role rejection should block node with duplicate role in same cluster - 1]
+metadata:
+  name: role-node-2
+  namespace: e2e-dup-role
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: role-cluster
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: runtime-role
+  identityServerClusterRef:
+    name: role-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Degraded
+      status: "True"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Ready
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+
+---

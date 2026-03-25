@@ -2,4 +2,5 @@
 # since it depends on service name and namespace that are out of this kustomize package.
 # It should be run by config/default
 resources:
-- bases/curity.io_identityservers.yaml
+- bases/curity.io_identityserverclusters.yaml
+- bases/curity.io_identityservernodes.yaml

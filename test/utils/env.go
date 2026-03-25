@@ -125,7 +125,18 @@ func (env *E2ETestEnv) verifyControllerUp() error {
 }
 
 // Teardown cleans up the test environment.
+// It deletes all custom resources first (while the operator is still running
+// to process finalizers), then undeploys the operator and CRDs.
 func (env *E2ETestEnv) Teardown() error {
+	// Delete all custom resources first so the operator can process finalizers
+	// before the operator pod is removed. Without this, CRD deletion blocks
+	// forever because finalizers can never be removed.
+	ginkgo.GinkgoWriter.Println("deleting all IdentityServerNodes across namespaces")
+	_, _ = Run("kubectl", "delete", "identityservernodes.curity.io", "--all", "--all-namespaces", "--timeout=60s")
+
+	ginkgo.GinkgoWriter.Println("deleting all IdentityServerClusters across namespaces")
+	_, _ = Run("kubectl", "delete", "identityserverclusters.curity.io", "--all", "--all-namespaces", "--timeout=60s")
+
 	ginkgo.GinkgoWriter.Println("undeploying the operator")
 	_, _ = Run("make", "undeploy")
 

@@ -1,0 +1,17 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerNode
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  type: runtime
+  role: {{ .role }}
+  identityServerClusterRef:
+    name: {{ .clusterName }}
+  replicas: {{ .replicas }}
+  service:
+    type: {{ .serviceType }}
+    port: {{ .servicePort }}
+  environmentVariables:
+    - name: CUSTOM_ENV
+      value: "{{ .customEnvValue }}"

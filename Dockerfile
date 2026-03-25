@@ -1,10 +1,12 @@
-FROM golang:1.25 AS builder
+FROM --platform=${BUILDPLATFORM:-linux/amd64} golang:1.25 AS builder
+
+ARG TARGETARCH
 
 WORKDIR /workspace
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o curity-operator ./cmd/manager/
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o curity-operator ./cmd/manager/
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.7
 

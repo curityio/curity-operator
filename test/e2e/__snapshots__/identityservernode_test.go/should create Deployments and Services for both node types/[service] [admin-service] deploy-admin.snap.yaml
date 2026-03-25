@@ -1,0 +1,66 @@
+
+[Test 1: Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
+metadata:
+  name: deploy-admin
+  namespace: e2e-deploy
+  uid: <Any value>
+  resourceVersion: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    app.kubernetes.io/component: admin
+    app.kubernetes.io/instance: deploy-admin
+    app.kubernetes.io/managed-by: curity-operator
+    app.kubernetes.io/name: curity-identity-server
+    app.kubernetes.io/version: "11.0"
+    curity.io/cluster: deploy-cluster
+    curity.io/role: admin-role
+  ownerReferences: <Any value>
+  managedFields: <Any value>
+spec:
+  ports:
+    - name: health-check
+      protocol: TCP
+      port: 4465
+      targetPort:
+        type: 1
+        intval: 0
+        strval: health-check
+    - name: metrics
+      protocol: TCP
+      port: 4466
+      targetPort:
+        type: 1
+        intval: 0
+        strval: metrics
+    - name: config
+      protocol: TCP
+      port: 6789
+      targetPort:
+        type: 1
+        intval: 0
+        strval: config
+    - name: ds-port
+      protocol: TCP
+      port: 6790
+      targetPort:
+        type: 1
+        intval: 0
+        strval: ds-port
+    - name: admin-ui
+      protocol: TCP
+      port: 6749
+      targetPort:
+        type: 1
+        intval: 0
+        strval: admin-ui
+  selector: <Any value>
+  clusterIP: <Any value>
+  clusterIPs: <Any value>
+  type: ClusterIP
+  sessionAffinity: None
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  internalTrafficPolicy: Cluster
+
+---

@@ -26,6 +26,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Compute image tag
@@ -59,7 +60,11 @@ jobs:
           kubectl config use-context aks
 
       - name: Verify cluster connectivity
-        run: kubectl cluster-info
+        run: |
+          kubectl cluster-info
+          echo "=== Node architectures ==="
+          kubectl get nodes -o wide
+          kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.nodeInfo.architecture}{"\n"}{end}'
 
       - name: Create operator namespace
         run: kubectl get namespace curity-operator || kubectl create namespace curity-operator
@@ -75,6 +80,18 @@ jobs:
 
       - name: Run E2E Tests
         run: make test-e2e-remote IMG=ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.tag }}
+
+      - name: Collect operator logs
+        if: failure()
+        run: |
+          echo "=== Operator pod status ==="
+          kubectl get pods -n curity-operator -o wide || true
+          echo "=== Operator pod describe ==="
+          kubectl describe pods -l control-plane=controller-manager -n curity-operator || true
+          echo "=== Operator logs ==="
+          kubectl logs -l control-plane=controller-manager -n curity-operator --all-containers --tail=200 || true
+          echo "=== Operator previous logs (if restarted) ==="
+          kubectl logs -l control-plane=controller-manager -n curity-operator --all-containers --previous --tail=100 || true
 
       - name: Cleanup
         if: always()

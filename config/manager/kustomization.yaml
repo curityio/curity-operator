@@ -5,4 +5,4 @@ resources:
 images:
 - name: controller
   newName: ghcr.io/curityio/curity-operator
-  newTag: latest
+  newTag: v0.0.1

@@ -1,0 +1,18 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  version: "11.0"
+  adminCredentials:
+    valueFrom:
+      secretKeyRef:
+        name: {{ .secretName }}
+        items:
+          - key: ADMIN_PASSWORD
+            path: PASSWORD
+          - key: CONFIG_ENCRYPTION_KEY
+            path: CONFIG_ENCRYPTION_KEY
+          - key: KEYSTORE_PASSWORD
+            path: KEYSTORE_PASSWORD

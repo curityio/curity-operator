@@ -107,21 +107,23 @@ test: envtest ## Run unit tests.
 
 .PHONY: test-e2e
 test-e2e: generate deploy-kind install ## Build, load into Kind, install CRDs, run e2e tests.
-	go test -v -timeout 300s ./test/e2e/...
+	go test -v -timeout 600s ./test/e2e/...
 
 .PHONY: test-e2e-remote
 test-e2e-remote: generate deploy-remote install ## Build, push to registry, install CRDs, run e2e tests.
-	go test -v -timeout 300s ./test/e2e/...
+	E2E_REMOTE=true go test -v -timeout 600s ./test/e2e/...
 
 .PHONY: test-e2e-update-snapshots
 test-e2e-update-snapshots: generate deploy-kind install ## Run e2e tests and update snapshots.
-	go test -v -timeout 300s ./test/e2e/...
+	go test -v -timeout 600s ./test/e2e/...
 
 ##@ Docker
 
+TARGET_PLATFORM ?= linux/arm64
+
 .PHONY: docker-build
 docker-build: ## Build docker image.
-	$(CONTAINER_TOOL) build --build-arg VERSION=$(VERSION) -t $(IMG) .
+	$(CONTAINER_TOOL) build --platform $(TARGET_PLATFORM) --build-arg VERSION=$(VERSION) -t $(IMG) .
 
 .PHONY: docker-push
 docker-push: ## Push docker image.

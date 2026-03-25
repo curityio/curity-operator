@@ -1,0 +1,11 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerNode
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  type: runtime
+  role: runtime-role
+  identityServerClusterRef:
+    name: {{ .clusterName }}
+  replicas: 1

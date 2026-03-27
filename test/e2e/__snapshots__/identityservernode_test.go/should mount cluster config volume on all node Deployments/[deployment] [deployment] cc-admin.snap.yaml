@@ -66,6 +66,21 @@ spec:
               value: INFO
             - name: ADMIN_UI_HTTP_MODE
               value: "false"
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cc-cluster-admin-creds
+                  key: ADMIN_PASSWORD
+            - name: CONFIG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cc-cluster-admin-creds
+                  key: CONFIG_ENCRYPTION_KEY
+            - name: KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cc-cluster-admin-creds
+                  key: KEYSTORE_PASSWORD
           volumeMounts:
             - name: cluster-config
               readOnly: true

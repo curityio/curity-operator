@@ -411,6 +411,43 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			// Verify no OwnerReference (survives cluster deletion)
 			Expect(secret.OwnerReferences).To(BeEmpty())
 		})
+
+		It("should default admin credentials when not specified", func() {
+			testCreateCluster(ns, "cluster-no-creds")
+
+			// The reconciler should auto-create the default secret
+			secret := &corev1.Secret{}
+			eventuallyGetResource(ns, "cluster-no-creds-admin-creds", secret)
+			Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
+			Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
+			Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
+			Expect(secret.Labels["app.kubernetes.io/managed-by"]).To(Equal("curity-operator"))
+			Expect(secret.Labels["curity.io/cluster"]).To(Equal("cluster-no-creds"))
+			Expect(secret.OwnerReferences).To(BeEmpty())
+		})
+
+		It("should inject defaulted credential env vars into deployment", func() {
+			testCreateCluster(ns, "cluster-default-env")
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "admin-default-env", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeAdmin,
+					Role:                     "admin",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-default-env"},
+					Replicas:                 ptr.To(int32(1)),
+					UI:                       &v1alpha1.UISpec{Enabled: true},
+				},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+			deploy := &appsv1.Deployment{}
+			eventuallyGetResource(ns, "admin-default-env", deploy)
+
+			envVars := deploy.Spec.Template.Spec.Containers[0].Env
+			Expect(hasEnvFromSecret(envVars, "PASSWORD", "cluster-default-env-admin-creds", "ADMIN_PASSWORD")).To(BeTrue())
+			Expect(hasEnvFromSecret(envVars, "CONFIG_ENCRYPTION_KEY", "cluster-default-env-admin-creds", "CONFIG_ENCRYPTION_KEY")).To(BeTrue())
+			Expect(hasEnvFromSecret(envVars, "KEYSTORE_PASSWORD", "cluster-default-env-admin-creds", "KEYSTORE_PASSWORD")).To(BeTrue())
+		})
 	})
 
 	Context("CRD validation", func() {

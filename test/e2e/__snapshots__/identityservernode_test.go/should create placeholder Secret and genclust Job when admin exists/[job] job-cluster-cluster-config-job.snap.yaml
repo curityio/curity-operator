@@ -33,6 +33,12 @@ spec:
               value: job-admin
             - name: CONFIG_SERVICE_PORT
               value: "6789"
+            - name: CONFIG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: job-cluster-admin-creds
+                  key: CONFIG_ENCRYPTION_KEY
+                  optional: true
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent

@@ -792,6 +792,62 @@ func TestBuildDeployment_RuntimeNode_NoAutoInject(t *testing.T) {
 	}
 }
 
+// --- Default Admin Credentials Tests ---
+
+func TestDefaultAdminCredentials_SecretName(t *testing.T) {
+	creds := defaultAdminCredentials("my-cluster")
+	if creds.ValueFrom.SecretKeyRef.Name != "my-cluster-admin-creds" {
+		t.Errorf("expected 'my-cluster-admin-creds', got %q", creds.ValueFrom.SecretKeyRef.Name)
+	}
+}
+
+func TestDefaultAdminCredentials_Items(t *testing.T) {
+	creds := defaultAdminCredentials("test")
+	items := creds.ValueFrom.SecretKeyRef.Items
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(items))
+	}
+	expected := []v1alpha1.KeyToPath{
+		{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+		{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+		{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
+	}
+	for i, item := range items {
+		if item.Key != expected[i].Key || item.Path != expected[i].Path {
+			t.Errorf("item[%d]: expected {%s, %s}, got {%s, %s}", i, expected[i].Key, expected[i].Path, item.Key, item.Path)
+		}
+	}
+}
+
+func TestBuildDeployment_DefaultedCredentials_InjectsEnvVars(t *testing.T) {
+	// Simulates what the reconciler does: default credentials, then build deployment.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
+	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "cluster-1-admin-creds", "CONFIG_ENCRYPTION_KEY")
+	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "cluster-1-admin-creds", "KEYSTORE_PASSWORD")
+}
+
+func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
+	// Runtime nodes get all credential env vars from items mapping.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
+	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "cluster-1-admin-creds", "CONFIG_ENCRYPTION_KEY")
+	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "cluster-1-admin-creds", "KEYSTORE_PASSWORD")
+}
+
 // --- Cluster Config Builder Tests ---
 
 func TestClusterConfigSecretName(t *testing.T) {

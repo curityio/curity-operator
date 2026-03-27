@@ -156,7 +156,7 @@ Login with username `admin`. If the credentials Secret was auto-generated,
 retrieve the password:
 
 ```bash
-kubectl -n demo get secret admin-creds -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d
+kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d
 ```
 
 ## CRD Reference

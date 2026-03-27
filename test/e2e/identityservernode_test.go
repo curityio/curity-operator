@@ -1982,3 +1982,81 @@ spec:
 		utils.MatchCRDResource(cluster, "multi-ds-cluster")
 	})
 })
+
+// ====================================================================
+// TEST 36: Default admin credentials when not specified
+// ====================================================================
+var _ = Describe("Test 36: Default admin credentials", Ordered, func() {
+	const ns = "e2e-default-creds"
+	BeforeAll(func() { createNS(ns) })
+	AfterAll(func() { deleteNS(ns) })
+
+	It("should auto-create credentials secret with conventional name", func() {
+		ctx := context.Background()
+
+		// Create cluster WITHOUT adminCredentials
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+			map[string]interface{}{"name": "default-creds", "namespace": ns})
+
+		// The reconciler should default to <cluster>-admin-creds
+		secret := &corev1.Secret{}
+		Eventually(func() error {
+			return k().Get(ctx, client.ObjectKey{Name: "default-creds-admin-creds", Namespace: ns}, secret)
+		}, e2eTimeout, e2eInterval).Should(Succeed())
+
+		Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
+		Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
+		Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
+		Expect(len(secret.Data["ADMIN_PASSWORD"])).To(BeNumerically(">", 0))
+		Expect(secret.Labels["app.kubernetes.io/managed-by"]).To(Equal("curity-operator"))
+		Expect(secret.Labels["curity.io/cluster"]).To(Equal("default-creds"))
+		Expect(secret.OwnerReferences).To(BeEmpty())
+	})
+
+	It("should inject defaulted credentials into admin node deployment", func() {
+		ctx := context.Background()
+
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin-ui.yaml", ns,
+			map[string]interface{}{"name": "default-admin", "namespace": ns,
+				"clusterName": "default-creds", "uiEnabled": true, "uiSecure": false})
+
+		deploy := &appsv1.Deployment{}
+		Eventually(func() error {
+			return k().Get(ctx, client.ObjectKey{Name: "default-admin", Namespace: ns}, deploy)
+		}, e2eTimeout, e2eInterval).Should(Succeed())
+
+		envVars := deploy.Spec.Template.Spec.Containers[0].Env
+		foundPassword := false
+		foundEncKey := false
+		foundKsPass := false
+		for _, env := range envVars {
+			if env.Name == "PASSWORD" && env.ValueFrom != nil &&
+				env.ValueFrom.SecretKeyRef != nil &&
+				env.ValueFrom.SecretKeyRef.Name == "default-creds-admin-creds" {
+				foundPassword = true
+			}
+			if env.Name == "CONFIG_ENCRYPTION_KEY" && env.ValueFrom != nil &&
+				env.ValueFrom.SecretKeyRef != nil &&
+				env.ValueFrom.SecretKeyRef.Name == "default-creds-admin-creds" {
+				foundEncKey = true
+			}
+			if env.Name == "KEYSTORE_PASSWORD" && env.ValueFrom != nil &&
+				env.ValueFrom.SecretKeyRef != nil &&
+				env.ValueFrom.SecretKeyRef.Name == "default-creds-admin-creds" {
+				foundKsPass = true
+			}
+		}
+		Expect(foundPassword).To(BeTrue(), "expected PASSWORD env var from default-creds-admin-creds")
+		Expect(foundEncKey).To(BeTrue(), "expected CONFIG_ENCRYPTION_KEY env var from default-creds-admin-creds")
+		Expect(foundKsPass).To(BeTrue(), "expected KEYSTORE_PASSWORD env var from default-creds-admin-creds")
+
+		utils.MatchYAMLResource(deploy, "[deployment] default-admin")
+
+		cluster := &v1alpha1.IdentityServerCluster{}
+		Eventually(func() int {
+			_ = k().Get(ctx, client.ObjectKey{Name: "default-creds", Namespace: ns}, cluster)
+			return len(cluster.Status.Conditions)
+		}, e2eTimeout, e2eInterval).Should(BeNumerically(">", 0))
+		utils.MatchCRDResource(cluster, "default-creds")
+	})
+})

@@ -1,20 +1,20 @@
 
-[Test 34: DataSources env var injection should inject dataSource env vars referencing the secret - 1]
+[Test 36: Default admin credentials should inject defaulted credentials into admin node deployment - 1]
 metadata:
-  name: ds-runtime
-  namespace: e2e-datasource
+  name: default-admin
+  namespace: e2e-default-creds
   uid: <Any value>
   resourceVersion: <Any value>
   generation: <Any value>
   creationTimestamp: <Any value>
   labels:
-    app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: ds-runtime
+    app.kubernetes.io/component: admin
+    app.kubernetes.io/instance: default-admin
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"
-    curity.io/cluster: ds-cluster
-    curity.io/role: runtime-role
+    curity.io/cluster: default-creds
+    curity.io/role: admin-ui-role
   annotations: <Any value>
   ownerReferences: <Any value>
   managedFields: <Any value>
@@ -27,7 +27,7 @@ spec:
       volumes:
         - name: cluster-config
           secret:
-            secretName: ds-cluster-cluster-config
+            secretName: default-creds-cluster-config
             items:
               - key: cluster.xml
                 path: cluster.xml
@@ -39,8 +39,10 @@ spec:
           args:
             - /opt/idsvr/bin/idsvr
             - -s
-            - runtime-role
-            - --no-admin
+            - admin-ui-role
+            - -N
+            - default-admin
+            - --admin
           ports:
             - name: health-check
               containerPort: 4465
@@ -48,39 +50,37 @@ spec:
             - name: metrics
               containerPort: 4466
               protocol: TCP
-            - name: http
-              containerPort: 8443
+            - name: config
+              containerPort: 6789
+              protocol: TCP
+            - name: ds-port
+              containerPort: 6790
+              protocol: TCP
+            - name: admin-ui
+              containerPort: 6749
               protocol: TCP
           env:
             - name: STATUS_CMD_PORT
               value: "4465"
             - name: LOGGING_LEVEL
               value: INFO
+            - name: ADMIN_UI_HTTP_MODE
+              value: "true"
             - name: PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: ds-cluster-admin-creds
+                  name: default-creds-admin-creds
                   key: ADMIN_PASSWORD
             - name: CONFIG_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: ds-cluster-admin-creds
+                  name: default-creds-admin-creds
                   key: CONFIG_ENCRYPTION_KEY
             - name: KEYSTORE_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: ds-cluster-admin-creds
+                  name: default-creds-admin-creds
                   key: KEYSTORE_PASSWORD
-            - name: DB_CONNECTION_STRING
-              valueFrom:
-                secretKeyRef:
-                  name: ds-db-secret
-                  key: DB_URL
-            - name: DB_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: ds-db-secret
-                  key: DB_USER
           volumeMounts:
             - name: cluster-config
               readOnly: true

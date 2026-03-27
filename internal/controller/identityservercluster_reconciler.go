@@ -106,11 +106,13 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// 3. Ensure admin credentials secret
-	if cluster.Spec.AdminCredentials != nil {
-		if err := r.ensureAdminCredentialsSecret(ctx, &cluster); err != nil {
-			return ctrl.Result{}, err
-		}
+	// 3. Ensure admin credentials secret (default when not specified)
+	if cluster.Spec.AdminCredentials == nil {
+		cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
+		log.Info("defaulting adminCredentials", "secretName", cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name)
+	}
+	if err := r.ensureAdminCredentialsSecret(ctx, &cluster); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// 4. List child IdentityServerNodes (reused by cluster config and status)
@@ -236,6 +238,23 @@ func (r *IdentityServerClusterReconciler) ensureAdminCredentialsSecret(ctx conte
 		"Created admin credentials secret %q with auto-generated values", secretName)
 
 	return nil
+}
+
+// defaultAdminCredentials returns a CredentialsSource with conventional naming
+// when the user does not specify adminCredentials on the cluster spec.
+func defaultAdminCredentials(clusterName string) *v1alpha1.CredentialsSource {
+	return &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: clusterName + "-admin-creds",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+					{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
+				},
+			},
+		},
+	}
 }
 
 // SetupWithManager registers the controller with the manager.
@@ -496,8 +515,10 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 
 			// Check if encryption key changed (Scenario 11)
 			// Reset to placeholder so the Job flow regenerates with the new key.
+			// Only trigger regeneration when both hashes are non-empty — an empty
+			// stored hash means the config was generated without an encryption key.
 			currentKeyHash := r.computeEncryptionKeyHash(ctx, cluster)
-			if storedHash, ok := configSecret.Annotations["curity.io/encryption-key-hash"]; ok && currentKeyHash != "" && storedHash != currentKeyHash {
+			if storedHash, ok := configSecret.Annotations["curity.io/encryption-key-hash"]; ok && storedHash != "" && currentKeyHash != "" && storedHash != currentKeyHash {
 				log.Info("encryption key changed, resetting cluster config for regeneration")
 				configSecret.Data[clusterConfigKey] = []byte(clusterConfigPlaceholder)
 				configSecret.Annotations["curity.io/encryption-key-hash"] = currentKeyHash

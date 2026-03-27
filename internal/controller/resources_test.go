@@ -666,6 +666,132 @@ func TestBuildDeployment_AdminCredentialsNoSpecialMapping(t *testing.T) {
 	assertEnvVarFromSecret(t, envVars, "MY_CUSTOM_NAME", "admin-secret", "ADMIN_PASSWORD")
 }
 
+// --- Admin UI PASSWORD auto-injection tests ---
+
+func TestBuildDeployment_UIEnabled_AutoInjectsPassword(t *testing.T) {
+	// When ui.enabled=true and adminCredentials has no PASSWORD mapping,
+	// PASSWORD should be auto-injected from ADMIN_PASSWORD key.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "ADMIN_PASSWORD"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
+	// The explicit ADMIN_PASSWORD mapping should still be present
+	assertEnvVarFromSecret(t, envVars, "ADMIN_PASSWORD", "admin-secret", "ADMIN_PASSWORD")
+}
+
+func TestBuildDeployment_UIEnabled_ExplicitPasswordMapping_NoDuplicate(t *testing.T) {
+	// When adminCredentials already maps to PASSWORD, no duplicate should be added.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	// Count PASSWORD env vars — should be exactly one
+	count := 0
+	for _, e := range envVars {
+		if e.Name == "PASSWORD" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 PASSWORD env var, got %d", count)
+	}
+}
+
+func TestBuildDeployment_UIEnabled_NoCredentials_NoPassword(t *testing.T) {
+	// When ui.enabled=true but adminCredentials is nil, no PASSWORD should be injected.
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	for _, e := range envVars {
+		if e.Name == "PASSWORD" {
+			t.Errorf("PASSWORD should not be injected when adminCredentials is nil")
+		}
+	}
+}
+
+func TestBuildDeployment_UIDisabled_NoAutoInject(t *testing.T) {
+	// When ui.enabled=false, PASSWORD should not be auto-injected even with credentials.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "ADMIN_PASSWORD"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: false}
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	for _, e := range envVars {
+		if e.Name == "PASSWORD" {
+			t.Errorf("PASSWORD should not be auto-injected when UI is disabled")
+		}
+	}
+}
+
+func TestBuildDeployment_RuntimeNode_NoAutoInject(t *testing.T) {
+	// PASSWORD auto-injection is only for admin nodes.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "ADMIN_PASSWORD"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	for _, e := range envVars {
+		if e.Name == "PASSWORD" {
+			t.Errorf("PASSWORD should not be auto-injected for runtime nodes")
+		}
+	}
+}
+
 // --- Cluster Config Builder Tests ---
 
 func TestClusterConfigSecretName(t *testing.T) {

@@ -3,6 +3,15 @@
 Kubernetes operator for managing Curity Identity Server deployments.
 Built with Go and controller-runtime, distributed via Helm and GHCR.
 
+## Architecture
+
+The operator uses a **two-CRD design**:
+
+- **IdentityServerCluster** (`isc`) — cluster-wide configuration: version, credentials, data sources, logging, scheduling defaults.
+- **IdentityServerNode** (`isn`) — individual node deployments (admin or runtime). Each node references a cluster and inherits its settings, with optional node-level overrides.
+
+The operator automatically creates Deployments, Services, and Secrets for each node. Cluster-level settings (resources, probes, scheduling, labels) are inherited by nodes unless overridden.
+
 ## Prerequisites
 
 - Go 1.25+
@@ -15,35 +24,187 @@ are automatically downloaded by the Makefile when needed.
 
 ## Local Development
 
-Build the operator binary:
+### Option A: Kustomize
 
 ```bash
-make build
+make deploy-kind                               # Build image, create Kind cluster, load image
+make install                                   # Install CRDs
+kubectl create namespace curity-operator       # Create operator namespace
+make kustomize-deploy                          # Deploy the operator
 ```
 
-Deploy to a local Kind cluster:
+### Option B: Helm
 
 ```bash
-make deploy-kind       # Builds image, creates Kind cluster, loads image
-make install           # Install CRDs into the cluster
-make kustomize-deploy  # Deploy the operator
+make deploy-helm    # Build, create Kind cluster, load image, deploy via Helm (creates namespace automatically)
 ```
 
-Create an IdentityServer resource:
+Verify the operator is running:
+
+```bash
+kubectl -n curity-operator get pods
+```
+
+### Create a Curity Identity Server Deployment
+
+1. Create a namespace and an IdentityServerCluster:
+
+```bash
+kubectl create namespace demo
+```
 
 ```yaml
 apiVersion: curity.io/v1alpha1
-kind: IdentityServer
+kind: IdentityServerCluster
 metadata:
-  name: my-idsvr
+  name: my-cluster
+  namespace: demo
 spec:
-  replicas: 2
+  version: "11.0"
+  adminCredentials:
+    valueFrom:
+      secretKeyRef:
+        name: admin-creds
+        items:
+          - key: ADMIN_PASSWORD
+            path: ADMIN_PASSWORD
+          - key: CONFIG_ENCRYPTION_KEY
+            path: CONFIG_ENCRYPTION_KEY
+          - key: KEYSTORE_PASSWORD
+            path: KEYSTORE_PASSWORD
 ```
 
-```bash
-kubectl apply -f identityserver.yaml
-kubectl get idsvr
+The operator creates the `admin-creds` Secret with auto-generated values
+if it does not already exist. The Secret is never deleted by the operator.
+
+2. Create an admin node with the UI enabled:
+
+```yaml
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerNode
+metadata:
+  name: admin
+  namespace: demo
+spec:
+  type: admin
+  role: admin
+  identityServerClusterRef:
+    name: my-cluster
+  replicas: 1
+  ui:
+    enabled: true
+    secure: false
+  service:
+    type: ClusterIP
+    port: 6749
 ```
+
+3. Create runtime nodes:
+
+```yaml
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerNode
+metadata:
+  name: runtime
+  namespace: demo
+spec:
+  type: runtime
+  role: runtime
+  identityServerClusterRef:
+    name: my-cluster
+  replicas: 2
+  service:
+    type: ClusterIP
+    port: 8443
+```
+
+4. Check status:
+
+```bash
+kubectl -n demo get isc          # IdentityServerClusters
+kubectl -n demo get isn          # IdentityServerNodes
+kubectl -n demo get deployments  # Auto-created Deployments
+kubectl -n demo get services     # Auto-created Services
+```
+
+### Accessing the Admin UI
+
+The admin UI is **disabled by default**. To enable it:
+
+1. Configure `adminCredentials` on the IdentityServerCluster (see step 1 above)
+2. Set `ui.enabled: true` on the admin IdentityServerNode
+
+The operator exposes the admin-ui port (6749) and automatically injects the
+`PASSWORD` env var from the credentials Secret. This triggers the Curity
+unattended installer which configures and starts the admin UI.
+
+| Field | Default | Description |
+|---|---|---|
+| `ui.enabled` | `false` | Expose the admin UI port (6749) and inject `PASSWORD` |
+| `ui.secure` | `true` | Serve over HTTPS. Set to `false` for HTTP |
+
+To access the UI locally via port-forward:
+
+```bash
+kubectl -n demo port-forward svc/admin 6749:6749
+```
+
+- HTTPS (default): `https://localhost:6749/admin`
+- HTTP (`secure: false`): `http://localhost:6749/admin`
+
+Login with username `admin`. If the credentials Secret was auto-generated,
+retrieve the password:
+
+```bash
+kubectl -n demo get secret admin-creds -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d
+```
+
+## CRD Reference
+
+### IdentityServerCluster (`isc`)
+
+| Field | Type | Description |
+|---|---|---|
+| `version` | string, required | Curity Identity Server version |
+| `image` | string | Override container image (for private mirrors) |
+| `imagePullSecret` | string | Secret name for pulling images |
+| `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`, `KEYSTORE_PASSWORD`; auto-generated if omitted |
+| `configuration` | object | ConfigMap/Secret sources for XML config |
+| `dataSources` | list | Database connection specs (PostgreSQL); each injects env vars from a Secret |
+| `logging` | object | Log level, stdout tailing, sidecar config |
+| `resources` | object | Default CPU/memory requests/limits |
+| `probes` | object | Default liveness/readiness probe config |
+| `autoscaling` | object | HPA defaults (minReplicas, maxReplicas, targetCPU) |
+| `podDisruptionBudget` | object | PDB configuration |
+| `podAnnotations` | map | Applied to all managed pods |
+| `podLabels` | map | Applied to all managed pods |
+| `nodeSelector` | map | Pod scheduling constraints |
+| `tolerations` | list | Pod toleration specs |
+| `topologySpreadConstraints` | list | Pod spread policies |
+| `affinity` | object | Advanced scheduling constraints |
+
+### IdentityServerNode (`isn`)
+
+| Field | Type | Description |
+|---|---|---|
+| `type` | enum: `admin`/`runtime`, required | Node type; only one admin per cluster |
+| `role` | string, required | Unique node identifier within the cluster |
+| `identityServerClusterRef` | object, required | `{name: "<cluster>"}` reference |
+| `replicas` | int32, default: 1 | Deployment replicas; forced to 1 for admin |
+| `ui` | object | Admin UI config (see [Accessing the Admin UI](#accessing-the-admin-ui)) |
+| `service` | object | Service `type` (ClusterIP/LoadBalancer/NodePort) and `port` |
+| `environmentVariables` | list | Standard Kubernetes env vars |
+| `resources` | object | Overrides cluster-level resources |
+| `probes` | object | Overrides cluster-level probes |
+| `logging` | object | Overrides cluster-level logging |
+| `autoscaling` | object | HPA configuration |
+| `podDisruptionBudget` | object | PDB configuration |
+| `podAnnotations` | map | Merges with cluster-level annotations |
+| `podLabels` | map | Merges with cluster-level labels |
+| `nodeSelector` | map | Overrides cluster-level nodeSelector |
+| `tolerations` | list | Overrides cluster-level tolerations |
+| `topologySpreadConstraints` | list | Overrides cluster-level topology |
+| `affinity` | object | Overrides cluster-level affinity |
 
 ## Running Tests
 
@@ -87,20 +248,11 @@ make fmt   # Run go fmt
 make vet   # Run go vet
 ```
 
-## CRD Reference
-
-| Field | Value |
-|---|---|
-| API Group | `curity.io` |
-| API Version | `v1alpha1` |
-| Kind | `IdentityServer` |
-| Short Name | `idsvr` |
-| Spec Fields | `replicas` (int32, optional) |
-
 ## Cleanup
 
 ```bash
-make undeploy        # Remove the operator from the cluster
+make undeploy        # Remove the operator from the cluster (Kustomize)
+make undeploy-helm   # Remove the operator from the cluster (Helm)
 make uninstall       # Remove CRDs
 make cluster-destroy # Delete the Kind cluster
 ```

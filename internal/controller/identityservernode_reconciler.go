@@ -168,6 +168,15 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
+	// Warn if admin UI is enabled but no credentials configured
+	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
+		if cluster.Spec.AdminCredentials == nil {
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "AdminUINoCredentials",
+				"Admin UI is enabled but cluster %q has no adminCredentials; "+
+					"the admin UI requires a PASSWORD env var to start", cluster.Name)
+		}
+	}
+
 	// 6. Build and reconcile the Deployment
 	desiredDeploy := buildDeployment(&cluster, &node)
 

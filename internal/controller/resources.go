@@ -263,6 +263,33 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		}
 	}
 
+	// Auto-inject PASSWORD for Curity's unattended installer when admin UI is enabled.
+	// The installer checks for PASSWORD (not ADMIN_PASSWORD) to trigger first-run setup
+	// which configures the admin-service XML and starts the UI on port 6749.
+	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
+		if cluster.Spec.AdminCredentials != nil {
+			hasPassword := false
+			for _, item := range cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Items {
+				if item.Path == "PASSWORD" {
+					hasPassword = true
+					break
+				}
+			}
+			if !hasPassword {
+				secretName := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
+				envVars = append(envVars, corev1.EnvVar{
+					Name: "PASSWORD",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+							Key:                  "ADMIN_PASSWORD",
+						},
+					},
+				})
+			}
+		}
+	}
+
 	// DataSource connection env vars from secrets
 	for _, ds := range cluster.Spec.DataSources {
 		secretName := ds.ValueFrom.SecretKeyRef.Name

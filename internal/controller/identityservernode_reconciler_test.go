@@ -660,7 +660,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(secret.Annotations["argocd.argoproj.io/compare-options"]).To(Equal("IgnoreExtraneous"))
 		})
 
-		It("should regenerate when admin node is renamed (Scenario 5)", func() {
+		It("should update XML in-place when admin node is renamed (Scenario 5)", func() {
 			testCreateCluster(ns, "rename-cluster")
 			testCreateNode(ns, "rename-admin", v1alpha1.NodeTypeAdmin, "rename-cluster")
 
@@ -673,8 +673,9 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				return secret.Annotations["curity.io/admin-node"]
 			}, timeout, interval).Should(Equal("rename-admin"))
 
-			// Pre-populate the Secret so it's considered "ready"
-			secret.Data = map[string][]byte{"cluster.xml": []byte("<config>old-data</config>")}
+			// Pre-populate Secret with XML containing the admin hostname
+			secret.Data = map[string][]byte{"cluster.xml": []byte(
+				"<config><cluster><host>rename-admin</host><port>6789</port></cluster></config>")}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
 			// Delete old admin node, create new one with different name
@@ -689,7 +690,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 
 			testCreateNode(ns, "rename-admin-v2", v1alpha1.NodeTypeAdmin, "rename-cluster")
 
-			// Secret should be deleted and recreated (admin name mismatch triggers regeneration)
+			// Annotation should be updated in-place (no delete/recreate)
 			Eventually(func() string {
 				s := &corev1.Secret{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "rename-cluster-cluster-config", Namespace: ns}, s); err != nil {
@@ -697,9 +698,59 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				}
 				return s.Annotations["curity.io/admin-node"]
 			}, timeout, interval).Should(Equal("rename-admin-v2"))
+
+			// Verify the XML was updated in-place with new hostname
+			updatedSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-cluster-cluster-config", Namespace: ns}, updatedSecret)).To(Succeed())
+			Expect(string(updatedSecret.Data["cluster.xml"])).To(ContainSubstring("<host>rename-admin-v2</host>"))
+			Expect(string(updatedSecret.Data["cluster.xml"])).NotTo(ContainSubstring("<host>rename-admin</host>"))
+			// Rest of XML preserved
+			Expect(string(updatedSecret.Data["cluster.xml"])).To(ContainSubstring("<port>6789</port>"))
 		})
 
-		It("should regenerate when encryption key changes (Scenario 11)", func() {
+		It("should preserve XML when admin rename host tag is missing (Scenario 5 edge)", func() {
+			testCreateCluster(ns, "rename-nohost-cluster")
+			testCreateNode(ns, "rename-nohost-admin", v1alpha1.NodeTypeAdmin, "rename-nohost-cluster")
+
+			// Wait for Secret
+			secret := &corev1.Secret{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "rename-nohost-cluster-cluster-config", Namespace: ns}, secret); err != nil {
+					return ""
+				}
+				return secret.Annotations["curity.io/admin-node"]
+			}, timeout, interval).Should(Equal("rename-nohost-admin"))
+
+			// Pre-populate with XML that has no <host> tag (user-edited or malformed)
+			originalXML := "<config><cluster><keystore>abc</keystore></cluster></config>"
+			secret.Data = map[string][]byte{"cluster.xml": []byte(originalXML)}
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+
+			// Rename admin
+			oldNode := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-nohost-admin", Namespace: ns}, oldNode)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, oldNode)).To(Succeed())
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-nohost-admin", Namespace: ns}, &v1alpha1.IdentityServerNode{}))
+			}, timeout, interval).Should(BeTrue())
+
+			testCreateNode(ns, "rename-nohost-admin-v2", v1alpha1.NodeTypeAdmin, "rename-nohost-cluster")
+
+			// Annotation updates, XML is unchanged (strings.Replace is a no-op)
+			Eventually(func() string {
+				s := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "rename-nohost-cluster-cluster-config", Namespace: ns}, s); err != nil {
+					return ""
+				}
+				return s.Annotations["curity.io/admin-node"]
+			}, timeout, interval).Should(Equal("rename-nohost-admin-v2"))
+
+			updatedSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-nohost-cluster-cluster-config", Namespace: ns}, updatedSecret)).To(Succeed())
+			Expect(string(updatedSecret.Data["cluster.xml"])).To(Equal(originalXML))
+		})
+
+		It("should reset to placeholder when encryption key changes (Scenario 11)", func() {
 			// Create cluster with admin credentials
 			cluster := &v1alpha1.IdentityServerCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: "enckey-cluster", Namespace: ns},
@@ -743,27 +794,75 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(k8sClient.Update(ctx, configSecret)).To(Succeed())
 
 			// Change the encryption key in credentials Secret
+			// The Secret watch triggers a cluster reconcile automatically
 			credSecret.Data["CONFIG_ENCRYPTION_KEY"] = []byte("completely-new-encryption-key-value")
 			Expect(k8sClient.Update(ctx, credSecret)).To(Succeed())
 
-			// Trigger cluster reconcile by touching the cluster (credential Secret
-			// changes don't trigger reconcile — only Cluster/Node/Job changes do)
-			clusterObj := &v1alpha1.IdentityServerCluster{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "enckey-cluster", Namespace: ns}, clusterObj)).To(Succeed())
-			if clusterObj.Annotations == nil {
-				clusterObj.Annotations = map[string]string{}
-			}
-			clusterObj.Annotations["curity.io/trigger-reconcile"] = "key-rotation"
-			Expect(k8sClient.Update(ctx, clusterObj)).To(Succeed())
-
-			// The cluster config Secret should be regenerated with new hash
-			Eventually(func() string {
+			// Secret should be reset to placeholder with new hash (not deleted)
+			Eventually(func() bool {
 				s := &corev1.Secret{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "enckey-cluster-cluster-config", Namespace: ns}, s); err != nil {
-					return oldHash
+					return false
 				}
-				return s.Annotations["curity.io/encryption-key-hash"]
-			}, timeout, interval).ShouldNot(Equal(oldHash))
+				newHash := s.Annotations["curity.io/encryption-key-hash"]
+				data := string(s.Data["cluster.xml"])
+				return newHash != oldHash && data == "placeholder"
+			}, timeout, interval).Should(BeTrue())
+		})
+
+		It("should not reset when encryption key hash is set for the first time", func() {
+			// Create cluster with admin credentials pointing to a pre-existing Secret
+			// that initially has NO CONFIG_ENCRYPTION_KEY
+			credSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "firstkey-creds",
+					Namespace: ns,
+					Labels: map[string]string{
+						"app.kubernetes.io/managed-by": "curity-operator",
+						"curity.io/cluster":            "firstkey-cluster",
+					},
+				},
+				Data: map[string][]byte{
+					"ADMIN_PASSWORD": []byte("password123"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, credSecret)).To(Succeed())
+
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "firstkey-cluster", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name:  "firstkey-creds",
+								Items: []v1alpha1.KeyToPath{{Key: "ADMIN_PASSWORD", Path: "PASSWORD"}},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+			testCreateNode(ns, "firstkey-admin", v1alpha1.NodeTypeAdmin, "firstkey-cluster")
+
+			// Wait for cluster config Secret (no encryption-key-hash since no key exists)
+			configSecret := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "firstkey-cluster-cluster-config", Namespace: ns}, configSecret)
+			}, timeout, interval).Should(Succeed())
+
+			// Pre-populate so it's "ready"
+			configSecret.Data = map[string][]byte{"cluster.xml": []byte("<config>some-data</config>")}
+			Expect(k8sClient.Update(ctx, configSecret)).To(Succeed())
+
+			// Verify it stays ready (not reset) — no encryption key hash means skip check
+			Consistently(func() string {
+				s := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "firstkey-cluster-cluster-config", Namespace: ns}, s); err != nil {
+					return ""
+				}
+				return string(s.Data["cluster.xml"])
+			}, 3*time.Second, interval).Should(Equal("<config>some-data</config>"))
 		})
 
 		It("should retry when pod logs are unavailable (Scenario 9)", func() {
@@ -795,6 +894,384 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				}
 				return newJob.UID != origUID
 			}, timeout, interval).Should(BeTrue())
+		})
+	})
+
+	Context("Cluster config workflows", func() {
+		It("should complete full lifecycle: create → populate → version upgrade → reuse", func() {
+			testCreateCluster(ns, "lifecycle-cluster")
+			testCreateNode(ns, "lifecycle-admin", v1alpha1.NodeTypeAdmin, "lifecycle-cluster")
+
+			// Step 1: Wait for placeholder Secret and Job
+			configSecret := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster-cluster-config", Namespace: ns}, configSecret)
+			}, timeout, interval).Should(Succeed())
+
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster-cluster-config-job", Namespace: ns}, job)
+			}, timeout, interval).Should(Succeed())
+
+			// Step 2: Simulate Job completion — pre-populate Secret with real data
+			configSecret.Data = map[string][]byte{"cluster.xml": []byte(
+				"<config><cluster><host>lifecycle-admin</host><port>6789</port></cluster></config>")}
+			Expect(k8sClient.Update(ctx, configSecret)).To(Succeed())
+
+			// Step 3: Verify ClusterConfigReady=True
+			cluster := &v1alpha1.IdentityServerCluster{}
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster", Namespace: ns}, cluster); err != nil {
+					return false
+				}
+				for _, c := range cluster.Status.Conditions {
+					if c.Type == "ClusterConfigReady" && c.Status == metav1.ConditionTrue {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue())
+
+			// Step 4: Version upgrade — cluster.xml should be reused
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster", Namespace: ns}, cluster)).To(Succeed())
+			cluster.Spec.Version = "12.0"
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+			// Verify Secret data is unchanged after version upgrade
+			Consistently(func() string {
+				s := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster-cluster-config", Namespace: ns}, s); err != nil {
+					return ""
+				}
+				return string(s.Data["cluster.xml"])
+			}, 3*time.Second, interval).Should(ContainSubstring("<host>lifecycle-admin</host>"))
+		})
+
+		It("should do admin rename workflow: rename → in-place update → condition stays ready", func() {
+			testCreateCluster(ns, "wf-rename-cluster")
+			testCreateNode(ns, "wf-rename-admin", v1alpha1.NodeTypeAdmin, "wf-rename-cluster")
+
+			// Wait for Secret and pre-populate with real XML
+			secret := &corev1.Secret{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-rename-cluster-cluster-config", Namespace: ns}, secret); err != nil {
+					return ""
+				}
+				return secret.Annotations["curity.io/admin-node"]
+			}, timeout, interval).Should(Equal("wf-rename-admin"))
+
+			secret.Data = map[string][]byte{"cluster.xml": []byte(
+				"<config><cluster><keystore>abc123</keystore><host>wf-rename-admin</host><port>6789</port></cluster></config>")}
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+
+			// Verify ClusterConfigReady=True
+			cluster := &v1alpha1.IdentityServerCluster{}
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-rename-cluster", Namespace: ns}, cluster); err != nil {
+					return false
+				}
+				for _, c := range cluster.Status.Conditions {
+					if c.Type == "ClusterConfigReady" && c.Status == metav1.ConditionTrue {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue())
+
+			// Rename admin node
+			oldNode := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-rename-admin", Namespace: ns}, oldNode)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, oldNode)).To(Succeed())
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-rename-admin", Namespace: ns}, &v1alpha1.IdentityServerNode{}))
+			}, timeout, interval).Should(BeTrue())
+
+			testCreateNode(ns, "wf-rename-admin-v2", v1alpha1.NodeTypeAdmin, "wf-rename-cluster")
+
+			// Verify in-place update: new hostname, keystore preserved
+			Eventually(func() string {
+				s := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-rename-cluster-cluster-config", Namespace: ns}, s); err != nil {
+					return ""
+				}
+				return string(s.Data["cluster.xml"])
+			}, timeout, interval).Should(And(
+				ContainSubstring("<host>wf-rename-admin-v2</host>"),
+				ContainSubstring("<keystore>abc123</keystore>"),
+				Not(ContainSubstring("<host>wf-rename-admin</host>")),
+			))
+
+			// ClusterConfigReady should still be True (not reset)
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-rename-cluster", Namespace: ns}, cluster); err != nil {
+					return false
+				}
+				for _, c := range cluster.Status.Conditions {
+					if c.Type == "ClusterConfigReady" && c.Status == metav1.ConditionTrue {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue())
+		})
+
+		It("should do encryption key rotation workflow: change key → reset → new Job", func() {
+			// Create cluster with credentials
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "wf-enckey-cluster", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name:  "wf-enckey-creds",
+								Items: []v1alpha1.KeyToPath{{Key: "ADMIN_PASSWORD", Path: "PASSWORD"}},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+			// Wait for auto-generated credentials
+			credSecret := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-enckey-creds", Namespace: ns}, credSecret)
+			}, timeout, interval).Should(Succeed())
+
+			testCreateNode(ns, "wf-enckey-admin", v1alpha1.NodeTypeAdmin, "wf-enckey-cluster")
+
+			// Wait for cluster config Secret with hash
+			configSecret := &corev1.Secret{}
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-enckey-cluster-cluster-config", Namespace: ns}, configSecret); err != nil {
+					return false
+				}
+				_, ok := configSecret.Annotations["curity.io/encryption-key-hash"]
+				return ok
+			}, timeout, interval).Should(BeTrue())
+
+			oldHash := configSecret.Annotations["curity.io/encryption-key-hash"]
+
+			// Pre-populate Secret
+			configSecret.Data = map[string][]byte{"cluster.xml": []byte("<config>encrypted-data</config>")}
+			Expect(k8sClient.Update(ctx, configSecret)).To(Succeed())
+
+			// Verify ClusterConfigReady=True
+			Eventually(func() bool {
+				c := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-enckey-cluster", Namespace: ns}, c); err != nil {
+					return false
+				}
+				for _, cond := range c.Status.Conditions {
+					if cond.Type == "ClusterConfigReady" && cond.Status == metav1.ConditionTrue {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue())
+
+			// Change encryption key
+			credSecret.Data["CONFIG_ENCRYPTION_KEY"] = []byte("brand-new-key-value")
+			Expect(k8sClient.Update(ctx, credSecret)).To(Succeed())
+
+			// Secret should be reset to placeholder with new hash
+			Eventually(func() bool {
+				s := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-enckey-cluster-cluster-config", Namespace: ns}, s); err != nil {
+					return false
+				}
+				return s.Annotations["curity.io/encryption-key-hash"] != oldHash &&
+					string(s.Data["cluster.xml"]) == "placeholder"
+			}, timeout, interval).Should(BeTrue())
+
+			// A new Job should be created for regeneration
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-enckey-cluster-cluster-config-job", Namespace: ns}, job)
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should regenerate when Secret is deleted externally (Scenario 1)", func() {
+			testCreateCluster(ns, "wf-delsecret-cluster")
+			testCreateNode(ns, "wf-delsecret-admin", v1alpha1.NodeTypeAdmin, "wf-delsecret-cluster")
+
+			// Wait for Secret and pre-populate
+			secret := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delsecret-cluster-cluster-config", Namespace: ns}, secret)
+			}, timeout, interval).Should(Succeed())
+
+			secret.Data = map[string][]byte{"cluster.xml": []byte("<config><host>wf-delsecret-admin</host></config>")}
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+
+			// Verify ClusterConfigReady=True
+			Eventually(func() bool {
+				c := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delsecret-cluster", Namespace: ns}, c); err != nil {
+					return false
+				}
+				for _, cond := range c.Status.Conditions {
+					if cond.Type == "ClusterConfigReady" && cond.Status == metav1.ConditionTrue {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue())
+
+			// Delete the Secret externally (simulating user or accidental deletion)
+			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+
+			// Operator should detect missing Secret and create a new placeholder + Job
+			newSecret := &corev1.Secret{}
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delsecret-cluster-cluster-config", Namespace: ns}, newSecret); err != nil {
+					return false
+				}
+				return true
+			}, timeout, interval).Should(BeTrue())
+
+			// A Job should be created for regeneration
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delsecret-cluster-cluster-config-job", Namespace: ns}, job)
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should preserve Secret when Cluster CR is deleted (Scenario 2)", func() {
+			testCreateCluster(ns, "wf-delcr-cluster")
+			testCreateNode(ns, "wf-delcr-admin", v1alpha1.NodeTypeAdmin, "wf-delcr-cluster")
+
+			// Wait for Secret and pre-populate
+			secret := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-cluster-cluster-config", Namespace: ns}, secret)
+			}, timeout, interval).Should(Succeed())
+
+			secret.Data = map[string][]byte{"cluster.xml": []byte("<config><host>wf-delcr-admin</host></config>")}
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+
+			// Delete the Node first (finalizer requires this)
+			node := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-admin", Namespace: ns}, node)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-admin", Namespace: ns}, &v1alpha1.IdentityServerNode{}))
+			}, timeout, interval).Should(BeTrue())
+
+			// Delete the Cluster CR
+			cluster := &v1alpha1.IdentityServerCluster{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-cluster", Namespace: ns}, cluster)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-cluster", Namespace: ns}, &v1alpha1.IdentityServerCluster{}))
+			}, timeout, interval).Should(BeTrue())
+
+			// Secret should still exist (no OwnerReference on Cluster CR)
+			survivedSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-cluster-cluster-config", Namespace: ns}, survivedSecret)).To(Succeed())
+			Expect(string(survivedSecret.Data["cluster.xml"])).To(Equal("<config><host>wf-delcr-admin</host></config>"))
+		})
+
+		It("should accept user-edited Secret without regenerating (Scenario 6)", func() {
+			// Pre-create the Secret with real data BEFORE the cluster/node,
+			// so the operator never creates a Job (Secret is already ready).
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "wf-useredit-cluster-cluster-config",
+					Namespace: ns,
+					Annotations: map[string]string{
+						"argocd.argoproj.io/compare-options": "IgnoreExtraneous",
+						"curity.io/admin-node":               "wf-useredit-admin",
+						"curity.io/encryption-key-hash":      "",
+					},
+					Labels: map[string]string{
+						"curity.io/cluster":            "wf-useredit-cluster",
+						"curity.io/component":          "cluster-config",
+						"app.kubernetes.io/managed-by": "curity-operator",
+					},
+				},
+				Data: map[string][]byte{"cluster.xml": []byte("<config><host>wf-useredit-admin</host></config>")},
+			}
+			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+
+			testCreateCluster(ns, "wf-useredit-cluster")
+			testCreateNode(ns, "wf-useredit-admin", v1alpha1.NodeTypeAdmin, "wf-useredit-cluster")
+
+			// Verify ClusterConfigReady=True (operator sees pre-existing Secret)
+			Eventually(func() bool {
+				c := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-useredit-cluster", Namespace: ns}, c); err != nil {
+					return false
+				}
+				for _, cond := range c.Status.Conditions {
+					if cond.Type == "ClusterConfigReady" && cond.Status == metav1.ConditionTrue {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue())
+
+			// User edits the Secret directly (custom cluster.xml)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-useredit-cluster-cluster-config", Namespace: ns}, secret)).To(Succeed())
+			secret.Data = map[string][]byte{"cluster.xml": []byte("<config>user-custom-xml</config>")}
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+
+			// Operator should accept it — data stays as user set it
+			Consistently(func() string {
+				s := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-useredit-cluster-cluster-config", Namespace: ns}, s); err != nil {
+					return ""
+				}
+				return string(s.Data["cluster.xml"])
+			}, 3*time.Second, interval).Should(Equal("<config>user-custom-xml</config>"))
+
+			// No Job should exist (operator respects user edits)
+			jobList := &batchv1.JobList{}
+			Expect(k8sClient.List(ctx, jobList,
+				client.InNamespace(ns),
+				client.MatchingLabels{"curity.io/cluster": "wf-useredit-cluster"},
+			)).To(Succeed())
+			Expect(jobList.Items).To(BeEmpty())
+		})
+
+		It("should find existing running Job after operator restart (Scenario 8)", func() {
+			testCreateCluster(ns, "wf-restart-cluster")
+			testCreateNode(ns, "wf-restart-admin", v1alpha1.NodeTypeAdmin, "wf-restart-cluster")
+
+			// Wait for Job to be created
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-restart-cluster-cluster-config-job", Namespace: ns}, job)
+			}, timeout, interval).Should(Succeed())
+
+			origUID := job.UID
+
+			// Simulate operator restart: the next reconcile should find the existing
+			// running Job and NOT create a duplicate. Trigger reconcile by touching cluster.
+			cluster := &v1alpha1.IdentityServerCluster{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-restart-cluster", Namespace: ns}, cluster)).To(Succeed())
+			if cluster.Annotations == nil {
+				cluster.Annotations = map[string]string{}
+			}
+			cluster.Annotations["trigger-reconcile"] = "restart-sim"
+			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+			// Wait for reconcile to process
+			time.Sleep(2 * time.Second)
+
+			// Job should still be the same one (same UID, no duplicate)
+			sameJob := &batchv1.Job{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-restart-cluster-cluster-config-job", Namespace: ns}, sameJob)).To(Succeed())
+			Expect(sameJob.UID).To(Equal(origUID))
+
+			// Only one Job should exist
+			jobList := &batchv1.JobList{}
+			Expect(k8sClient.List(ctx, jobList,
+				client.InNamespace(ns),
+				client.MatchingLabels{"curity.io/cluster": "wf-restart-cluster"},
+			)).To(Succeed())
+			Expect(jobList.Items).To(HaveLen(1))
 		})
 	})
 

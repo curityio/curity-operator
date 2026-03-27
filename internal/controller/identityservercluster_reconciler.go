@@ -250,6 +250,10 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 			&batchv1.Job{},
 			handler.EnqueueRequestsFromMapFunc(r.findClusterForJob),
 		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findClusterForSecret),
+		).
 		Complete(r)
 }
 
@@ -467,29 +471,39 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 		secretExists = true
 		if isClusterConfigReady(&configSecret) {
 			// Check if admin node name changed (Scenario 5)
+			// Update the XML in-place — same key, new hostname — no Job needed.
 			if storedAdmin, ok := configSecret.Annotations["curity.io/admin-node"]; ok && storedAdmin != adminNodeName {
-				log.Info("admin node changed, regenerating cluster config",
+				log.Info("admin node changed, updating cluster config in-place",
 					"old", storedAdmin, "new", adminNodeName)
-				if err := r.Delete(ctx, &configSecret); err != nil && !apierrors.IsNotFound(err) {
-					return fmt.Errorf("failed to delete cluster config for admin rename: %w", err)
+				oldXML := string(configSecret.Data[clusterConfigKey])
+				newXML := strings.Replace(oldXML,
+					"<host>"+storedAdmin+"</host>",
+					"<host>"+adminNodeName+"</host>", 1)
+				configSecret.Data[clusterConfigKey] = []byte(newXML)
+				configSecret.Annotations["curity.io/admin-node"] = adminNodeName
+				if err := r.Update(ctx, &configSecret); err != nil {
+					return fmt.Errorf("failed to update cluster config for admin rename: %w", err)
 				}
-				secretExists = false
+				cluster.Status.ClusterConfigSecretName = secretName
+				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
+					metav1.ConditionTrue, "SecretReady",
+					"Cluster config secret is populated", cluster.Generation)
+				return nil
 			}
 
 			// Check if encryption key changed (Scenario 11)
-			if secretExists {
-				currentKeyHash := r.computeEncryptionKeyHash(ctx, cluster)
-				if storedHash, ok := configSecret.Annotations["curity.io/encryption-key-hash"]; ok && currentKeyHash != "" && storedHash != currentKeyHash {
-					log.Info("encryption key changed, regenerating cluster config")
-					if err := r.Delete(ctx, &configSecret); err != nil && !apierrors.IsNotFound(err) {
-						return fmt.Errorf("failed to delete cluster config for key rotation: %w", err)
-					}
-					secretExists = false
+			// Reset to placeholder so the Job flow regenerates with the new key.
+			currentKeyHash := r.computeEncryptionKeyHash(ctx, cluster)
+			if storedHash, ok := configSecret.Annotations["curity.io/encryption-key-hash"]; ok && currentKeyHash != "" && storedHash != currentKeyHash {
+				log.Info("encryption key changed, resetting cluster config for regeneration")
+				configSecret.Data[clusterConfigKey] = []byte(clusterConfigPlaceholder)
+				configSecret.Annotations["curity.io/encryption-key-hash"] = currentKeyHash
+				if err := r.Update(ctx, &configSecret); err != nil {
+					return fmt.Errorf("failed to reset cluster config for key rotation: %w", err)
 				}
-			}
-
-			// Secret is ready and up-to-date
-			if secretExists {
+				// Fall through to Job creation below
+			} else {
+				// Secret is ready and up-to-date
 				cluster.Status.ClusterConfigSecretName = secretName
 				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
 					metav1.ConditionTrue, "SecretReady",
@@ -662,6 +676,23 @@ func (r *IdentityServerClusterReconciler) findClusterForJob(ctx context.Context,
 	}
 	return []ctrl.Request{
 		{NamespacedName: client.ObjectKey{Name: clusterName, Namespace: job.Namespace}},
+	}
+}
+
+// findClusterForSecret maps a Secret change to a reconcile request for the
+// owning cluster. Only triggers for Secrets with the curity.io/cluster label
+// (operator-managed admin credentials and cluster config Secrets).
+func (r *IdentityServerClusterReconciler) findClusterForSecret(ctx context.Context, obj client.Object) []ctrl.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+	clusterName, exists := secret.Labels["curity.io/cluster"]
+	if !exists {
+		return nil
+	}
+	return []ctrl.Request{
+		{NamespacedName: client.ObjectKey{Name: clusterName, Namespace: secret.Namespace}},
 	}
 }
 

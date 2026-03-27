@@ -2,12 +2,15 @@ package e2e
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1558,5 +1561,207 @@ var _ = Describe("Test 28: Logging sidecars", Ordered, func() {
 		Expect(k().Get(ctx, client.ObjectKey{Name: "log-node", Namespace: ns}, node)).To(Succeed())
 		utils.MatchCRDResource(cluster, "log-cluster")
 		utils.MatchCRDResource(node, "log-node")
+	})
+})
+
+// ====================================================================
+// TEST 30: Cluster config — mount volume and create Job
+// ====================================================================
+var _ = Describe("Test 30: Cluster config generation", Ordered, func() {
+	const ns = "e2e-clusterconfig"
+	BeforeAll(func() { createNS(ns) })
+	AfterAll(func() { deleteNS(ns) })
+
+	It("should mount cluster config volume on all node Deployments", func() {
+		ctx := context.Background()
+
+		// Pre-create a populated cluster config Secret so Deployments can mount it
+		configSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "cc-cluster-cluster-config",
+				Namespace: ns,
+				Labels: map[string]string{
+					"curity.io/cluster":   "cc-cluster",
+					"curity.io/component": "cluster-config",
+				},
+				Annotations: map[string]string{
+					"curity.io/admin-node":               "cc-admin",
+					"argocd.argoproj.io/compare-options": "IgnoreExtraneous",
+				},
+			},
+			Data: map[string][]byte{"cluster.xml": []byte("<config>test-cluster-xml</config>")},
+		}
+		Expect(k().Create(ctx, configSecret)).To(Succeed())
+
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+			map[string]interface{}{"name": "cc-cluster", "namespace": ns})
+
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+			map[string]interface{}{"name": "cc-admin", "namespace": ns, "clusterName": "cc-cluster"})
+
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+			map[string]interface{}{"name": "cc-runtime", "namespace": ns, "clusterName": "cc-cluster"})
+
+		// Wait for both Deployments
+		adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cc-admin", Namespace: ns}}
+		utils.WaitForResource(adminDeploy, func() bool { return true }, e2eTimeout, e2eInterval)
+
+		runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cc-runtime", Namespace: ns}}
+		utils.WaitForResource(runtimeDeploy, func() bool { return true }, e2eTimeout, e2eInterval)
+
+		// Verify cluster-config volume on admin Deployment
+		foundAdminVol := false
+		foundAdminMount := false
+		for _, v := range adminDeploy.Spec.Template.Spec.Volumes {
+			if v.Name == "cluster-config" && v.Secret != nil && v.Secret.SecretName == "cc-cluster-cluster-config" {
+				foundAdminVol = true
+			}
+		}
+		for _, m := range adminDeploy.Spec.Template.Spec.Containers[0].VolumeMounts {
+			if m.Name == "cluster-config" && m.MountPath == "/opt/idsvr/etc/init/cluster.xml" && m.SubPath == "cluster.xml" && m.ReadOnly {
+				foundAdminMount = true
+			}
+		}
+		Expect(foundAdminVol).To(BeTrue(), "admin Deployment should have cluster-config volume")
+		Expect(foundAdminMount).To(BeTrue(), "admin Deployment should mount cluster.xml at /opt/idsvr/etc/init/cluster.xml")
+
+		// Verify cluster-config volume on runtime Deployment
+		foundRuntimeVol := false
+		foundRuntimeMount := false
+		for _, v := range runtimeDeploy.Spec.Template.Spec.Volumes {
+			if v.Name == "cluster-config" && v.Secret != nil && v.Secret.SecretName == "cc-cluster-cluster-config" {
+				foundRuntimeVol = true
+			}
+		}
+		for _, m := range runtimeDeploy.Spec.Template.Spec.Containers[0].VolumeMounts {
+			if m.Name == "cluster-config" && m.MountPath == "/opt/idsvr/etc/init/cluster.xml" && m.SubPath == "cluster.xml" && m.ReadOnly {
+				foundRuntimeMount = true
+			}
+		}
+		Expect(foundRuntimeVol).To(BeTrue(), "runtime Deployment should have cluster-config volume")
+		Expect(foundRuntimeMount).To(BeTrue(), "runtime Deployment should mount cluster.xml at /opt/idsvr/etc/init/cluster.xml")
+
+		// Snapshot Deployments
+		utils.MatchYAMLResource(adminDeploy, "[deployment] cc-admin")
+		utils.MatchYAMLResource(runtimeDeploy, "[deployment] cc-runtime")
+	})
+
+	It("should include cluster-config-hash annotation on pods", func() {
+		ctx := context.Background()
+
+		// Compute expected hash of the pre-created Secret data
+		expectedHash := sha256.Sum256([]byte("<config>test-cluster-xml</config>"))
+		expectedHashStr := hex.EncodeToString(expectedHash[:])
+
+		adminDeploy := &appsv1.Deployment{}
+		Expect(k().Get(ctx, client.ObjectKey{Name: "cc-admin", Namespace: ns}, adminDeploy)).To(Succeed())
+
+		hash, ok := adminDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
+		Expect(ok).To(BeTrue(), "admin Deployment should have cluster-config-hash annotation")
+		Expect(hash).To(Equal(expectedHashStr))
+
+		runtimeDeploy := &appsv1.Deployment{}
+		Expect(k().Get(ctx, client.ObjectKey{Name: "cc-runtime", Namespace: ns}, runtimeDeploy)).To(Succeed())
+
+		hash, ok = runtimeDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
+		Expect(ok).To(BeTrue(), "runtime Deployment should have cluster-config-hash annotation")
+		Expect(hash).To(Equal(expectedHashStr))
+	})
+
+	It("should set ClusterConfigReady condition on cluster", func() {
+		ctx := context.Background()
+
+		cluster := &v1alpha1.IdentityServerCluster{}
+		Eventually(func() bool {
+			if err := k().Get(ctx, client.ObjectKey{Name: "cc-cluster", Namespace: ns}, cluster); err != nil {
+				return false
+			}
+			for _, c := range cluster.Status.Conditions {
+				if c.Type == "ClusterConfigReady" && c.Status == metav1.ConditionTrue {
+					return true
+				}
+			}
+			return false
+		}, e2eTimeout, e2eInterval).Should(BeTrue())
+
+		Expect(cluster.Status.ClusterConfigSecretName).To(Equal("cc-cluster-cluster-config"))
+
+		utils.MatchCRDResource(cluster, "cc-cluster with-config")
+	})
+})
+
+// ====================================================================
+// TEST 31: Cluster config — Job creation without pre-existing Secret
+// ====================================================================
+var _ = Describe("Test 31: Cluster config Job creation", Ordered, func() {
+	const ns = "e2e-ccjob"
+	BeforeAll(func() { createNS(ns) })
+	AfterAll(func() { deleteNS(ns) })
+
+	It("should create placeholder Secret and genclust Job when admin exists", func() {
+		ctx := context.Background()
+
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+			map[string]interface{}{"name": "job-cluster", "namespace": ns})
+
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+			map[string]interface{}{"name": "job-admin", "namespace": ns, "clusterName": "job-cluster"})
+
+		// Verify placeholder Secret is created
+		secret := &corev1.Secret{}
+		Eventually(func() error {
+			return k().Get(ctx, client.ObjectKey{Name: "job-cluster-cluster-config", Namespace: ns}, secret)
+		}, e2eTimeout, e2eInterval).Should(Succeed())
+
+		Expect(string(secret.Data["cluster.xml"])).To(Equal("placeholder"))
+		Expect(secret.Annotations).To(HaveKeyWithValue("argocd.argoproj.io/compare-options", "IgnoreExtraneous"))
+		Expect(secret.Annotations).To(HaveKey("curity.io/admin-node"))
+		Expect(secret.Labels).To(HaveKeyWithValue("curity.io/cluster", "job-cluster"))
+		Expect(secret.Labels).To(HaveKeyWithValue("curity.io/component", "cluster-config"))
+		// No OwnerReference — survives cluster deletion
+		Expect(secret.OwnerReferences).To(BeEmpty())
+
+		utils.MatchYAMLResource(secret, "[secret] job-cluster-cluster-config")
+
+		// Verify Job is created
+		job := &batchv1.Job{}
+		Eventually(func() error {
+			return k().Get(ctx, client.ObjectKey{Name: "job-cluster-cluster-config-job", Namespace: ns}, job)
+		}, e2eTimeout, e2eInterval).Should(Succeed())
+
+		Expect(job.Labels["curity.io/cluster"]).To(Equal("job-cluster"))
+		Expect(job.Labels["curity.io/component"]).To(Equal("cluster-config"))
+		Expect(*job.Spec.Template.Spec.AutomountServiceAccountToken).To(BeFalse())
+
+		// Verify the genclust container
+		container := job.Spec.Template.Spec.Containers[0]
+		Expect(container.Name).To(Equal("genclust"))
+		Expect(container.Image).To(ContainSubstring("curity"))
+
+		foundHost := false
+		for _, env := range container.Env {
+			if env.Name == "CONFIG_SERVICE_HOST" && env.Value == "job-admin" {
+				foundHost = true
+			}
+		}
+		Expect(foundHost).To(BeTrue(), "Job should have CONFIG_SERVICE_HOST=job-admin")
+
+		utils.MatchResource(job, "job", "job-cluster-cluster-config-job")
+
+		// Snapshot cluster status showing ClusterConfigReady condition
+		cluster := &v1alpha1.IdentityServerCluster{}
+		Eventually(func() bool {
+			if err := k().Get(ctx, client.ObjectKey{Name: "job-cluster", Namespace: ns}, cluster); err != nil {
+				return false
+			}
+			for _, c := range cluster.Status.Conditions {
+				if c.Type == "ClusterConfigReady" {
+					return true
+				}
+			}
+			return false
+		}, e2eTimeout, e2eInterval).Should(BeTrue())
+
+		utils.MatchCRDResource(cluster, "job-cluster with-job")
 	})
 })

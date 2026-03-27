@@ -659,6 +659,143 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			}, timeout, interval).Should(Succeed())
 			Expect(secret.Annotations["argocd.argoproj.io/compare-options"]).To(Equal("IgnoreExtraneous"))
 		})
+
+		It("should regenerate when admin node is renamed (Scenario 5)", func() {
+			testCreateCluster(ns, "rename-cluster")
+			testCreateNode(ns, "rename-admin", v1alpha1.NodeTypeAdmin, "rename-cluster")
+
+			// Wait for placeholder Secret with admin-node annotation
+			secret := &corev1.Secret{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "rename-cluster-cluster-config", Namespace: ns}, secret); err != nil {
+					return ""
+				}
+				return secret.Annotations["curity.io/admin-node"]
+			}, timeout, interval).Should(Equal("rename-admin"))
+
+			// Pre-populate the Secret so it's considered "ready"
+			secret.Data = map[string][]byte{"cluster.xml": []byte("<config>old-data</config>")}
+			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+
+			// Delete old admin node, create new one with different name
+			oldNode := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-admin", Namespace: ns}, oldNode)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, oldNode)).To(Succeed())
+
+			// Wait for old node to be gone
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-admin", Namespace: ns}, &v1alpha1.IdentityServerNode{}))
+			}, timeout, interval).Should(BeTrue())
+
+			testCreateNode(ns, "rename-admin-v2", v1alpha1.NodeTypeAdmin, "rename-cluster")
+
+			// Secret should be deleted and recreated (admin name mismatch triggers regeneration)
+			Eventually(func() string {
+				s := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "rename-cluster-cluster-config", Namespace: ns}, s); err != nil {
+					return ""
+				}
+				return s.Annotations["curity.io/admin-node"]
+			}, timeout, interval).Should(Equal("rename-admin-v2"))
+		})
+
+		It("should regenerate when encryption key changes (Scenario 11)", func() {
+			// Create cluster with admin credentials
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "enckey-cluster", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name:  "enckey-creds",
+								Items: []v1alpha1.KeyToPath{{Key: "ADMIN_PASSWORD", Path: "PASSWORD"}},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+			// Wait for auto-generated credentials secret
+			credSecret := &corev1.Secret{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "enckey-creds", Namespace: ns}, credSecret)
+			}, timeout, interval).Should(Succeed())
+
+			testCreateNode(ns, "enckey-admin", v1alpha1.NodeTypeAdmin, "enckey-cluster")
+
+			// Wait for cluster config Secret with encryption key hash
+			configSecret := &corev1.Secret{}
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "enckey-cluster-cluster-config", Namespace: ns}, configSecret); err != nil {
+					return false
+				}
+				_, ok := configSecret.Annotations["curity.io/encryption-key-hash"]
+				return ok
+			}, timeout, interval).Should(BeTrue())
+
+			oldHash := configSecret.Annotations["curity.io/encryption-key-hash"]
+			Expect(oldHash).NotTo(BeEmpty())
+
+			// Pre-populate Secret so it's "ready"
+			configSecret.Data = map[string][]byte{"cluster.xml": []byte("<config>encrypted-data</config>")}
+			Expect(k8sClient.Update(ctx, configSecret)).To(Succeed())
+
+			// Change the encryption key in credentials Secret
+			credSecret.Data["CONFIG_ENCRYPTION_KEY"] = []byte("completely-new-encryption-key-value")
+			Expect(k8sClient.Update(ctx, credSecret)).To(Succeed())
+
+			// Trigger cluster reconcile by touching the cluster (credential Secret
+			// changes don't trigger reconcile — only Cluster/Node/Job changes do)
+			clusterObj := &v1alpha1.IdentityServerCluster{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "enckey-cluster", Namespace: ns}, clusterObj)).To(Succeed())
+			if clusterObj.Annotations == nil {
+				clusterObj.Annotations = map[string]string{}
+			}
+			clusterObj.Annotations["curity.io/trigger-reconcile"] = "key-rotation"
+			Expect(k8sClient.Update(ctx, clusterObj)).To(Succeed())
+
+			// The cluster config Secret should be regenerated with new hash
+			Eventually(func() string {
+				s := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "enckey-cluster-cluster-config", Namespace: ns}, s); err != nil {
+					return oldHash
+				}
+				return s.Annotations["curity.io/encryption-key-hash"]
+			}, timeout, interval).ShouldNot(Equal(oldHash))
+		})
+
+		It("should retry when pod logs are unavailable (Scenario 9)", func() {
+			testCreateCluster(ns, "logs-cluster")
+			testCreateNode(ns, "logs-admin", v1alpha1.NodeTypeAdmin, "logs-cluster")
+
+			// Wait for Job to be created
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "logs-cluster-cluster-config-job", Namespace: ns}, job)
+			}, timeout, interval).Should(Succeed())
+
+			origUID := job.UID
+
+			// Mark Job as Complete (but no pod exists with Succeeded phase → logs unavailable)
+			job.Status.Conditions = []batchv1.JobCondition{
+				{
+					Type:   batchv1.JobComplete,
+					Status: corev1.ConditionTrue,
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			// Operator should detect logs unavailable, delete Job, and create a new one
+			Eventually(func() bool {
+				newJob := &batchv1.Job{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "logs-cluster-cluster-config-job", Namespace: ns}, newJob); err != nil {
+					return false
+				}
+				return newJob.UID != origUID
+			}, timeout, interval).Should(BeTrue())
+		})
 	})
 
 	Context("Deletion", func() {

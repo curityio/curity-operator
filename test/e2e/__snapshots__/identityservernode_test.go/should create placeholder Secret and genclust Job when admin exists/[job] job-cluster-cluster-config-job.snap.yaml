@@ -1,0 +1,53 @@
+
+[Test 31: Cluster config Job creation should create placeholder Secret and genclust Job when admin exists - 1]
+metadata:
+  name: <Any value>
+  namespace: e2e-ccjob
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    app.kubernetes.io/managed-by: curity-operator
+    curity.io/cluster: job-cluster
+    curity.io/component: cluster-config
+  managedFields: <Any value>
+spec:
+  parallelism: 1
+  completions: 1
+  backoffLimit: 3
+  selector: <Any value>
+  manualSelector: false
+  template:
+    metadata: <Any value>
+    spec:
+      containers:
+        - name: genclust
+          image: curity.azurecr.io/curity/idsvr:11.0
+          command:
+            - /bin/sh
+            - -c
+            - /opt/idsvr/bin/genclust -c $CONFIG_SERVICE_HOST -p $CONFIG_SERVICE_PORT
+          env:
+            - name: CONFIG_SERVICE_HOST
+              value: job-admin
+            - name: CONFIG_SERVICE_PORT
+              value: "6789"
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10000
+        fsGroup: 10000
+      schedulerName: default-scheduler
+  completionMode: NonIndexed
+  suspend: false
+  podReplacementPolicy: TerminatingOrFailed
+status: <Any value>
+
+---

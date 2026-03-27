@@ -1,0 +1,17 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  version: "11.0"
+  dataSources:
+    - type: postgres
+      valueFrom:
+        secretKeyRef:
+          name: {{ .secretName }}
+          items:
+            - key: DB_URL
+              path: DB_CONNECTION_STRING
+            - key: DB_USER
+              path: DB_USERNAME

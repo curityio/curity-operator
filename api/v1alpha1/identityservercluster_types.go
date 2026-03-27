@@ -28,8 +28,9 @@ type IdentityServerClusterSpec struct {
 	// Configuration specifies XML config files mounted at startup.
 	Configuration *ConfigurationSource `json:"configuration,omitempty"`
 
-	// DataSource configures the database connection.
-	DataSource *DataSourceSpec `json:"dataSource,omitempty"`
+	// DataSources configures database connections. Each entry injects env vars
+	// from a Secret, allowing multiple databases (e.g., main + audit).
+	DataSources []DataSourceSpec `json:"dataSources,omitempty"`
 
 	// Logging configures logging behavior.
 	Logging *LoggingSpec `json:"logging,omitempty"`

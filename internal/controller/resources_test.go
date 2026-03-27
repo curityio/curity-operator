@@ -1043,3 +1043,443 @@ func assertEnvVarFromSecret(t *testing.T, envVars []corev1.EnvVar, envName, secr
 	}
 	t.Errorf("expected env var %s to exist", envName)
 }
+
+// --- Scheduling tests ---
+
+func TestBuildDeployment_NodeSelectorClusterOnly(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.NodeSelector = map[string]string{"pool": "curity", "env": "prod"}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+
+	ns := deploy.Spec.Template.Spec.NodeSelector
+	if ns["pool"] != "curity" || ns["env"] != "prod" {
+		t.Errorf("expected cluster nodeSelector, got %v", ns)
+	}
+}
+
+func TestBuildDeployment_NodeSelectorNodeOnly(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.NodeSelector = map[string]string{"disk": "ssd"}
+
+	deploy := buildDeployment(cluster, node)
+
+	ns := deploy.Spec.Template.Spec.NodeSelector
+	if ns["disk"] != "ssd" {
+		t.Errorf("expected node nodeSelector, got %v", ns)
+	}
+}
+
+func TestBuildDeployment_NodeSelectorMerge(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.NodeSelector = map[string]string{"pool": "curity", "env": "prod"}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.NodeSelector = map[string]string{"pool": "gpu", "disk": "ssd"}
+
+	deploy := buildDeployment(cluster, node)
+
+	ns := deploy.Spec.Template.Spec.NodeSelector
+	if ns["pool"] != "gpu" {
+		t.Errorf("expected node to win on conflict key 'pool', got %q", ns["pool"])
+	}
+	if ns["env"] != "prod" {
+		t.Errorf("expected cluster key 'env' preserved, got %q", ns["env"])
+	}
+	if ns["disk"] != "ssd" {
+		t.Errorf("expected node key 'disk' added, got %q", ns["disk"])
+	}
+}
+
+func TestBuildDeployment_TolerationsClusterOnly(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Tolerations = []corev1.Toleration{
+		{Key: "special", Operator: corev1.TolerationOpExists},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+
+	tols := deploy.Spec.Template.Spec.Tolerations
+	if len(tols) != 1 || tols[0].Key != "special" {
+		t.Errorf("expected cluster tolerations, got %v", tols)
+	}
+}
+
+func TestBuildDeployment_TolerationsNodeOnly(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Tolerations = []corev1.Toleration{
+		{Key: "gpu", Operator: corev1.TolerationOpEqual, Value: "true"},
+	}
+
+	deploy := buildDeployment(cluster, node)
+
+	tols := deploy.Spec.Template.Spec.Tolerations
+	if len(tols) != 1 || tols[0].Key != "gpu" {
+		t.Errorf("expected node tolerations, got %v", tols)
+	}
+}
+
+func TestBuildDeployment_TolerationsNodeOverridesCluster(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Tolerations = []corev1.Toleration{
+		{Key: "old", Operator: corev1.TolerationOpExists},
+		{Key: "another", Operator: corev1.TolerationOpExists},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Tolerations = []corev1.Toleration{
+		{Key: "new", Operator: corev1.TolerationOpEqual, Value: "yes"},
+	}
+
+	deploy := buildDeployment(cluster, node)
+
+	tols := deploy.Spec.Template.Spec.Tolerations
+	if len(tols) != 1 || tols[0].Key != "new" {
+		t.Errorf("expected node tolerations to fully replace cluster, got %v", tols)
+	}
+}
+
+func TestBuildDeployment_AffinityClusterOnly(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{
+						Key:      "kubernetes.io/arch",
+						Operator: corev1.NodeSelectorOpIn,
+						Values:   []string{"amd64"},
+					}},
+				}},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+
+	aff := deploy.Spec.Template.Spec.Affinity
+	if aff == nil || aff.NodeAffinity == nil {
+		t.Fatal("expected cluster affinity to propagate")
+	}
+}
+
+func TestBuildDeployment_AffinityNodeOnly(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Affinity = &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{
+			PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{{
+				Weight: 100,
+				PodAffinityTerm: corev1.PodAffinityTerm{
+					TopologyKey: "kubernetes.io/hostname",
+				},
+			}},
+		},
+	}
+
+	deploy := buildDeployment(cluster, node)
+
+	aff := deploy.Spec.Template.Spec.Affinity
+	if aff == nil || aff.PodAntiAffinity == nil {
+		t.Fatal("expected node affinity to propagate")
+	}
+}
+
+func TestBuildDeployment_AffinityNodeOverridesCluster(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Affinity = &corev1.Affinity{
+		PodAntiAffinity: &corev1.PodAntiAffinity{},
+	}
+
+	deploy := buildDeployment(cluster, node)
+
+	aff := deploy.Spec.Template.Spec.Affinity
+	if aff.NodeAffinity != nil {
+		t.Error("expected cluster affinity to be replaced, but NodeAffinity still present")
+	}
+	if aff.PodAntiAffinity == nil {
+		t.Error("expected node affinity to win")
+	}
+}
+
+func TestBuildDeployment_TopologySpreadClusterOnly(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+		MaxSkew:           1,
+		TopologyKey:       "topology.kubernetes.io/zone",
+		WhenUnsatisfiable: corev1.ScheduleAnyway,
+	}}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+
+	tsc := deploy.Spec.Template.Spec.TopologySpreadConstraints
+	if len(tsc) != 1 || tsc[0].TopologyKey != "topology.kubernetes.io/zone" {
+		t.Errorf("expected cluster topology spread, got %v", tsc)
+	}
+}
+
+func TestBuildDeployment_TopologySpreadNodeOnly(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+		MaxSkew:           2,
+		TopologyKey:       "kubernetes.io/hostname",
+		WhenUnsatisfiable: corev1.DoNotSchedule,
+	}}
+
+	deploy := buildDeployment(cluster, node)
+
+	tsc := deploy.Spec.Template.Spec.TopologySpreadConstraints
+	if len(tsc) != 1 || tsc[0].TopologyKey != "kubernetes.io/hostname" {
+		t.Errorf("expected node topology spread, got %v", tsc)
+	}
+}
+
+func TestBuildDeployment_TopologySpreadNodeOverridesCluster(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
+		{MaxSkew: 1, TopologyKey: "zone", WhenUnsatisfiable: corev1.ScheduleAnyway},
+		{MaxSkew: 2, TopologyKey: "region", WhenUnsatisfiable: corev1.ScheduleAnyway},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{
+		{MaxSkew: 3, TopologyKey: "hostname", WhenUnsatisfiable: corev1.DoNotSchedule},
+	}
+
+	deploy := buildDeployment(cluster, node)
+
+	tsc := deploy.Spec.Template.Spec.TopologySpreadConstraints
+	if len(tsc) != 1 || tsc[0].TopologyKey != "hostname" {
+		t.Errorf("expected node topology spread to fully replace cluster, got %v", tsc)
+	}
+}
+
+func TestBuildDeployment_SchedulingNilSafe(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+
+	if deploy.Spec.Template.Spec.NodeSelector != nil {
+		t.Error("expected nil nodeSelector")
+	}
+	if deploy.Spec.Template.Spec.Tolerations != nil {
+		t.Error("expected nil tolerations")
+	}
+	if deploy.Spec.Template.Spec.Affinity != nil {
+		t.Error("expected nil affinity")
+	}
+	if deploy.Spec.Template.Spec.TopologySpreadConstraints != nil {
+		t.Error("expected nil topologySpreadConstraints")
+	}
+}
+
+func TestBuildClusterConfigJob_TopologySpreadConstraints(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
+		MaxSkew:           1,
+		TopologyKey:       "topology.kubernetes.io/zone",
+		WhenUnsatisfiable: corev1.ScheduleAnyway,
+	}}
+
+	job := buildClusterConfigJob(cluster, "admin-1")
+
+	tsc := job.Spec.Template.Spec.TopologySpreadConstraints
+	if len(tsc) != 1 || tsc[0].TopologyKey != "topology.kubernetes.io/zone" {
+		t.Errorf("expected topology spread on job, got %v", tsc)
+	}
+}
+
+// --- DataSources tests ---
+
+func TestBuildDeployment_DataSourcesSingleEntry(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.DataSources = []v1alpha1.DataSourceSpec{{
+		Type: "postgres",
+		ValueFrom: v1alpha1.DataSourceValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "db-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "host", Path: "DB_HOST"},
+					{Key: "port", Path: "DB_PORT"},
+				},
+			},
+		},
+	}}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVarFromSecret(t, envVars, "DB_HOST", "db-secret", "host")
+	assertEnvVarFromSecret(t, envVars, "DB_PORT", "db-secret", "port")
+}
+
+func TestBuildDeployment_DataSourcesMultipleEntries(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.DataSources = []v1alpha1.DataSourceSpec{
+		{
+			Type: "postgres",
+			ValueFrom: v1alpha1.DataSourceValueFrom{
+				SecretKeyRef: v1alpha1.SecretKeyRefSource{
+					Name:  "main-db",
+					Items: []v1alpha1.KeyToPath{{Key: "host", Path: "MAIN_DB_HOST"}},
+				},
+			},
+		},
+		{
+			Type: "postgres",
+			ValueFrom: v1alpha1.DataSourceValueFrom{
+				SecretKeyRef: v1alpha1.SecretKeyRefSource{
+					Name:  "audit-db",
+					Items: []v1alpha1.KeyToPath{{Key: "host", Path: "AUDIT_DB_HOST"}},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVarFromSecret(t, envVars, "MAIN_DB_HOST", "main-db", "host")
+	assertEnvVarFromSecret(t, envVars, "AUDIT_DB_HOST", "audit-db", "host")
+}
+
+func TestBuildDeployment_DataSourcesEmpty(t *testing.T) {
+	cluster := newTestCluster()
+	// DataSources is nil by default
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	for _, e := range envVars {
+		if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+			t.Errorf("unexpected secretKeyRef env var %s when dataSources is empty", e.Name)
+		}
+	}
+}
+
+func TestBuildDeployment_DataSourcesAndCredentialsBothPresent(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name:  "admin-secret",
+				Items: []v1alpha1.KeyToPath{{Key: "ADMIN_PASSWORD", Path: "PASSWORD"}},
+			},
+		},
+	}
+	cluster.Spec.DataSources = []v1alpha1.DataSourceSpec{{
+		Type: "postgres",
+		ValueFrom: v1alpha1.DataSourceValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name:  "db-secret",
+				Items: []v1alpha1.KeyToPath{{Key: "host", Path: "DB_HOST"}},
+			},
+		},
+	}}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
+	assertEnvVarFromSecret(t, envVars, "DB_HOST", "db-secret", "host")
+}
+
+func TestBuildDeployment_DataSourcesEnvVarOrder(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name:  "admin-secret",
+				Items: []v1alpha1.KeyToPath{{Key: "ADMIN_PASSWORD", Path: "PASSWORD"}},
+			},
+		},
+	}
+	cluster.Spec.DataSources = []v1alpha1.DataSourceSpec{{
+		Type: "postgres",
+		ValueFrom: v1alpha1.DataSourceValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name:  "db-secret",
+				Items: []v1alpha1.KeyToPath{{Key: "host", Path: "DB_HOST"}},
+			},
+		},
+	}}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.EnvironmentVariables = []corev1.EnvVar{
+		{Name: "CUSTOM", Value: "val"},
+	}
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	// Find indices: PASSWORD (adminCreds) < DB_HOST (dataSources) < CUSTOM (node env)
+	idxPassword, idxDB, idxCustom := -1, -1, -1
+	for i, e := range envVars {
+		switch e.Name {
+		case "PASSWORD":
+			idxPassword = i
+		case "DB_HOST":
+			idxDB = i
+		case "CUSTOM":
+			idxCustom = i
+		}
+	}
+	if idxPassword >= idxDB {
+		t.Errorf("adminCredentials (idx %d) should come before dataSources (idx %d)", idxPassword, idxDB)
+	}
+	if idxDB >= idxCustom {
+		t.Errorf("dataSources (idx %d) should come before node env vars (idx %d)", idxDB, idxCustom)
+	}
+}
+
+func TestBuildDeployment_DataSourcesNodeEnvVarOverride(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.DataSources = []v1alpha1.DataSourceSpec{{
+		Type: "postgres",
+		ValueFrom: v1alpha1.DataSourceValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name:  "db-secret",
+				Items: []v1alpha1.KeyToPath{{Key: "host", Path: "DB_HOST"}},
+			},
+		},
+	}}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.EnvironmentVariables = []corev1.EnvVar{
+		{Name: "DB_HOST", Value: "override-host"},
+	}
+
+	deploy := buildDeployment(cluster, node)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	// Both should be present; K8s uses last-write-wins for duplicate names
+	foundSecretRef := false
+	foundLiteral := false
+	for _, e := range envVars {
+		if e.Name == "DB_HOST" {
+			if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+				foundSecretRef = true
+			}
+			if e.Value == "override-host" {
+				foundLiteral = true
+			}
+		}
+	}
+	if !foundSecretRef {
+		t.Error("expected dataSources DB_HOST with secretKeyRef")
+	}
+	if !foundLiteral {
+		t.Error("expected node-level DB_HOST literal override")
+	}
+}

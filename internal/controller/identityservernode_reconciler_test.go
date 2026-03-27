@@ -46,6 +46,48 @@ func testCreateNode(ns, name string, nodeType v1alpha1.NodeType, clusterName str
 	Expect(k8sClient.Create(ctx, node)).To(Succeed())
 }
 
+func hasCondition(conditions []metav1.Condition, condType string, status metav1.ConditionStatus) bool {
+	for _, c := range conditions {
+		if c.Type == condType && c.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+func conditionReason(conditions []metav1.Condition, condType string) string {
+	for _, c := range conditions {
+		if c.Type == condType {
+			return c.Reason
+		}
+	}
+	return ""
+}
+
+func eventuallyGetResource(ns, name string, obj client.Object) {
+	Eventually(func() error {
+		return k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, obj)
+	}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
+}
+
+func eventuallyDeleted(ns, name string, obj client.Object) {
+	Eventually(func() bool {
+		return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, obj))
+	}, 30*time.Second, 250*time.Millisecond).Should(BeTrue())
+}
+
+func hasEnvFromSecret(envVars []corev1.EnvVar, envName, secretName, secretKey string) bool {
+	for _, env := range envVars {
+		if env.Name == envName && env.ValueFrom != nil &&
+			env.ValueFrom.SecretKeyRef != nil &&
+			env.ValueFrom.SecretKeyRef.Name == secretName &&
+			env.ValueFrom.SecretKeyRef.Key == secretKey {
+			return true
+		}
+	}
+	return false
+}
+
 var _ = Describe("IdentityServerNode Reconciler", func() {
 	const timeout = 30 * time.Second
 	const interval = 250 * time.Millisecond
@@ -63,45 +105,17 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 		_ = k8sClient.Delete(ctx, namespace)
 	})
 
-	createCluster := func(name string) {
-		cluster := &v1alpha1.IdentityServerCluster{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec:       v1alpha1.IdentityServerClusterSpec{Version: "11.0"},
-		}
-		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
-	}
-
-	createNode := func(name string, nodeType v1alpha1.NodeType, clusterName string) {
-		node := &v1alpha1.IdentityServerNode{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec: v1alpha1.IdentityServerNodeSpec{
-				Type:                     nodeType,
-				Role:                     name + "-role",
-				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
-				Replicas:                 ptr.To(int32(1)),
-			},
-		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
-	}
-
 	Context("Happy path — Admin node", func() {
 		It("should create Deployment and Service for admin node", func() {
-			createCluster("cluster-1")
-			createNode("admin-node", v1alpha1.NodeTypeAdmin, "cluster-1")
+			testCreateCluster(ns, "cluster-1")
+			testCreateNode(ns, "admin-node", v1alpha1.NodeTypeAdmin, "cluster-1")
 
-			// Verify Deployment is created
 			deploy := &appsv1.Deployment{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "admin-node", Namespace: ns}, deploy)
-			}, timeout, interval).Should(Succeed())
-
+			eventuallyGetResource(ns, "admin-node", deploy)
 			Expect(deploy.Spec.Template.Spec.Containers[0].Args).To(ContainElement("--admin"))
 
-			// Verify Service is created
 			svc := &corev1.Service{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "admin-node", Namespace: ns}, svc)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "admin-node", svc)
 
 			// Verify node status is updated
 			node := &v1alpha1.IdentityServerNode{}
@@ -116,8 +130,8 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 
 	Context("Cluster label", func() {
 		It("should set curity.io/cluster label on the node", func() {
-			createCluster("cluster-1")
-			createNode("labeled-node", v1alpha1.NodeTypeRuntime, "cluster-1")
+			testCreateCluster(ns, "cluster-1")
+			testCreateNode(ns, "labeled-node", v1alpha1.NodeTypeRuntime, "cluster-1")
 
 			node := &v1alpha1.IdentityServerNode{}
 			Eventually(func() string {
@@ -127,33 +141,26 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 		})
 
 		It("should allow duplicate admin check to work via label-based filtering", func() {
-			createCluster("cluster-x")
-			createCluster("cluster-y")
+			testCreateCluster(ns, "cluster-x")
+			testCreateCluster(ns, "cluster-y")
 
 			// Admin for cluster-x
-			createNode("admin-x", v1alpha1.NodeTypeAdmin, "cluster-x")
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "admin-x", Namespace: ns}, &appsv1.Deployment{})
-			}, timeout, interval).Should(Succeed())
+			testCreateNode(ns, "admin-x", v1alpha1.NodeTypeAdmin, "cluster-x")
+			eventuallyGetResource(ns, "admin-x", &appsv1.Deployment{})
 
 			// Admin for cluster-y — different cluster, should NOT be blocked
-			createNode("admin-y", v1alpha1.NodeTypeAdmin, "cluster-y")
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "admin-y", Namespace: ns}, &appsv1.Deployment{})
-			}, timeout, interval).Should(Succeed())
+			testCreateNode(ns, "admin-y", v1alpha1.NodeTypeAdmin, "cluster-y")
+			eventuallyGetResource(ns, "admin-y", &appsv1.Deployment{})
 		})
 	})
 
 	Context("Happy path — Runtime node", func() {
 		It("should create Deployment with --no-admin args", func() {
-			createCluster("cluster-1")
-			createNode("runtime-node", v1alpha1.NodeTypeRuntime, "cluster-1")
+			testCreateCluster(ns, "cluster-1")
+			testCreateNode(ns, "runtime-node", v1alpha1.NodeTypeRuntime, "cluster-1")
 
 			deploy := &appsv1.Deployment{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "runtime-node", Namespace: ns}, deploy)
-			}, timeout, interval).Should(Succeed())
-
+			eventuallyGetResource(ns, "runtime-node", deploy)
 			Expect(deploy.Spec.Template.Spec.Containers[0].Args).To(ContainElement("--no-admin"))
 			Expect(deploy.Spec.Template.Spec.Containers[0].Args).NotTo(ContainElement("--admin"))
 		})
@@ -161,64 +168,46 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 
 	Context("Error paths", func() {
 		It("should set Degraded when cluster does not exist", func() {
-			createNode("orphan-node", v1alpha1.NodeTypeRuntime, "nonexistent-cluster")
+			testCreateNode(ns, "orphan-node", v1alpha1.NodeTypeRuntime, "nonexistent-cluster")
 
 			node := &v1alpha1.IdentityServerNode{}
 			Eventually(func() bool {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "orphan-node", Namespace: ns}, node); err != nil {
 					return false
 				}
-				for _, c := range node.Status.Conditions {
-					if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
-						return true
-					}
-				}
-				return false
+				return hasCondition(node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue)
 			}, timeout, interval).Should(BeTrue(), "expected Degraded condition to be set")
 		})
 
 		It("should block second admin node for same cluster", func() {
-			createCluster("cluster-1")
-			createNode("admin-1", v1alpha1.NodeTypeAdmin, "cluster-1")
+			testCreateCluster(ns, "cluster-1")
+			testCreateNode(ns, "admin-1", v1alpha1.NodeTypeAdmin, "cluster-1")
 
-			// Wait for first admin's deployment
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "admin-1", Namespace: ns}, &appsv1.Deployment{})
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "admin-1", &appsv1.Deployment{})
 
 			// Create second admin
-			createNode("admin-2", v1alpha1.NodeTypeAdmin, "cluster-1")
+			testCreateNode(ns, "admin-2", v1alpha1.NodeTypeAdmin, "cluster-1")
 
-			// Second admin should be Degraded with no Deployment
+			// Second admin should be Degraded with DuplicateAdmin reason
 			node := &v1alpha1.IdentityServerNode{}
-			Eventually(func() bool {
+			Eventually(func() string {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "admin-2", Namespace: ns}, node); err != nil {
-					return false
+					return ""
 				}
-				for _, c := range node.Status.Conditions {
-					if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue && c.Reason == "DuplicateAdmin" {
-						return true
-					}
-				}
-				return false
-			}, timeout, interval).Should(BeTrue())
+				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
+			}, timeout, interval).Should(Equal("DuplicateAdmin"))
 
 			// Verify no Deployment was created for admin-2
-			err := k8sClient.Get(ctx, types.NamespacedName{Name: "admin-2", Namespace: ns}, &appsv1.Deployment{})
-			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "admin-2", Namespace: ns}, &appsv1.Deployment{}))).To(BeTrue())
 		})
 
 		It("should block node with duplicate role in same cluster", func() {
-			createCluster("cluster-1")
-			createNode("role-node-1", v1alpha1.NodeTypeRuntime, "cluster-1")
+			testCreateCluster(ns, "cluster-1")
+			testCreateNode(ns, "role-node-1", v1alpha1.NodeTypeRuntime, "cluster-1")
 
-			// Wait for first node's Deployment
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "role-node-1", Namespace: ns}, &appsv1.Deployment{})
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "role-node-1", &appsv1.Deployment{})
 
-			// Create second node with same role (createNode uses name+"-role")
-			// so we create manually with an explicit duplicate role
+			// Create second node with explicit duplicate role
 			dupNode := &v1alpha1.IdentityServerNode{
 				ObjectMeta: metav1.ObjectMeta{Name: "role-node-dup", Namespace: ns},
 				Spec: v1alpha1.IdentityServerNodeSpec{
@@ -235,29 +224,18 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "role-node-dup", Namespace: ns}, dupNode); err != nil {
 					return ""
 				}
-				for _, c := range dupNode.Status.Conditions {
-					if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
-						return c.Reason
-					}
-				}
-				return ""
+				return conditionReason(dupNode.Status.Conditions, v1alpha1.ConditionDegraded)
 			}, timeout, interval).Should(Equal("DuplicateRole"))
 
-			// Ready should be False
-			for _, c := range dupNode.Status.Conditions {
-				if c.Type == v1alpha1.ConditionReady {
-					Expect(c.Status).To(Equal(metav1.ConditionFalse))
-				}
-			}
+			Expect(hasCondition(dupNode.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse)).To(BeTrue())
 
 			// No Deployment for the duplicate
-			err := k8sClient.Get(ctx, types.NamespacedName{Name: "role-node-dup", Namespace: ns}, &appsv1.Deployment{})
-			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "role-node-dup", Namespace: ns}, &appsv1.Deployment{}))).To(BeTrue())
 		})
 
 		It("should allow same role in different clusters", func() {
-			createCluster("cluster-a")
-			createCluster("cluster-b")
+			testCreateCluster(ns, "cluster-a")
+			testCreateCluster(ns, "cluster-b")
 
 			// Same role "shared-role" in two different clusters — should both work
 			nodeA := &v1alpha1.IdentityServerNode{
@@ -283,27 +261,19 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			Expect(k8sClient.Create(ctx, nodeB)).To(Succeed())
 
 			// Both should get Deployments
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "node-a", Namespace: ns}, &appsv1.Deployment{})
-			}, timeout, interval).Should(Succeed())
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "node-b", Namespace: ns}, &appsv1.Deployment{})
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "node-a", &appsv1.Deployment{})
+			eventuallyGetResource(ns, "node-b", &appsv1.Deployment{})
 		})
 	})
 
 	Context("Deletion", func() {
 		It("should clean up via OwnerReference garbage collection", func() {
-			createCluster("cluster-1")
-			createNode("del-node", v1alpha1.NodeTypeRuntime, "cluster-1")
+			testCreateCluster(ns, "cluster-1")
+			testCreateNode(ns, "del-node", v1alpha1.NodeTypeRuntime, "cluster-1")
 
-			// Wait for Deployment
 			deploy := &appsv1.Deployment{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "del-node", Namespace: ns}, deploy)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "del-node", deploy)
 
-			// Verify OwnerReference is set
 			Expect(deploy.OwnerReferences).To(HaveLen(1))
 			Expect(deploy.OwnerReferences[0].Kind).To(Equal("IdentityServerNode"))
 
@@ -312,23 +282,17 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "del-node", Namespace: ns}, node)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
 
-			// Node should eventually be deleted (finalizer removed)
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: "del-node", Namespace: ns}, &v1alpha1.IdentityServerNode{})
-				return err != nil
-			}, timeout, interval).Should(BeTrue())
+			eventuallyDeleted(ns, "del-node", &v1alpha1.IdentityServerNode{})
 		})
 	})
 
 	Context("Updates", func() {
 		It("should update Deployment when replicas change", func() {
-			createCluster("cluster-1")
-			createNode("update-node", v1alpha1.NodeTypeRuntime, "cluster-1")
+			testCreateCluster(ns, "cluster-1")
+			testCreateNode(ns, "update-node", v1alpha1.NodeTypeRuntime, "cluster-1")
 
 			deploy := &appsv1.Deployment{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "update-node", Namespace: ns}, deploy)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "update-node", deploy)
 
 			// Update replicas
 			node := &v1alpha1.IdentityServerNode{}
@@ -438,12 +402,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
-			// Verify secret is created
 			secret := &corev1.Secret{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "test-admin-secret", Namespace: ns}, secret)
-			}, timeout, interval).Should(Succeed())
-
+			eventuallyGetResource(ns, "test-admin-secret", secret)
 			Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
 			Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
 			Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
@@ -492,21 +452,15 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
 
-			// Verify placeholder Secret is created
 			secret := &corev1.Secret{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "cc-cluster-cluster-config", Namespace: ns}, secret)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "cc-cluster-cluster-config", secret)
 			Expect(string(secret.Data["cluster.xml"])).To(Equal("placeholder"))
 			Expect(secret.Annotations).To(HaveKeyWithValue("argocd.argoproj.io/compare-options", "IgnoreExtraneous"))
 			Expect(secret.Annotations).To(HaveKey("curity.io/admin-node"))
 			Expect(secret.OwnerReferences).To(BeEmpty())
 
-			// Verify Job is created
 			job := &batchv1.Job{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "cc-cluster-cluster-config-job", Namespace: ns}, job)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "cc-cluster-cluster-config-job", job)
 			Expect(job.Labels["curity.io/cluster"]).To(Equal("cc-cluster"))
 			Expect(*job.Spec.Template.Spec.AutomountServiceAccountToken).To(BeFalse())
 		})
@@ -514,19 +468,13 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 		It("should set WaitingForAdmin when no admin node exists", func() {
 			testCreateCluster(ns, "wait-cluster")
 
-			// Wait for cluster to be reconciled with condition
 			cluster := &v1alpha1.IdentityServerCluster{}
-			Eventually(func() bool {
+			Eventually(func() string {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wait-cluster", Namespace: ns}, cluster); err != nil {
-					return false
+					return ""
 				}
-				for _, c := range cluster.Status.Conditions {
-					if c.Type == "ClusterConfigReady" && c.Reason == "WaitingForAdmin" {
-						return true
-					}
-				}
-				return false
-			}, timeout, interval).Should(BeTrue())
+				return conditionReason(cluster.Status.Conditions, "ClusterConfigReady")
+			}, timeout, interval).Should(Equal("WaitingForAdmin"))
 		})
 
 		It("should skip Job when cluster config Secret already populated", func() {
@@ -552,18 +500,12 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			testCreateCluster(ns, "skip-cluster")
 			testCreateNode(ns, "skip-admin", v1alpha1.NodeTypeAdmin, "skip-cluster")
 
-			// Verify ClusterConfigReady=True
 			cluster := &v1alpha1.IdentityServerCluster{}
 			Eventually(func() bool {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "skip-cluster", Namespace: ns}, cluster); err != nil {
 					return false
 				}
-				for _, c := range cluster.Status.Conditions {
-					if c.Type == "ClusterConfigReady" && c.Status == metav1.ConditionTrue {
-						return true
-					}
-				}
-				return false
+				return hasCondition(cluster.Status.Conditions, "ClusterConfigReady", metav1.ConditionTrue)
 			}, timeout, interval).Should(BeTrue())
 			Expect(cluster.Status.ClusterConfigSecretName).To(Equal("skip-cluster-cluster-config"))
 
@@ -577,12 +519,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			testCreateCluster(ns, "fail-cluster")
 			testCreateNode(ns, "fail-admin", v1alpha1.NodeTypeAdmin, "fail-cluster")
 
-			// Wait for Job to be created
 			job := &batchv1.Job{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster-cluster-config-job", Namespace: ns}, job)
-			}, timeout, interval).Should(Succeed())
-
+			eventuallyGetResource(ns, "fail-cluster-cluster-config-job", job)
 			origUID := job.UID
 
 			// Manually set Job as Failed (envtest has no Job controller)
@@ -610,11 +548,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			testCreateCluster(ns, "race-cluster")
 			testCreateNode(ns, "race-admin", v1alpha1.NodeTypeAdmin, "race-cluster")
 
-			// Wait for Job to be created
 			job := &batchv1.Job{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "race-cluster-cluster-config-job", Namespace: ns}, job)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "race-cluster-cluster-config-job", job)
 
 			// Only one Job should exist (AlreadyExists guard)
 			jobList := &batchv1.JobList{}
@@ -639,12 +574,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			testCreateNode(ns, "sched-admin", v1alpha1.NodeTypeAdmin, "sched-cluster")
 
-			// Wait for Job
 			job := &batchv1.Job{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "sched-cluster-cluster-config-job", Namespace: ns}, job)
-			}, timeout, interval).Should(Succeed())
-
+			eventuallyGetResource(ns, "sched-cluster-cluster-config-job", job)
 			Expect(job.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("disk", "ssd"))
 			Expect(job.Spec.Template.Spec.Tolerations).To(HaveLen(1))
 		})
@@ -654,9 +585,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			testCreateNode(ns, "argo-admin", v1alpha1.NodeTypeAdmin, "argo-cluster")
 
 			secret := &corev1.Secret{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "argo-cluster-cluster-config", Namespace: ns}, secret)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "argo-cluster-cluster-config", secret)
 			Expect(secret.Annotations["argocd.argoproj.io/compare-options"]).To(Equal("IgnoreExtraneous"))
 		})
 
@@ -683,11 +612,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-admin", Namespace: ns}, oldNode)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, oldNode)).To(Succeed())
 
-			// Wait for old node to be gone
-			Eventually(func() bool {
-				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-admin", Namespace: ns}, &v1alpha1.IdentityServerNode{}))
-			}, timeout, interval).Should(BeTrue())
-
+			eventuallyDeleted(ns, "rename-admin", &v1alpha1.IdentityServerNode{})
 			testCreateNode(ns, "rename-admin-v2", v1alpha1.NodeTypeAdmin, "rename-cluster")
 
 			// Annotation should be updated in-place (no delete/recreate)
@@ -730,10 +655,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			oldNode := &v1alpha1.IdentityServerNode{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-nohost-admin", Namespace: ns}, oldNode)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, oldNode)).To(Succeed())
-			Eventually(func() bool {
-				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-nohost-admin", Namespace: ns}, &v1alpha1.IdentityServerNode{}))
-			}, timeout, interval).Should(BeTrue())
-
+			eventuallyDeleted(ns, "rename-nohost-admin", &v1alpha1.IdentityServerNode{})
 			testCreateNode(ns, "rename-nohost-admin-v2", v1alpha1.NodeTypeAdmin, "rename-nohost-cluster")
 
 			// Annotation updates, XML is unchanged (strings.Replace is a no-op)
@@ -768,11 +690,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
-			// Wait for auto-generated credentials secret
 			credSecret := &corev1.Secret{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "enckey-creds", Namespace: ns}, credSecret)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "enckey-creds", credSecret)
 
 			testCreateNode(ns, "enckey-admin", v1alpha1.NodeTypeAdmin, "enckey-cluster")
 
@@ -845,11 +764,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 			testCreateNode(ns, "firstkey-admin", v1alpha1.NodeTypeAdmin, "firstkey-cluster")
 
-			// Wait for cluster config Secret (no encryption-key-hash since no key exists)
 			configSecret := &corev1.Secret{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "firstkey-cluster-cluster-config", Namespace: ns}, configSecret)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "firstkey-cluster-cluster-config", configSecret)
 
 			// Pre-populate so it's "ready"
 			configSecret.Data = map[string][]byte{"cluster.xml": []byte("<config>some-data</config>")}
@@ -869,12 +785,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			testCreateCluster(ns, "logs-cluster")
 			testCreateNode(ns, "logs-admin", v1alpha1.NodeTypeAdmin, "logs-cluster")
 
-			// Wait for Job to be created
 			job := &batchv1.Job{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "logs-cluster-cluster-config-job", Namespace: ns}, job)
-			}, timeout, interval).Should(Succeed())
-
+			eventuallyGetResource(ns, "logs-cluster-cluster-config-job", job)
 			origUID := job.UID
 
 			// Mark Job as Complete (but no pod exists with Succeeded phase → logs unavailable)
@@ -902,34 +814,23 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			testCreateCluster(ns, "lifecycle-cluster")
 			testCreateNode(ns, "lifecycle-admin", v1alpha1.NodeTypeAdmin, "lifecycle-cluster")
 
-			// Step 1: Wait for placeholder Secret and Job
 			configSecret := &corev1.Secret{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster-cluster-config", Namespace: ns}, configSecret)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "lifecycle-cluster-cluster-config", configSecret)
 
 			job := &batchv1.Job{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster-cluster-config-job", Namespace: ns}, job)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "lifecycle-cluster-cluster-config-job", job)
 
 			// Step 2: Simulate Job completion — pre-populate Secret with real data
 			configSecret.Data = map[string][]byte{"cluster.xml": []byte(
 				"<config><cluster><host>lifecycle-admin</host><port>6789</port></cluster></config>")}
 			Expect(k8sClient.Update(ctx, configSecret)).To(Succeed())
 
-			// Step 3: Verify ClusterConfigReady=True
 			cluster := &v1alpha1.IdentityServerCluster{}
 			Eventually(func() bool {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster", Namespace: ns}, cluster); err != nil {
 					return false
 				}
-				for _, c := range cluster.Status.Conditions {
-					if c.Type == "ClusterConfigReady" && c.Status == metav1.ConditionTrue {
-						return true
-					}
-				}
-				return false
+				return hasCondition(cluster.Status.Conditions, "ClusterConfigReady", metav1.ConditionTrue)
 			}, timeout, interval).Should(BeTrue())
 
 			// Step 4: Version upgrade — cluster.xml should be reused
@@ -964,28 +865,19 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				"<config><cluster><keystore>abc123</keystore><host>wf-rename-admin</host><port>6789</port></cluster></config>")}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
-			// Verify ClusterConfigReady=True
 			cluster := &v1alpha1.IdentityServerCluster{}
 			Eventually(func() bool {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-rename-cluster", Namespace: ns}, cluster); err != nil {
 					return false
 				}
-				for _, c := range cluster.Status.Conditions {
-					if c.Type == "ClusterConfigReady" && c.Status == metav1.ConditionTrue {
-						return true
-					}
-				}
-				return false
+				return hasCondition(cluster.Status.Conditions, "ClusterConfigReady", metav1.ConditionTrue)
 			}, timeout, interval).Should(BeTrue())
 
 			// Rename admin node
 			oldNode := &v1alpha1.IdentityServerNode{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-rename-admin", Namespace: ns}, oldNode)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, oldNode)).To(Succeed())
-			Eventually(func() bool {
-				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-rename-admin", Namespace: ns}, &v1alpha1.IdentityServerNode{}))
-			}, timeout, interval).Should(BeTrue())
-
+			eventuallyDeleted(ns, "wf-rename-admin", &v1alpha1.IdentityServerNode{})
 			testCreateNode(ns, "wf-rename-admin-v2", v1alpha1.NodeTypeAdmin, "wf-rename-cluster")
 
 			// Verify in-place update: new hostname, keystore preserved
@@ -1006,12 +898,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-rename-cluster", Namespace: ns}, cluster); err != nil {
 					return false
 				}
-				for _, c := range cluster.Status.Conditions {
-					if c.Type == "ClusterConfigReady" && c.Status == metav1.ConditionTrue {
-						return true
-					}
-				}
-				return false
+				return hasCondition(cluster.Status.Conditions, "ClusterConfigReady", metav1.ConditionTrue)
 			}, timeout, interval).Should(BeTrue())
 		})
 
@@ -1033,11 +920,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
-			// Wait for auto-generated credentials
 			credSecret := &corev1.Secret{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-enckey-creds", Namespace: ns}, credSecret)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "wf-enckey-creds", credSecret)
 
 			testCreateNode(ns, "wf-enckey-admin", v1alpha1.NodeTypeAdmin, "wf-enckey-cluster")
 
@@ -1057,18 +941,12 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			configSecret.Data = map[string][]byte{"cluster.xml": []byte("<config>encrypted-data</config>")}
 			Expect(k8sClient.Update(ctx, configSecret)).To(Succeed())
 
-			// Verify ClusterConfigReady=True
 			Eventually(func() bool {
 				c := &v1alpha1.IdentityServerCluster{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-enckey-cluster", Namespace: ns}, c); err != nil {
 					return false
 				}
-				for _, cond := range c.Status.Conditions {
-					if cond.Type == "ClusterConfigReady" && cond.Status == metav1.ConditionTrue {
-						return true
-					}
-				}
-				return false
+				return hasCondition(c.Status.Conditions, "ClusterConfigReady", metav1.ConditionTrue)
 			}, timeout, interval).Should(BeTrue())
 
 			// Change encryption key
@@ -1085,11 +963,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					string(s.Data["cluster.xml"]) == "placeholder"
 			}, timeout, interval).Should(BeTrue())
 
-			// A new Job should be created for regeneration
 			job := &batchv1.Job{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-enckey-cluster-cluster-config-job", Namespace: ns}, job)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "wf-enckey-cluster-cluster-config-job", job)
 		})
 
 		It("should regenerate when Secret is deleted externally (Scenario 1)", func() {
@@ -1098,25 +973,17 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 
 			// Wait for Secret and pre-populate
 			secret := &corev1.Secret{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delsecret-cluster-cluster-config", Namespace: ns}, secret)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "wf-delsecret-cluster-cluster-config", secret)
 
 			secret.Data = map[string][]byte{"cluster.xml": []byte("<config><host>wf-delsecret-admin</host></config>")}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
-			// Verify ClusterConfigReady=True
 			Eventually(func() bool {
 				c := &v1alpha1.IdentityServerCluster{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delsecret-cluster", Namespace: ns}, c); err != nil {
 					return false
 				}
-				for _, cond := range c.Status.Conditions {
-					if cond.Type == "ClusterConfigReady" && cond.Status == metav1.ConditionTrue {
-						return true
-					}
-				}
-				return false
+				return hasCondition(c.Status.Conditions, "ClusterConfigReady", metav1.ConditionTrue)
 			}, timeout, interval).Should(BeTrue())
 
 			// Delete the Secret externally (simulating user or accidental deletion)
@@ -1124,29 +991,18 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 
 			// Operator should detect missing Secret and create a new placeholder + Job
 			newSecret := &corev1.Secret{}
-			Eventually(func() bool {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delsecret-cluster-cluster-config", Namespace: ns}, newSecret); err != nil {
-					return false
-				}
-				return true
-			}, timeout, interval).Should(BeTrue())
+			eventuallyGetResource(ns, "wf-delsecret-cluster-cluster-config", newSecret)
 
-			// A Job should be created for regeneration
 			job := &batchv1.Job{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delsecret-cluster-cluster-config-job", Namespace: ns}, job)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "wf-delsecret-cluster-cluster-config-job", job)
 		})
 
 		It("should preserve Secret when Cluster CR is deleted (Scenario 2)", func() {
 			testCreateCluster(ns, "wf-delcr-cluster")
 			testCreateNode(ns, "wf-delcr-admin", v1alpha1.NodeTypeAdmin, "wf-delcr-cluster")
 
-			// Wait for Secret and pre-populate
 			secret := &corev1.Secret{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-cluster-cluster-config", Namespace: ns}, secret)
-			}, timeout, interval).Should(Succeed())
+			eventuallyGetResource(ns, "wf-delcr-cluster-cluster-config", secret)
 
 			secret.Data = map[string][]byte{"cluster.xml": []byte("<config><host>wf-delcr-admin</host></config>")}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
@@ -1155,17 +1011,13 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			node := &v1alpha1.IdentityServerNode{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-admin", Namespace: ns}, node)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
-			Eventually(func() bool {
-				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-admin", Namespace: ns}, &v1alpha1.IdentityServerNode{}))
-			}, timeout, interval).Should(BeTrue())
+			eventuallyDeleted(ns, "wf-delcr-admin", &v1alpha1.IdentityServerNode{})
 
 			// Delete the Cluster CR
 			cluster := &v1alpha1.IdentityServerCluster{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-cluster", Namespace: ns}, cluster)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, cluster)).To(Succeed())
-			Eventually(func() bool {
-				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-cluster", Namespace: ns}, &v1alpha1.IdentityServerCluster{}))
-			}, timeout, interval).Should(BeTrue())
+			eventuallyDeleted(ns, "wf-delcr-cluster", &v1alpha1.IdentityServerCluster{})
 
 			// Secret should still exist (no OwnerReference on Cluster CR)
 			survivedSecret := &corev1.Secret{}
@@ -1198,18 +1050,12 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			testCreateCluster(ns, "wf-useredit-cluster")
 			testCreateNode(ns, "wf-useredit-admin", v1alpha1.NodeTypeAdmin, "wf-useredit-cluster")
 
-			// Verify ClusterConfigReady=True (operator sees pre-existing Secret)
 			Eventually(func() bool {
 				c := &v1alpha1.IdentityServerCluster{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-useredit-cluster", Namespace: ns}, c); err != nil {
 					return false
 				}
-				for _, cond := range c.Status.Conditions {
-					if cond.Type == "ClusterConfigReady" && cond.Status == metav1.ConditionTrue {
-						return true
-					}
-				}
-				return false
+				return hasCondition(c.Status.Conditions, "ClusterConfigReady", metav1.ConditionTrue)
 			}, timeout, interval).Should(BeTrue())
 
 			// User edits the Secret directly (custom cluster.xml)
@@ -1239,16 +1085,11 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			testCreateCluster(ns, "wf-restart-cluster")
 			testCreateNode(ns, "wf-restart-admin", v1alpha1.NodeTypeAdmin, "wf-restart-cluster")
 
-			// Wait for Job to be created
 			job := &batchv1.Job{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "wf-restart-cluster-cluster-config-job", Namespace: ns}, job)
-			}, timeout, interval).Should(Succeed())
-
+			eventuallyGetResource(ns, "wf-restart-cluster-cluster-config-job", job)
 			origUID := job.UID
 
-			// Simulate operator restart: the next reconcile should find the existing
-			// running Job and NOT create a duplicate. Trigger reconcile by touching cluster.
+			// Simulate operator restart: trigger reconcile by touching cluster annotation
 			cluster := &v1alpha1.IdentityServerCluster{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-restart-cluster", Namespace: ns}, cluster)).To(Succeed())
 			if cluster.Annotations == nil {
@@ -1257,13 +1098,14 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			cluster.Annotations["trigger-reconcile"] = "restart-sim"
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 
-			// Wait for reconcile to process
-			time.Sleep(2 * time.Second)
-
-			// Job should still be the same one (same UID, no duplicate)
-			sameJob := &batchv1.Job{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-restart-cluster-cluster-config-job", Namespace: ns}, sameJob)).To(Succeed())
-			Expect(sameJob.UID).To(Equal(origUID))
+			// Job should still be the same one after reconcile (same UID, no duplicate)
+			Consistently(func() types.UID {
+				sameJob := &batchv1.Job{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "wf-restart-cluster-cluster-config-job", Namespace: ns}, sameJob); err != nil {
+					return ""
+				}
+				return sameJob.UID
+			}, 3*time.Second, interval).Should(Equal(origUID))
 
 			// Only one Job should exist
 			jobList := &batchv1.JobList{}
@@ -1318,17 +1160,234 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "block-node", Namespace: ns}, node)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
 
-			// Wait for node to be gone
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: "block-node", Namespace: ns}, &v1alpha1.IdentityServerNode{})
-				return err != nil
-			}, timeout, interval).Should(BeTrue())
-
-			// Now cluster should be deleted
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-del", Namespace: ns}, &v1alpha1.IdentityServerCluster{})
-				return err != nil
-			}, timeout, interval).Should(BeTrue())
+			eventuallyDeleted(ns, "block-node", &v1alpha1.IdentityServerNode{})
+			eventuallyDeleted(ns, "cluster-del", &v1alpha1.IdentityServerCluster{})
 		})
+	})
+})
+
+var _ = Describe("Deployment scheduling", func() {
+	const timeout = 30 * time.Second
+	const interval = 250 * time.Millisecond
+
+	var ns string
+
+	BeforeEach(func() {
+		ns = nodeTestNamespace()
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}
+		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+	})
+
+	AfterEach(func() {
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}
+		_ = k8sClient.Delete(ctx, namespace)
+	})
+
+	It("should inherit scheduling constraints from cluster on Deployment", func() {
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "sched-cluster", Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version:      "11.0",
+				NodeSelector: map[string]string{"disk": "ssd", "zone": "us-west"},
+				Tolerations: []corev1.Toleration{
+					{Key: "special", Operator: corev1.TolerationOpExists},
+				},
+				Affinity: &corev1.Affinity{
+					NodeAffinity: &corev1.NodeAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+							NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+								MatchExpressions: []corev1.NodeSelectorRequirement{{
+									Key:      "kubernetes.io/arch",
+									Operator: corev1.NodeSelectorOpIn,
+									Values:   []string{"amd64"},
+								}},
+							}},
+						},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		testCreateNode(ns, "sched-node", v1alpha1.NodeTypeRuntime, "sched-cluster")
+
+		deploy := &appsv1.Deployment{}
+		eventuallyGetResource(ns, "sched-node", deploy)
+		Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("disk", "ssd"))
+		Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("zone", "us-west"))
+		Expect(deploy.Spec.Template.Spec.Tolerations).To(HaveLen(1))
+		Expect(deploy.Spec.Template.Spec.Affinity).NotTo(BeNil())
+		Expect(deploy.Spec.Template.Spec.Affinity.NodeAffinity).NotTo(BeNil())
+	})
+
+	It("should apply node-level scheduling over cluster defaults", func() {
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "override-cluster", Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version:      "11.0",
+				NodeSelector: map[string]string{"pool": "default"},
+				Tolerations: []corev1.Toleration{
+					{Key: "old-taint", Operator: corev1.TolerationOpExists},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "override-node", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "override-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "override-cluster"},
+				Replicas:                 ptr.To(int32(1)),
+				NodeSelector:             map[string]string{"pool": "gpu"},
+				Tolerations: []corev1.Toleration{
+					{Key: "new-taint", Operator: corev1.TolerationOpEqual, Value: "yes"},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+		deploy := &appsv1.Deployment{}
+		eventuallyGetResource(ns, "override-node", deploy)
+
+		// nodeSelector merges: node wins on conflict
+		Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("pool", "gpu"))
+		// tolerations: node fully replaces cluster
+		Expect(deploy.Spec.Template.Spec.Tolerations).To(HaveLen(1))
+		Expect(deploy.Spec.Template.Spec.Tolerations[0].Key).To(Equal("new-taint"))
+	})
+
+	It("should apply topology spread constraints from cluster to Deployment", func() {
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "topo-cluster", Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version: "11.0",
+				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+					MaxSkew:           1,
+					TopologyKey:       "topology.kubernetes.io/zone",
+					WhenUnsatisfiable: corev1.ScheduleAnyway,
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": "curity"},
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		testCreateNode(ns, "topo-node", v1alpha1.NodeTypeRuntime, "topo-cluster")
+
+		deploy := &appsv1.Deployment{}
+		eventuallyGetResource(ns, "topo-node", deploy)
+		Expect(deploy.Spec.Template.Spec.TopologySpreadConstraints).To(HaveLen(1))
+		Expect(deploy.Spec.Template.Spec.TopologySpreadConstraints[0].TopologyKey).To(Equal("topology.kubernetes.io/zone"))
+	})
+
+	It("should update Deployment when cluster scheduling changes", func() {
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "update-cluster", Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version:      "11.0",
+				NodeSelector: map[string]string{"env": "staging"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		testCreateNode(ns, "update-node", v1alpha1.NodeTypeRuntime, "update-cluster")
+
+		deploy := &appsv1.Deployment{}
+		eventuallyGetResource(ns, "update-node", deploy)
+		Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("env", "staging"))
+
+		// Update cluster nodeSelector
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "update-cluster", Namespace: ns}, cluster)).To(Succeed())
+		cluster.Spec.NodeSelector = map[string]string{"env": "production"}
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+		// Deployment should eventually reflect the change
+		Eventually(func() string {
+			_ = k8sClient.Get(ctx, types.NamespacedName{Name: "update-node", Namespace: ns}, deploy)
+			return deploy.Spec.Template.Spec.NodeSelector["env"]
+		}, timeout, interval).Should(Equal("production"))
+	})
+})
+
+var _ = Describe("Deployment dataSources", func() {
+	var ns string
+
+	BeforeEach(func() {
+		ns = nodeTestNamespace()
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}
+		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
+	})
+
+	AfterEach(func() {
+		namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}
+		_ = k8sClient.Delete(ctx, namespace)
+	})
+
+	It("should inject dataSources env vars into Deployment", func() {
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "ds-cluster", Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version: "11.0",
+				DataSources: []v1alpha1.DataSourceSpec{{
+					Type: "postgres",
+					ValueFrom: v1alpha1.DataSourceValueFrom{
+						SecretKeyRef: v1alpha1.SecretKeyRefSource{
+							Name: "db-creds",
+							Items: []v1alpha1.KeyToPath{
+								{Key: "host", Path: "DB_HOST"},
+								{Key: "port", Path: "DB_PORT"},
+							},
+						},
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		testCreateNode(ns, "ds-node", v1alpha1.NodeTypeRuntime, "ds-cluster")
+
+		deploy := &appsv1.Deployment{}
+		eventuallyGetResource(ns, "ds-node", deploy)
+
+		envVars := deploy.Spec.Template.Spec.Containers[0].Env
+		Expect(hasEnvFromSecret(envVars, "DB_HOST", "db-creds", "host")).To(BeTrue(), "expected DB_HOST env var from secret")
+		Expect(hasEnvFromSecret(envVars, "DB_PORT", "db-creds", "port")).To(BeTrue(), "expected DB_PORT env var from secret")
+	})
+
+	It("should inject multiple dataSources env vars into Deployment", func() {
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "multi-ds-cluster", Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version: "11.0",
+				DataSources: []v1alpha1.DataSourceSpec{
+					{
+						Type: "postgres",
+						ValueFrom: v1alpha1.DataSourceValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name:  "main-db",
+								Items: []v1alpha1.KeyToPath{{Key: "url", Path: "MAIN_DB_URL"}},
+							},
+						},
+					},
+					{
+						Type: "postgres",
+						ValueFrom: v1alpha1.DataSourceValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name:  "audit-db",
+								Items: []v1alpha1.KeyToPath{{Key: "url", Path: "AUDIT_DB_URL"}},
+							},
+						},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		testCreateNode(ns, "multi-ds-node", v1alpha1.NodeTypeRuntime, "multi-ds-cluster")
+
+		deploy := &appsv1.Deployment{}
+		eventuallyGetResource(ns, "multi-ds-node", deploy)
+
+		envVars := deploy.Spec.Template.Spec.Containers[0].Env
+		Expect(hasEnvFromSecret(envVars, "MAIN_DB_URL", "main-db", "url")).To(BeTrue(), "expected MAIN_DB_URL env var")
+		Expect(hasEnvFromSecret(envVars, "AUDIT_DB_URL", "audit-db", "url")).To(BeTrue(), "expected AUDIT_DB_URL env var")
 	})
 })

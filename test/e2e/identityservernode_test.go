@@ -1765,3 +1765,220 @@ var _ = Describe("Test 31: Cluster config Job creation", Ordered, func() {
 		utils.MatchCRDResource(cluster, "job-cluster with-job")
 	})
 })
+
+var _ = Describe("Test 32: Scheduling from cluster to Deployment", Ordered, func() {
+	const ns = "e2e-scheduling"
+	BeforeAll(func() { createNS(ns) })
+	AfterAll(func() { deleteNS(ns) })
+
+	It("should apply cluster nodeSelector to Deployment pods", func() {
+		ctx := context.Background()
+
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-scheduling.yaml", ns,
+			map[string]interface{}{"name": "sched-cluster", "namespace": ns})
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+			map[string]interface{}{"name": "sched-runtime", "namespace": ns, "clusterName": "sched-cluster"})
+
+		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "sched-runtime", Namespace: ns}}
+		utils.WaitForResource(deploy, func() bool { return true }, e2eTimeout, e2eInterval)
+
+		Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("node-pool", "curity"))
+
+		utils.MatchYAMLResource(deploy, "[deployment] sched-runtime")
+
+		cluster := &v1alpha1.IdentityServerCluster{}
+		Eventually(func() int {
+			_ = k().Get(ctx, client.ObjectKey{Name: "sched-cluster", Namespace: ns}, cluster)
+			return len(cluster.Status.Conditions)
+		}, e2eTimeout, e2eInterval).Should(BeNumerically(">", 0))
+		utils.MatchCRDResource(cluster, "sched-cluster")
+
+		node := &v1alpha1.IdentityServerNode{}
+		Eventually(func() int {
+			_ = k().Get(ctx, client.ObjectKey{Name: "sched-runtime", Namespace: ns}, node)
+			return len(node.Status.Conditions)
+		}, e2eTimeout, e2eInterval).Should(BeNumerically(">", 0))
+		utils.MatchCRDResource(node, "sched-runtime")
+	})
+})
+
+var _ = Describe("Test 33: Node scheduling overrides cluster", Ordered, func() {
+	const ns = "e2e-sched-override"
+	BeforeAll(func() { createNS(ns) })
+	AfterAll(func() { deleteNS(ns) })
+
+	It("should merge node nodeSelector over cluster defaults", func() {
+		ctx := context.Background()
+
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-scheduling.yaml", ns,
+			map[string]interface{}{"name": "ovr-cluster", "namespace": ns})
+
+		// Apply runtime node with its own nodeSelector via kubectl
+		nodeYAML := fmt.Sprintf(`apiVersion: curity.io/v1alpha1
+kind: IdentityServerNode
+metadata:
+  name: ovr-runtime
+  namespace: %s
+spec:
+  type: runtime
+  role: override-role
+  identityServerClusterRef:
+    name: ovr-cluster
+  replicas: 1
+  nodeSelector:
+    node-pool: gpu
+    disk: ssd`, ns)
+		utils.ApplyRawYAML(nodeYAML, ns)
+
+		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "ovr-runtime", Namespace: ns}}
+		utils.WaitForResource(deploy, func() bool { return true }, e2eTimeout, e2eInterval)
+
+		// nodeSelector should merge: node wins on conflict (pool), cluster key preserved if no conflict
+		Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("node-pool", "gpu"))
+		Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("disk", "ssd"))
+
+		utils.MatchYAMLResource(deploy, "[deployment] ovr-runtime")
+
+		cluster := &v1alpha1.IdentityServerCluster{}
+		Eventually(func() int {
+			_ = k().Get(ctx, client.ObjectKey{Name: "ovr-cluster", Namespace: ns}, cluster)
+			return len(cluster.Status.Conditions)
+		}, e2eTimeout, e2eInterval).Should(BeNumerically(">", 0))
+		utils.MatchCRDResource(cluster, "ovr-cluster")
+	})
+})
+
+var _ = Describe("Test 34: DataSources env var injection", Ordered, func() {
+	const ns = "e2e-datasource"
+	BeforeAll(func() { createNS(ns) })
+	AfterAll(func() { deleteNS(ns) })
+
+	It("should inject dataSource env vars referencing the secret", func() {
+		ctx := context.Background()
+
+		// Create the secret that the dataSource references
+		dbSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "ds-db-secret", Namespace: ns},
+			Data: map[string][]byte{
+				"DB_URL":  []byte("postgres://localhost:5432/idsvr"),
+				"DB_USER": []byte("admin"),
+			},
+		}
+		Expect(k().Create(ctx, dbSecret)).To(Succeed())
+
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-datasources.yaml", ns,
+			map[string]interface{}{"name": "ds-cluster", "namespace": ns, "secretName": "ds-db-secret"})
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+			map[string]interface{}{"name": "ds-runtime", "namespace": ns, "clusterName": "ds-cluster"})
+
+		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "ds-runtime", Namespace: ns}}
+		utils.WaitForResource(deploy, func() bool { return true }, e2eTimeout, e2eInterval)
+
+		envVars := deploy.Spec.Template.Spec.Containers[0].Env
+		foundDS, foundUser := false, false
+		for _, env := range envVars {
+			if env.Name == "DB_CONNECTION_STRING" && env.ValueFrom != nil &&
+				env.ValueFrom.SecretKeyRef != nil &&
+				env.ValueFrom.SecretKeyRef.Name == "ds-db-secret" &&
+				env.ValueFrom.SecretKeyRef.Key == "DB_URL" {
+				foundDS = true
+			}
+			if env.Name == "DB_USERNAME" && env.ValueFrom != nil &&
+				env.ValueFrom.SecretKeyRef != nil &&
+				env.ValueFrom.SecretKeyRef.Name == "ds-db-secret" &&
+				env.ValueFrom.SecretKeyRef.Key == "DB_USER" {
+				foundUser = true
+			}
+		}
+		Expect(foundDS).To(BeTrue(), "expected DB_CONNECTION_STRING env var from secret")
+		Expect(foundUser).To(BeTrue(), "expected DB_USERNAME env var from secret")
+
+		utils.MatchYAMLResource(deploy, "[deployment] ds-runtime")
+
+		cluster := &v1alpha1.IdentityServerCluster{}
+		Eventually(func() int {
+			_ = k().Get(ctx, client.ObjectKey{Name: "ds-cluster", Namespace: ns}, cluster)
+			return len(cluster.Status.Conditions)
+		}, e2eTimeout, e2eInterval).Should(BeNumerically(">", 0))
+		utils.MatchCRDResource(cluster, "ds-cluster")
+	})
+})
+
+var _ = Describe("Test 35: Multiple dataSources", Ordered, func() {
+	const ns = "e2e-multi-ds"
+	BeforeAll(func() { createNS(ns) })
+	AfterAll(func() { deleteNS(ns) })
+
+	It("should inject env vars from multiple dataSources", func() {
+		ctx := context.Background()
+
+		// Create two secrets
+		mainSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "main-db", Namespace: ns},
+			Data:       map[string][]byte{"host": []byte("main.db.svc")},
+		}
+		auditSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "audit-db", Namespace: ns},
+			Data:       map[string][]byte{"host": []byte("audit.db.svc")},
+		}
+		Expect(k().Create(ctx, mainSecret)).To(Succeed())
+		Expect(k().Create(ctx, auditSecret)).To(Succeed())
+
+		// Apply cluster with two dataSources via raw YAML
+		clusterYAML := fmt.Sprintf(`apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: multi-ds-cluster
+  namespace: %s
+spec:
+  version: "11.0"
+  dataSources:
+    - type: postgres
+      valueFrom:
+        secretKeyRef:
+          name: main-db
+          items:
+            - key: host
+              path: MAIN_DB_HOST
+    - type: postgres
+      valueFrom:
+        secretKeyRef:
+          name: audit-db
+          items:
+            - key: host
+              path: AUDIT_DB_HOST`, ns)
+		utils.ApplyRawYAML(clusterYAML, ns)
+
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+			map[string]interface{}{"name": "multi-ds-runtime", "namespace": ns, "clusterName": "multi-ds-cluster"})
+
+		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "multi-ds-runtime", Namespace: ns}}
+		utils.WaitForResource(deploy, func() bool { return true }, e2eTimeout, e2eInterval)
+
+		envVars := deploy.Spec.Template.Spec.Containers[0].Env
+		foundMain, foundAudit := false, false
+		for _, env := range envVars {
+			if env.Name == "MAIN_DB_HOST" && env.ValueFrom != nil &&
+				env.ValueFrom.SecretKeyRef != nil &&
+				env.ValueFrom.SecretKeyRef.Name == "main-db" {
+				foundMain = true
+			}
+			if env.Name == "AUDIT_DB_HOST" && env.ValueFrom != nil &&
+				env.ValueFrom.SecretKeyRef != nil &&
+				env.ValueFrom.SecretKeyRef.Name == "audit-db" {
+				foundAudit = true
+			}
+		}
+		Expect(foundMain).To(BeTrue(), "expected MAIN_DB_HOST env var from main-db secret")
+		Expect(foundAudit).To(BeTrue(), "expected AUDIT_DB_HOST env var from audit-db secret")
+
+		utils.MatchYAMLResource(deploy, "[deployment] multi-ds-runtime")
+
+		cluster := &v1alpha1.IdentityServerCluster{}
+		Eventually(func() int {
+			_ = k().Get(ctx, client.ObjectKey{Name: "multi-ds-cluster", Namespace: ns}, cluster)
+			return len(cluster.Status.Conditions)
+		}, e2eTimeout, e2eInterval).Should(BeNumerically(">", 0))
+		utils.MatchCRDResource(cluster, "multi-ds-cluster")
+	})
+})

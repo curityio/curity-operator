@@ -116,8 +116,12 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 						RunAsGroup: ptr.To(int64(10000)),
 						FSGroup:    ptr.To(int64(10000)),
 					},
-					Containers: containers,
-					Volumes:    volumes,
+					Containers:                containers,
+					Volumes:                   volumes,
+					NodeSelector:              resolveNodeSelector(cluster, node),
+					Tolerations:               resolveTolerations(cluster, node),
+					Affinity:                  resolveAffinity(cluster, node),
+					TopologySpreadConstraints: resolveTopologySpreadConstraints(cluster, node),
 				},
 			},
 		},
@@ -247,6 +251,22 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 	if cluster.Spec.AdminCredentials != nil {
 		secretName := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
 		for _, item := range cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Items {
+			envVars = append(envVars, corev1.EnvVar{
+				Name: item.Path,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+						Key:                  item.Key,
+					},
+				},
+			})
+		}
+	}
+
+	// DataSource connection env vars from secrets
+	for _, ds := range cluster.Spec.DataSources {
+		secretName := ds.ValueFrom.SecretKeyRef.Name
+		for _, item := range ds.ValueFrom.SecretKeyRef.Items {
 			envVars = append(envVars, corev1.EnvVar{
 				Name: item.Path,
 				ValueFrom: &corev1.EnvVarSource{
@@ -421,6 +441,37 @@ func resolveLogging(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Iden
 		return node.Spec.Logging
 	}
 	return cluster.Spec.Logging
+}
+
+// resolveNodeSelector returns the effective node selector, merging cluster and node maps.
+// Node values win on conflict keys, matching the mergeMaps pattern used for labels/annotations.
+func resolveNodeSelector(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) map[string]string {
+	return mergeMaps(cluster.Spec.NodeSelector, node.Spec.NodeSelector)
+}
+
+// resolveTolerations returns the effective tolerations, preferring node over cluster entirely.
+func resolveTolerations(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []corev1.Toleration {
+	if len(node.Spec.Tolerations) > 0 {
+		return node.Spec.Tolerations
+	}
+	return cluster.Spec.Tolerations
+}
+
+// resolveAffinity returns the effective affinity, preferring node over cluster entirely.
+func resolveAffinity(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *corev1.Affinity {
+	if node.Spec.Affinity != nil {
+		return node.Spec.Affinity
+	}
+	return cluster.Spec.Affinity
+}
+
+// resolveTopologySpreadConstraints returns the effective topology spread constraints,
+// preferring node over cluster entirely.
+func resolveTopologySpreadConstraints(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []corev1.TopologySpreadConstraint {
+	if len(node.Spec.TopologySpreadConstraints) > 0 {
+		return node.Spec.TopologySpreadConstraints
+	}
+	return cluster.Spec.TopologySpreadConstraints
 }
 
 const defaultLogImage = "busybox:latest"

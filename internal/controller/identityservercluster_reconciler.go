@@ -443,6 +443,9 @@ func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeNam
 	if cluster.Spec.Affinity != nil {
 		job.Spec.Template.Spec.Affinity = cluster.Spec.Affinity
 	}
+	if len(cluster.Spec.TopologySpreadConstraints) > 0 {
+		job.Spec.Template.Spec.TopologySpreadConstraints = cluster.Spec.TopologySpreadConstraints
+	}
 
 	return job
 }

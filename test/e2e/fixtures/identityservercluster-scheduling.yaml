@@ -1,0 +1,9 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  version: "11.0"
+  nodeSelector:
+    node-pool: curity

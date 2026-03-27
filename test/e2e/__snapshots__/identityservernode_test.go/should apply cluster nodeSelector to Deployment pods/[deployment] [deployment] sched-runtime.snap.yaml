@@ -1,0 +1,118 @@
+
+[Test 32: Scheduling from cluster to Deployment should apply cluster nodeSelector to Deployment pods - 1]
+metadata:
+  name: sched-runtime
+  namespace: e2e-scheduling
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/instance: sched-runtime
+    app.kubernetes.io/managed-by: curity-operator
+    app.kubernetes.io/name: curity-identity-server
+    app.kubernetes.io/version: "11.0"
+    curity.io/cluster: sched-cluster
+    curity.io/role: runtime-role
+  annotations: <Any value>
+  ownerReferences: <Any value>
+  managedFields: <Any value>
+spec:
+  replicas: 1
+  selector: <Any value>
+  template:
+    metadata: <Any value>
+    spec:
+      volumes:
+        - name: cluster-config
+          secret:
+            secretName: sched-cluster-cluster-config
+            items:
+              - key: cluster.xml
+                path: cluster.xml
+            defaultMode: 420
+            optional: true
+      containers:
+        - name: curity
+          image: curity.azurecr.io/curity/idsvr:11.0
+          args:
+            - /opt/idsvr/bin/idsvr
+            - -s
+            - runtime-role
+            - --no-admin
+          ports:
+            - name: health-check
+              containerPort: 4465
+              protocol: TCP
+            - name: metrics
+              containerPort: 4466
+              protocol: TCP
+            - name: http
+              containerPort: 8443
+              protocol: TCP
+          env:
+            - name: STATUS_CMD_PORT
+              value: "4465"
+            - name: LOGGING_LEVEL
+              value: INFO
+          volumeMounts:
+            - name: cluster-config
+              readOnly: true
+              mountPath: /opt/idsvr/etc/init/cluster.xml
+              subPath: cluster.xml
+          livenessProbe:
+            httpGet:
+              path: /
+              port:
+                type: 0
+                intval: 4465
+                strval: ""
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port:
+                type: 0
+                intval: 4465
+                strval: ""
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 3
+            failureThreshold: 3
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      nodeSelector:
+        node-pool: curity
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10000
+        fsGroup: 10000
+      schedulerName: default-scheduler
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable:
+        type: 1
+        intval: 0
+        strval: 25%
+      maxSurge:
+        type: 1
+        intval: 0
+        strval: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+status: <Any value>
+
+---

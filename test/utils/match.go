@@ -116,14 +116,22 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 
 // sanitizeConditions zeroes volatile fields on each condition
 // so snapshots remain deterministic across test runs and environments.
-// Reason is kept because operator-set reasons (DuplicateAdmin, ClusterNotFound,
-// AllReplicasReady, etc.) are deterministic. Message is stripped because it may
-// contain dynamic content (counts, timestamps).
+// Reason is kept for operator-set conditions (Degraded, ClusterConfigReady)
+// where values like DuplicateAdmin and ClusterNotFound are deterministic.
+// Reason is stripped for Deployment-controller-sourced conditions (Ready,
+// Available, Progressing) where values like ReplicaUnavailable vs
+// RolloutInProgress vary between Kind and AKS.
 func sanitizeConditions(conditions []metav1.Condition) {
 	for i := range conditions {
 		conditions[i].LastTransitionTime = metav1.Time{}
 		conditions[i].ObservedGeneration = 0
 		conditions[i].Message = ""
+		switch conditions[i].Type {
+		case v1alpha1.ConditionDegraded, v1alpha1.ConditionClusterConfigReady:
+			// keep Reason — set by operator, deterministic
+		default:
+			conditions[i].Reason = ""
+		}
 	}
 }
 

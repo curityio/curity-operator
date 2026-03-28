@@ -21,17 +21,17 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: NodesNotReady
+      reason: ""
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: NodesUnavailable
+      reason: ""
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: NodesProgressing
+      reason: ""
       message: ""
     - type: Degraded
       status: "False"

@@ -1,5 +1,5 @@
 
-[Test 24: Duplicate role rejection should block node with duplicate role in same cluster - 1]
+[IdentityServerNode validation and rejection Duplicate role rejection should block node with duplicate role in same cluster - 1]
 metadata:
   name: role-node-1
   namespace: e2e-dup-role
@@ -9,7 +9,6 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     curity.io/cluster: role-cluster
-  annotations: <Any value>
   finalizers:
     - curity.io/node-protection
   managedFields: <Any value>
@@ -24,22 +23,22 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: DuplicateRole
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoReplicaAvailable
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicaUnavailable
       message: ""
     - type: Degraded
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: DuplicateRole
       message: ""
   observedGeneration: <Any value>
   replicas: 1

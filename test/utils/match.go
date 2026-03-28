@@ -95,11 +95,13 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 	case *v1alpha1.IdentityServerCluster:
 		c := r.DeepCopy()
 		sanitizeConditions(c.Status.Conditions)
+		c.Annotations = nil
 		c.Status.ReadyNodes = 0
 		sanitized = c
 	case *v1alpha1.IdentityServerNode:
 		c := r.DeepCopy()
 		sanitizeConditions(c.Status.Conditions)
+		c.Annotations = nil
 		c.Status.UpdatedReplicas = 0
 		c.Status.ReadyReplicas = 0
 		c.Status.AvailableReplicas = 0
@@ -114,14 +116,13 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 
 // sanitizeConditions zeroes volatile fields on each condition
 // so snapshots remain deterministic across test runs and environments.
-// Reason and Message vary by Deployment controller timing (e.g.,
-// ReplicaUnavailable vs RolloutInProgress), so only Type and Status
-// are kept for cross-environment snapshot compatibility.
+// Reason is kept because operator-set reasons (DuplicateAdmin, ClusterNotFound,
+// AllReplicasReady, etc.) are deterministic. Message is stripped because it may
+// contain dynamic content (counts, timestamps).
 func sanitizeConditions(conditions []metav1.Condition) {
 	for i := range conditions {
 		conditions[i].LastTransitionTime = metav1.Time{}
 		conditions[i].ObservedGeneration = 0
-		conditions[i].Reason = ""
 		conditions[i].Message = ""
 	}
 }
@@ -148,6 +149,7 @@ func sanitizeVolatileFields(resource interface{}) interface{} {
 
 // MatchResource takes a snapshot with an explicit kind parameter.
 func MatchResource(resource interface{}, kind string, snapshotName ...string) {
+	resource = sanitizeVolatileFields(resource)
 	currentSpec := ginkgo.CurrentSpecReport()
 	name := strings.Join(snapshotName, "_")
 	if name == "" {

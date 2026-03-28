@@ -1,5 +1,5 @@
 
-[Test 32: Scheduling from cluster to Deployment should apply cluster nodeSelector to Deployment pods - 1]
+[IdentityServerNode scheduling Scheduling from cluster to Deployment should apply cluster nodeSelector to Deployment pods - 1]
 metadata:
   name: sched-runtime
   namespace: e2e-scheduling

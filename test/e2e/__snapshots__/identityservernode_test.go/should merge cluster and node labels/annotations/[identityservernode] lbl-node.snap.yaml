@@ -1,5 +1,5 @@
 
-[Test 16: Labels and annotations merge should merge cluster and node labels/annotations - 1]
+[IdentityServerNode labels and security Labels and annotations merge should merge cluster and node labels/annotations - 1]
 metadata:
   name: lbl-node
   namespace: e2e-labels
@@ -9,7 +9,6 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     curity.io/cluster: lbl-cluster
-  annotations: <Any value>
   finalizers:
     - curity.io/node-protection
   managedFields: <Any value>
@@ -26,22 +25,22 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicasNotReady
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoReplicaAvailable
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicaUnavailable
       message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: Healthy
       message: ""
   observedGeneration: <Any value>
   replicas: 1

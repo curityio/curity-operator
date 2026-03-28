@@ -1,5 +1,5 @@
 
-[Test 5: Admin credentials auto-generation should create secret with random values when it does not exist - 1]
+[IdentityServerNode credentials Admin credentials auto-generation should create secret with random values when it does not exist - 1]
 metadata:
   name: creds-cluster
   namespace: e2e-creds
@@ -7,7 +7,6 @@ metadata:
   resourceVersion: <Any value>
   generation: <Any value>
   creationTimestamp: <Any value>
-  annotations: <Any value>
   finalizers:
     - curity.io/cluster-protection
   managedFields: <Any value>
@@ -29,27 +28,27 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoNodes
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoNodes
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: WaitingForNodes
       message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoNodes
       message: ""
     - type: ClusterConfigReady
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: WaitingForAdmin
       message: ""
   observedGeneration: <Any value>
   version: "11.0"

@@ -1,5 +1,5 @@
 
-[Test 26: Orphan node recovery should recover when missing cluster is created - 1]
+[IdentityServerNode validation and rejection Orphan node recovery should recover when missing cluster is created - 1]
 metadata:
   name: recovery-node
   namespace: e2e-recovery
@@ -23,22 +23,22 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicasNotReady
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoReplicaAvailable
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicaUnavailable
       message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: Healthy
       message: ""
   observedGeneration: <Any value>
   replicas: 1

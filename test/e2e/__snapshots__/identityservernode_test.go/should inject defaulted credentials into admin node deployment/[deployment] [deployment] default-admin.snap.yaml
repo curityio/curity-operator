@@ -1,5 +1,5 @@
 
-[Test 36: Default admin credentials should inject defaulted credentials into admin node deployment - 1]
+[IdentityServerNode credentials Default admin credentials should inject defaulted credentials into admin node deployment - 1]
 metadata:
   name: default-admin
   namespace: e2e-default-creds

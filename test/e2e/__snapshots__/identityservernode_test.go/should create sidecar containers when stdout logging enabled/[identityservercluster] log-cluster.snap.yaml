@@ -1,5 +1,5 @@
 
-[Test 28: Logging sidecars should create sidecar containers when stdout logging enabled - 1]
+[IdentityServerNode configuration Logging sidecars should create sidecar containers when stdout logging enabled - 1]
 metadata:
   name: log-cluster
   namespace: e2e-logging
@@ -23,27 +23,27 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NodesNotReady
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NodesUnavailable
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NodesProgressing
       message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: Healthy
       message: ""
     - type: ClusterConfigReady
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: WaitingForAdmin
       message: ""
   observedGeneration: <Any value>
   nodeCount: 1

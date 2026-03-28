@@ -1,5 +1,5 @@
 
-[Test 1: Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
+[IdentityServerNode deployment lifecycle Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
 metadata:
   name: deploy-runtime
   namespace: e2e-deploy
@@ -23,22 +23,22 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicasNotReady
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoReplicaAvailable
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicaUnavailable
       message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: Healthy
       message: ""
   observedGeneration: <Any value>
   replicas: 1

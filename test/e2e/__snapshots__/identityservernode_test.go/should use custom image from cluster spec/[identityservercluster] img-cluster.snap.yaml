@@ -1,5 +1,5 @@
 
-[Test 14: Image override should use custom image from cluster spec - 1]
+[IdentityServerNode image and version Image override should use custom image from cluster spec - 1]
 metadata:
   name: img-cluster
   namespace: e2e-image
@@ -7,7 +7,6 @@ metadata:
   resourceVersion: <Any value>
   generation: <Any value>
   creationTimestamp: <Any value>
-  annotations: <Any value>
   finalizers:
     - curity.io/cluster-protection
   managedFields: <Any value>
@@ -19,27 +18,27 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NodesNotReady
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NodesUnavailable
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NodesProgressing
       message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: Healthy
       message: ""
     - type: ClusterConfigReady
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: WaitingForAdmin
       message: ""
   observedGeneration: <Any value>
   nodeCount: 1

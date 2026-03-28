@@ -128,20 +128,35 @@ func (env *E2ETestEnv) verifyControllerUp() error {
 // It deletes all custom resources first (while the operator is still running
 // to process finalizers), then undeploys the operator and CRDs.
 func (env *E2ETestEnv) Teardown() error {
+	var warnings int
+
 	// Delete all custom resources first so the operator can process finalizers
 	// before the operator pod is removed. Without this, CRD deletion blocks
 	// forever because finalizers can never be removed.
 	ginkgo.GinkgoWriter.Println("deleting all IdentityServerNodes across namespaces")
-	_, _ = Run("kubectl", "delete", "identityservernodes.curity.io", "--all", "--all-namespaces", "--timeout=60s")
+	if _, err := Run("kubectl", "delete", "identityservernodes.curity.io", "--all", "--all-namespaces", "--timeout=60s"); err != nil {
+		ginkgo.GinkgoWriter.Printf("warning: node cleanup: %v\n", err)
+		warnings++
+	}
 
 	ginkgo.GinkgoWriter.Println("deleting all IdentityServerClusters across namespaces")
-	_, _ = Run("kubectl", "delete", "identityserverclusters.curity.io", "--all", "--all-namespaces", "--timeout=60s")
+	if _, err := Run("kubectl", "delete", "identityserverclusters.curity.io", "--all", "--all-namespaces", "--timeout=60s"); err != nil {
+		ginkgo.GinkgoWriter.Printf("warning: cluster cleanup: %v\n", err)
+		warnings++
+	}
 
 	ginkgo.GinkgoWriter.Println("undeploying the operator")
-	_, _ = Run("make", "undeploy")
+	if _, err := Run("make", "undeploy"); err != nil {
+		ginkgo.GinkgoWriter.Printf("warning: undeploy: %v\n", err)
+		warnings++
+	}
 
 	ginkgo.GinkgoWriter.Println("deleting operator namespace")
 	_, _ = Run("kubectl", "delete", "namespace", env.operatorNamespace, "--ignore-not-found")
+
+	if warnings > 0 {
+		ginkgo.GinkgoWriter.Printf("teardown completed with %d warning(s)\n", warnings)
+	}
 
 	return env.Environment.Stop()
 }

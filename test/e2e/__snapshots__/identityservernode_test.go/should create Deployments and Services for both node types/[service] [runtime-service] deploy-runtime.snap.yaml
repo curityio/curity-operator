@@ -1,5 +1,5 @@
 
-[Test 1: Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
+[IdentityServerNode deployment lifecycle Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
 metadata:
   name: deploy-runtime
   namespace: e2e-deploy

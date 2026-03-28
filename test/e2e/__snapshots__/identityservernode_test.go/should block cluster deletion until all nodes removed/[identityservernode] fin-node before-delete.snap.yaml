@@ -1,5 +1,5 @@
 
-[Test 4: Cluster deletion blocked by nodes should block cluster deletion until all nodes removed - 1]
+[IdentityServerNode deployment lifecycle Cluster deletion blocked by nodes should block cluster deletion until all nodes removed - 1]
 metadata:
   name: fin-node
   namespace: e2e-finalizer
@@ -9,7 +9,6 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     curity.io/cluster: fin-cluster
-  annotations: <Any value>
   finalizers:
     - curity.io/node-protection
   managedFields: <Any value>
@@ -24,22 +23,22 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicasNotReady
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoReplicaAvailable
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicaUnavailable
       message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: Healthy
       message: ""
   observedGeneration: <Any value>
   replicas: 1

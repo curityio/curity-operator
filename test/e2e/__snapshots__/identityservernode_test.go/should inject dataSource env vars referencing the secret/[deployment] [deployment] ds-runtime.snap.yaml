@@ -1,5 +1,5 @@
 
-[Test 34: DataSources env var injection should inject dataSource env vars referencing the secret - 1]
+[IdentityServerNode data sources DataSources env var injection should inject dataSource env vars referencing the secret - 1]
 metadata:
   name: ds-runtime
   namespace: e2e-datasource

@@ -1,5 +1,5 @@
 
-[Test 30: Cluster config generation should mount cluster config volume on all node Deployments - 1]
+[IdentityServerNode configuration Cluster config generation should mount cluster config volume on all node Deployments - 1]
 metadata:
   name: cc-runtime
   namespace: e2e-clusterconfig

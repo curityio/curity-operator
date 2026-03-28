@@ -1,5 +1,5 @@
 
-[Test 11: Orphan node should set Degraded when cluster does not exist - 1]
+[IdentityServerNode validation and rejection Orphan node should set Degraded when cluster does not exist - 1]
 metadata:
   name: orphan-node
   namespace: e2e-orphan
@@ -23,12 +23,12 @@ status:
     - type: Degraded
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ClusterNotFound
       message: ""
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ClusterNotFound
       message: ""
   observedGeneration: <Any value>
 

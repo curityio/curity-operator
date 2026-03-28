@@ -1,5 +1,5 @@
 
-[Test 33: Node scheduling overrides cluster should merge node nodeSelector over cluster defaults - 1]
+[IdentityServerNode scheduling Node scheduling overrides cluster should merge node nodeSelector over cluster defaults - 1]
 metadata:
   name: ovr-runtime
   namespace: e2e-sched-override

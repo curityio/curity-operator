@@ -1,5 +1,5 @@
 
-[Test 1: Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
+[IdentityServerNode deployment lifecycle Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
 metadata:
   name: deploy-cluster
   namespace: e2e-deploy
@@ -17,27 +17,27 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoNodes
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoNodes
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: WaitingForNodes
       message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoNodes
       message: ""
     - type: ClusterConfigReady
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: WaitingForAdmin
       message: ""
   observedGeneration: <Any value>
   version: "11.0"

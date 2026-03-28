@@ -1,5 +1,5 @@
 
-[Test 35: Multiple dataSources should inject env vars from multiple dataSources - 1]
+[IdentityServerNode data sources Multiple dataSources should inject env vars from multiple dataSources - 1]
 metadata:
   name: multi-ds-runtime
   namespace: e2e-multi-ds

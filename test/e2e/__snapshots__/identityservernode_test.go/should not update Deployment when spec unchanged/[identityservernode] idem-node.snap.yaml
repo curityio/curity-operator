@@ -1,5 +1,5 @@
 
-[Test 21: Idempotency should not update Deployment when spec unchanged - 1]
+[IdentityServerNode deployment lifecycle Idempotency should not update Deployment when spec unchanged - 1]
 metadata:
   name: idem-node
   namespace: e2e-idempotent
@@ -10,7 +10,6 @@ metadata:
   labels:
     curity.io/cluster: idem-cluster
     trigger: reconcile
-  annotations: <Any value>
   finalizers:
     - curity.io/node-protection
   managedFields: <Any value>
@@ -25,22 +24,22 @@ status:
     - type: Ready
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicasNotReady
       message: ""
     - type: Available
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: NoReplicaAvailable
       message: ""
     - type: Progressing
       status: "True"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: ReplicaUnavailable
       message: ""
     - type: Degraded
       status: "False"
       lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
+      reason: Healthy
       message: ""
   observedGeneration: <Any value>
   replicas: 1

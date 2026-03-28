@@ -54,5 +54,6 @@ spec:
   completionMode: NonIndexed
   suspend: false
   podReplacementPolicy: TerminatingOrFailed
+status: <Any value>
 
 ---

@@ -43,8 +43,6 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  updatedReplicas: <Any value>
-  unavailableReplicas: <Any value>
   deploymentName: img-node
   serviceName: img-node
 

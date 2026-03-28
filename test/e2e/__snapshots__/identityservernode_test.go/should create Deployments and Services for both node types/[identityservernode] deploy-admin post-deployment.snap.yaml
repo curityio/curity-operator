@@ -9,7 +9,6 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     curity.io/cluster: deploy-cluster
-  annotations: <Any value>
   finalizers:
     - curity.io/node-protection
   managedFields: <Any value>
@@ -46,8 +45,6 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  updatedReplicas: <Any value>
-  unavailableReplicas: <Any value>
   deploymentName: deploy-admin
   serviceName: deploy-admin
 

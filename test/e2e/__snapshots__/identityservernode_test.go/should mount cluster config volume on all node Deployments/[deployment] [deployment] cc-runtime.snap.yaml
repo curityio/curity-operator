@@ -15,7 +15,6 @@ metadata:
     app.kubernetes.io/version: "11.0"
     curity.io/cluster: cc-cluster
     curity.io/role: runtime-role
-  annotations: <Any value>
   ownerReferences: <Any value>
   managedFields: <Any value>
 spec:
@@ -126,6 +125,5 @@ spec:
         strval: 25%
   revisionHistoryLimit: 10
   progressDeadlineSeconds: 600
-status: <Any value>
 
 ---

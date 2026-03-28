@@ -1,23 +1,18 @@
 
-[Test 24: Duplicate role rejection should allow same role in different clusters - 1]
+[Test 31: Cluster config Job creation should create placeholder Secret and genclust Job when admin exists - 1]
 metadata:
-  name: cross-a
-  namespace: e2e-dup-role
+  name: job-cluster
+  namespace: e2e-ccjob
   uid: <Any value>
   resourceVersion: <Any value>
   generation: <Any value>
   creationTimestamp: <Any value>
-  labels:
-    curity.io/cluster: role-cluster-a
+  annotations: <Any value>
   finalizers:
-    - curity.io/node-protection
+    - curity.io/cluster-protection
   managedFields: <Any value>
 spec:
-  type: runtime
-  role: shared-role
-  identityServerClusterRef:
-    name: role-cluster-a
-  replicas: 1
+  version: "11.0"
 status:
   conditions:
     - type: Ready
@@ -40,9 +35,14 @@ status:
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
+    - type: ClusterConfigReady
+      status: "False"
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
   observedGeneration: <Any value>
-  replicas: 1
-  deploymentName: cross-a
-  serviceName: cross-a
+  nodeCount: 1
+  version: "11.0"
+  clusterConfigSecretName: job-cluster-cluster-config
 
 ---

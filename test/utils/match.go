@@ -10,6 +10,8 @@ import (
 	"github.com/gkampitakis/go-snaps/snaps"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/ginkgo/v2/dsl/core"
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -58,6 +60,7 @@ var excludeFieldMap = map[string][]string{
 // MatchYAMLResource takes a snapshot of the resource and compares it.
 // The kind is auto-detected from the object type.
 func MatchYAMLResource(resource interface{}, snapshotName ...string) {
+	resource = sanitizeVolatileFields(resource)
 	kind := strings.ToLower(GetKind(resource))
 	currentSpec := ginkgo.CurrentSpecReport()
 	name := strings.Join(snapshotName, "_")
@@ -92,10 +95,15 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 	case *v1alpha1.IdentityServerCluster:
 		c := r.DeepCopy()
 		sanitizeConditions(c.Status.Conditions)
+		c.Status.ReadyNodes = 0
 		sanitized = c
 	case *v1alpha1.IdentityServerNode:
 		c := r.DeepCopy()
 		sanitizeConditions(c.Status.Conditions)
+		c.Status.UpdatedReplicas = 0
+		c.Status.ReadyReplicas = 0
+		c.Status.AvailableReplicas = 0
+		c.Status.UnavailableReplicas = 0
 		sanitized = c
 	default:
 		sanitized = resource
@@ -115,6 +123,26 @@ func sanitizeConditions(conditions []metav1.Condition) {
 		conditions[i].ObservedGeneration = 0
 		conditions[i].Reason = ""
 		conditions[i].Message = ""
+	}
+}
+
+// sanitizeVolatileFields strips fields from Kubernetes resources that are
+// set asynchronously by controllers and may or may not be present depending
+// on timing. match.Any exclusions only handle value variation, not
+// presence/absence variation caused by omitempty on zero-valued fields.
+func sanitizeVolatileFields(resource interface{}) interface{} {
+	switch r := resource.(type) {
+	case *appsv1.Deployment:
+		d := r.DeepCopy()
+		d.Annotations = nil
+		d.Status = appsv1.DeploymentStatus{}
+		return d
+	case *batchv1.Job:
+		j := r.DeepCopy()
+		j.Status = batchv1.JobStatus{}
+		return j
+	default:
+		return resource
 	}
 }
 

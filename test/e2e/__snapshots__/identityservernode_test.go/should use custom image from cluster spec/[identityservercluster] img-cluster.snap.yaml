@@ -41,7 +41,6 @@ status:
       reason: ""
       message: ""
   observedGeneration: <Any value>
-  nodeCount: <Any value>
   version: "11.0"
 
 ---

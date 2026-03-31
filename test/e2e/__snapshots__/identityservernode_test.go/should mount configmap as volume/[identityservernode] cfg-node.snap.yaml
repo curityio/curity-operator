@@ -42,8 +42,6 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  updatedReplicas: <Any value>
-  unavailableReplicas: <Any value>
   deploymentName: cfg-node
   serviceName: cfg-node
 

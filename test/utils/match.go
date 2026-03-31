@@ -97,11 +97,17 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 		c := r.DeepCopy()
 		sanitizeConditions(c.Status.Conditions)
 		c.Annotations = nil
+		c.Status.NodeCount = 0
+		c.Status.ReadyNodes = 0
 		sanitized = c
 	case *v1alpha1.IdentityServerNode:
 		c := r.DeepCopy()
 		sanitizeConditions(c.Status.Conditions)
 		c.Annotations = nil
+		c.Status.UpdatedReplicas = 0
+		c.Status.ReadyReplicas = 0
+		c.Status.AvailableReplicas = 0
+		c.Status.UnavailableReplicas = 0
 		sanitized = c
 	default:
 		sanitized = resource

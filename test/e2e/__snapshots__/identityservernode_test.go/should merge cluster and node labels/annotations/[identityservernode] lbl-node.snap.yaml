@@ -44,8 +44,6 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  updatedReplicas: <Any value>
-  unavailableReplicas: <Any value>
   deploymentName: lbl-node
   serviceName: lbl-node
 

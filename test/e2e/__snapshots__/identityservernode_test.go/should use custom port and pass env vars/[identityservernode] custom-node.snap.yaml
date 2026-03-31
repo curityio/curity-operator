@@ -48,8 +48,6 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 2
-  updatedReplicas: <Any value>
-  unavailableReplicas: <Any value>
   deploymentName: custom-node
   serviceName: custom-node
 

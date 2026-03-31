@@ -61,6 +61,16 @@ metadata:
   namespace: demo
 spec:
   version: "11.0"
+```
+
+When `adminCredentials` is omitted, the operator automatically creates a Secret
+named `<cluster>-admin-creds` with generated values for `ADMIN_PASSWORD`,
+`CONFIG_ENCRYPTION_KEY`, and `KEYSTORE_PASSWORD`.
+
+To use a pre-existing Secret instead, specify `adminCredentials` explicitly:
+
+```yaml
+spec:
   adminCredentials:
     valueFrom:
       secretKeyRef:
@@ -73,9 +83,6 @@ spec:
           - key: KEYSTORE_PASSWORD
             path: KEYSTORE_PASSWORD
 ```
-
-The operator creates the `admin-creds` Secret with auto-generated values
-if it does not already exist. The Secret is never deleted by the operator.
 
 2. Create an admin node with the UI enabled:
 

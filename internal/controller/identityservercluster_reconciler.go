@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -264,6 +265,7 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Watches(
 			&v1alpha1.IdentityServerNode{},
 			handler.EnqueueRequestsFromMapFunc(r.findClusterForNode),
+			builder.WithPredicates(nodeStatusConditionsChangedPredicate{}),
 		).
 		Watches(
 			&batchv1.Job{},

@@ -136,31 +136,22 @@ kubectl -n demo get services     # Auto-created Services
 
 ### Accessing the Admin UI
 
-The admin UI is **disabled by default**. To enable it:
+The admin UI is **disabled by default**. Set `ui.enabled: true` on the admin
+IdentityServerNode to enable it. Admin credentials are auto-generated if not
+provided, or can be set explicitly via `adminCredentials` on the cluster — see
+[Create a Curity Identity Server Deployment](#create-a-curity-identity-server-deployment)
+for both options.
 
-1. Configure `adminCredentials` on the IdentityServerCluster (see step 1 above)
-2. Set `ui.enabled: true` on the admin IdentityServerNode
-
-The operator exposes the admin-ui port (6749) and automatically injects the
-`PASSWORD` env var from the credentials Secret. This triggers the Curity
-unattended installer which configures and starts the admin UI.
-
-| Field | Default | Description |
-|---|---|---|
-| `ui.enabled` | `false` | Expose the admin UI port (6749) and inject `PASSWORD` |
-| `ui.secure` | `true` | Serve over HTTPS. Set to `false` for HTTP |
-
-To access the UI locally via port-forward:
+To access the UI locally:
 
 ```bash
 kubectl -n demo port-forward svc/admin 6749:6749
 ```
 
 - HTTPS (default): `https://localhost:6749/admin`
-- HTTP (`secure: false`): `http://localhost:6749/admin`
+- HTTP (`ui.secure: false`): `http://localhost:6749/admin`
 
-Login with username `admin`. If the credentials Secret was auto-generated,
-retrieve the password:
+Login with username `admin`. Retrieve the auto-generated password:
 
 ```bash
 kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASSWORD}' | base64 -d

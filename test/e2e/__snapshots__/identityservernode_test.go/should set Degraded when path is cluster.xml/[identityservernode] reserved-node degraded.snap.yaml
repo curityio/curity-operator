@@ -1,0 +1,35 @@
+
+[IdentityServerNode configuration Configuration path validation should set Degraded when path is cluster.xml - 1]
+metadata:
+  name: reserved-node
+  namespace: e2e-config-validation
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: reserved-cluster
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: reserved-role
+  identityServerClusterRef:
+    name: reserved-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+
+---

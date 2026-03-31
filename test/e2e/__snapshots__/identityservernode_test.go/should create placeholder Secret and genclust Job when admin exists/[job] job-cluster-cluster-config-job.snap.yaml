@@ -1,5 +1,5 @@
 
-[Test 31: Cluster config Job creation should create placeholder Secret and genclust Job when admin exists - 1]
+[IdentityServerNode configuration Cluster config Job creation should create placeholder Secret and genclust Job when admin exists - 1]
 metadata:
   name: <Any value>
   namespace: e2e-ccjob
@@ -33,6 +33,12 @@ spec:
               value: job-admin
             - name: CONFIG_SERVICE_PORT
               value: "6789"
+            - name: CONFIG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: job-cluster-admin-creds
+                  key: CONFIG_ENCRYPTION_KEY
+                  optional: true
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent

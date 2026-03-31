@@ -85,8 +85,13 @@ type ConfigurationSource struct {
 
 // ConfigurationValueFrom specifies ConfigMap and Secret sources for configuration.
 type ConfigurationValueFrom struct {
-	ConfigMapRef *ConfigMapRefSource `json:"configMapRef,omitempty"`
-	SecretRef    *SecretKeyRefSource `json:"secretRef,omitempty"`
+	// ConfigMapRefs references multiple ConfigMaps with selectable items.
+	// Each ConfigMap gets its own volume; all items mount at /opt/idsvr/etc/init/{path}.
+	ConfigMapRefs []ConfigMapRefSource `json:"configMapRefs,omitempty"`
+
+	// SecretRefs references multiple Secrets with selectable items.
+	// Each Secret gets its own volume; all items mount at /opt/idsvr/etc/init/{path}.
+	SecretRefs []SecretKeyRefSource `json:"secretRefs,omitempty"`
 }
 
 // DataSourceSpec specifies database connection configuration.

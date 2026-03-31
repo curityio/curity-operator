@@ -1,5 +1,5 @@
 
-[Test 1: Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
+[IdentityServerNode deployment lifecycle Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
 metadata:
   name: deploy-runtime
   namespace: e2e-deploy
@@ -15,7 +15,6 @@ metadata:
     app.kubernetes.io/version: "11.0"
     curity.io/cluster: deploy-cluster
     curity.io/role: runtime-role
-  annotations: <Any value>
   ownerReferences: <Any value>
   managedFields: <Any value>
 spec:
@@ -56,6 +55,21 @@ spec:
               value: "4465"
             - name: LOGGING_LEVEL
               value: INFO
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: deploy-cluster-admin-creds
+                  key: ADMIN_PASSWORD
+            - name: CONFIG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: deploy-cluster-admin-creds
+                  key: CONFIG_ENCRYPTION_KEY
+            - name: KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: deploy-cluster-admin-creds
+                  key: KEYSTORE_PASSWORD
           volumeMounts:
             - name: cluster-config
               readOnly: true
@@ -111,6 +125,5 @@ spec:
         strval: 25%
   revisionHistoryLimit: 10
   progressDeadlineSeconds: 600
-status: <Any value>
 
 ---

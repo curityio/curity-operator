@@ -1,5 +1,5 @@
 
-[Test 30: Cluster config generation should mount cluster config volume on all node Deployments - 1]
+[IdentityServerNode configuration Cluster config generation should mount cluster config volume on all node Deployments - 1]
 metadata:
   name: cc-admin
   namespace: e2e-clusterconfig
@@ -15,7 +15,6 @@ metadata:
     app.kubernetes.io/version: "11.0"
     curity.io/cluster: cc-cluster
     curity.io/role: admin-role
-  annotations: <Any value>
   ownerReferences: <Any value>
   managedFields: <Any value>
 spec:
@@ -66,6 +65,21 @@ spec:
               value: INFO
             - name: ADMIN_UI_HTTP_MODE
               value: "false"
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cc-cluster-admin-creds
+                  key: ADMIN_PASSWORD
+            - name: CONFIG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cc-cluster-admin-creds
+                  key: CONFIG_ENCRYPTION_KEY
+            - name: KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: cc-cluster-admin-creds
+                  key: KEYSTORE_PASSWORD
           volumeMounts:
             - name: cluster-config
               readOnly: true
@@ -121,6 +135,5 @@ spec:
         strval: 25%
   revisionHistoryLimit: 10
   progressDeadlineSeconds: 600
-status: <Any value>
 
 ---

@@ -1,5 +1,5 @@
 
-[Test 6: Existing secret not overwritten should not overwrite pre-existing secret - 1]
+[IdentityServerNode credentials Existing secret not overwritten should not overwrite pre-existing secret - 1]
 metadata:
   name: creds-cluster-2
   namespace: e2e-creds-exist
@@ -7,7 +7,6 @@ metadata:
   resourceVersion: <Any value>
   generation: <Any value>
   creationTimestamp: <Any value>
-  annotations: <Any value>
   finalizers:
     - curity.io/cluster-protection
   managedFields: <Any value>
@@ -27,27 +26,27 @@ spec:
 status:
   conditions:
     - type: Ready
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Available
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Progressing
-      status: "True"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Degraded
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: ClusterConfigReady
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""

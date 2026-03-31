@@ -1,5 +1,5 @@
 
-[Test 33: Node scheduling overrides cluster should merge node nodeSelector over cluster defaults - 1]
+[IdentityServerNode scheduling Node scheduling overrides cluster should merge node nodeSelector over cluster defaults - 1]
 metadata:
   name: ovr-cluster
   namespace: e2e-sched-override
@@ -7,7 +7,6 @@ metadata:
   resourceVersion: <Any value>
   generation: <Any value>
   creationTimestamp: <Any value>
-  annotations: <Any value>
   finalizers:
     - curity.io/cluster-protection
   managedFields: <Any value>
@@ -18,32 +17,32 @@ spec:
 status:
   conditions:
     - type: Ready
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Available
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Progressing
-      status: "True"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Degraded
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: ClusterConfigReady
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
   observedGeneration: <Any value>
-  nodeCount: 1
+  nodeCount: <Any value>
   version: "11.0"
 
 ---

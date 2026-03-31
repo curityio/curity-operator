@@ -1,5 +1,5 @@
 
-[Test 9: Custom service port and env vars should use custom port and pass env vars - 1]
+[IdentityServerNode admin UI and custom ports Custom service port and env vars should use custom port and pass env vars - 1]
 metadata:
   name: custom-node
   namespace: e2e-custom
@@ -9,7 +9,6 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     curity.io/cluster: custom-cluster
-  annotations: <Any value>
   finalizers:
     - curity.io/node-protection
   managedFields: <Any value>
@@ -28,22 +27,22 @@ spec:
 status:
   conditions:
     - type: Ready
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Available
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Progressing
-      status: "True"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Degraded
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""

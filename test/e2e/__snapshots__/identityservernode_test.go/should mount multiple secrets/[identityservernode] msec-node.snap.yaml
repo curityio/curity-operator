@@ -1,0 +1,50 @@
+
+[IdentityServerNode configuration Multiple configuration sources should mount multiple secrets - 1]
+metadata:
+  name: msec-node
+  namespace: e2e-multi-config
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: msec-cluster
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: msec-role
+  identityServerClusterRef:
+    name: msec-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  updatedReplicas: <Any value>
+  unavailableReplicas: <Any value>
+  deploymentName: msec-node
+  serviceName: msec-node
+
+---

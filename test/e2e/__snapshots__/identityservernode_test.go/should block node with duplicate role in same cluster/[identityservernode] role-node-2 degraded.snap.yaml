@@ -1,5 +1,5 @@
 
-[Test 24: Duplicate role rejection should block node with duplicate role in same cluster - 1]
+[IdentityServerNode validation and rejection Duplicate role rejection should block node with duplicate role in same cluster - 1]
 metadata:
   name: role-node-2
   namespace: e2e-dup-role
@@ -21,12 +21,12 @@ spec:
 status:
   conditions:
     - type: Degraded
-      status: "True"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Ready
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""

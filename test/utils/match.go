@@ -10,6 +10,8 @@ import (
 	"github.com/gkampitakis/go-snaps/snaps"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/ginkgo/v2/dsl/core"
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -41,12 +43,13 @@ var excludeCRDFields = []string{
 	"$.metadata.managedFields",
 	"$.metadata.ownerReferences",
 	"$.status.observedGeneration",
-	// Replica counts vary by environment (Kind vs AKS) and timing
+	// Replica/node counts vary by environment (Kind vs AKS) and timing
 	"$.status.updatedReplicas",
 	"$.status.readyReplicas",
 	"$.status.availableReplicas",
 	"$.status.unavailableReplicas",
 	"$.status.readyNodes",
+	"$.status.nodeCount",
 }
 
 var excludeFieldMap = map[string][]string{
@@ -58,6 +61,7 @@ var excludeFieldMap = map[string][]string{
 // MatchYAMLResource takes a snapshot of the resource and compares it.
 // The kind is auto-detected from the object type.
 func MatchYAMLResource(resource interface{}, snapshotName ...string) {
+	resource = sanitizeVolatileFields(resource)
 	kind := strings.ToLower(GetKind(resource))
 	currentSpec := ginkgo.CurrentSpecReport()
 	name := strings.Join(snapshotName, "_")
@@ -83,8 +87,8 @@ func MatchYAMLResource(resource interface{}, snapshotName ...string) {
 }
 
 // MatchCRDResource takes a snapshot of a CRD resource with status included.
-// It deep-copies the resource and zeroes volatile condition fields
-// (LastTransitionTime, ObservedGeneration) before snapshotting.
+// It deep-copies the resource and zeroes volatile fields before snapshotting
+// so that snapshots remain deterministic across environments (Kind vs AKS).
 func MatchCRDResource(resource interface{}, snapshotName ...string) {
 	var sanitized interface{}
 
@@ -92,10 +96,12 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 	case *v1alpha1.IdentityServerCluster:
 		c := r.DeepCopy()
 		sanitizeConditions(c.Status.Conditions)
+		c.Annotations = nil
 		sanitized = c
 	case *v1alpha1.IdentityServerNode:
 		c := r.DeepCopy()
 		sanitizeConditions(c.Status.Conditions)
+		c.Annotations = nil
 		sanitized = c
 	default:
 		sanitized = resource
@@ -104,22 +110,45 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 	MatchYAMLResource(sanitized, snapshotName...)
 }
 
-// sanitizeConditions zeroes volatile fields on each condition
-// so snapshots remain deterministic across test runs and environments.
-// Reason and Message vary by Deployment controller timing (e.g.,
-// ReplicaUnavailable vs RolloutInProgress), so only Type and Status
-// are kept for cross-environment snapshot compatibility.
+// sanitizeConditions zeroes ALL volatile fields on each condition so snapshots
+// remain deterministic across test runs and environments (Kind vs AKS).
+// Only the condition Type is preserved. Status, Reason, and Message all vary
+// by timing and environment — e.g., Kind may show Ready=True/Healthy while
+// AKS shows Ready=False/NodeDegraded for the same snapshot point.
+// Conditions are verified by inline Eventually/Expect assertions instead.
 func sanitizeConditions(conditions []metav1.Condition) {
 	for i := range conditions {
 		conditions[i].LastTransitionTime = metav1.Time{}
 		conditions[i].ObservedGeneration = 0
+		conditions[i].Status = ""
 		conditions[i].Reason = ""
 		conditions[i].Message = ""
 	}
 }
 
+// sanitizeVolatileFields strips fields from Kubernetes resources that are
+// set asynchronously by controllers and may or may not be present depending
+// on timing. match.Any exclusions only handle value variation, not
+// presence/absence variation caused by omitempty on zero-valued fields.
+func sanitizeVolatileFields(resource interface{}) interface{} {
+	switch r := resource.(type) {
+	case *appsv1.Deployment:
+		d := r.DeepCopy()
+		d.Annotations = nil
+		d.Status = appsv1.DeploymentStatus{}
+		return d
+	case *batchv1.Job:
+		j := r.DeepCopy()
+		j.Status = batchv1.JobStatus{}
+		return j
+	default:
+		return resource
+	}
+}
+
 // MatchResource takes a snapshot with an explicit kind parameter.
 func MatchResource(resource interface{}, kind string, snapshotName ...string) {
+	resource = sanitizeVolatileFields(resource)
 	currentSpec := ginkgo.CurrentSpecReport()
 	name := strings.Join(snapshotName, "_")
 	if name == "" {

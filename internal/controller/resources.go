@@ -263,6 +263,33 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		}
 	}
 
+	// Auto-inject PASSWORD for Curity's unattended installer when admin UI is enabled.
+	// The installer checks for PASSWORD (not ADMIN_PASSWORD) to trigger first-run setup
+	// which configures the admin-service XML and starts the UI on port 6749.
+	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
+		if cluster.Spec.AdminCredentials != nil {
+			hasPassword := false
+			for _, item := range cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Items {
+				if item.Path == "PASSWORD" {
+					hasPassword = true
+					break
+				}
+			}
+			if !hasPassword {
+				secretName := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
+				envVars = append(envVars, corev1.EnvVar{
+					Name: "PASSWORD",
+					ValueFrom: &corev1.EnvVarSource{
+						SecretKeyRef: &corev1.SecretKeySelector{
+							LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+							Key:                  "ADMIN_PASSWORD",
+						},
+					},
+				})
+			}
+		}
+	}
+
 	// DataSource connection env vars from secrets
 	for _, ds := range cluster.Spec.DataSources {
 		secretName := ds.ValueFrom.SecretKeyRef.Name
@@ -283,6 +310,38 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 	envVars = append(envVars, node.Spec.EnvironmentVariables...)
 
 	return envVars
+}
+
+// validateConfigurationPaths checks for duplicate mount paths and reserved paths
+// across all ConfigMapRefs and SecretRefs entries.
+func validateConfigurationPaths(cfg *v1alpha1.ConfigurationValueFrom) error {
+	seen := make(map[string]string) // path -> source description
+
+	for _, cmRef := range cfg.ConfigMapRefs {
+		for _, item := range cmRef.Items {
+			if item.Path == "cluster.xml" {
+				return fmt.Errorf("path %q is reserved for operator-managed cluster configuration (configMap %q)", item.Path, cmRef.Name)
+			}
+			source := "configMap:" + cmRef.Name
+			if existing, ok := seen[item.Path]; ok {
+				return fmt.Errorf("duplicate mount path %q: defined in both %s and %s", item.Path, existing, source)
+			}
+			seen[item.Path] = source
+		}
+	}
+	for _, secRef := range cfg.SecretRefs {
+		for _, item := range secRef.Items {
+			if item.Path == "cluster.xml" {
+				return fmt.Errorf("path %q is reserved for operator-managed cluster configuration (secret %q)", item.Path, secRef.Name)
+			}
+			source := "secret:" + secRef.Name
+			if existing, ok := seen[item.Path]; ok {
+				return fmt.Errorf("duplicate mount path %q: defined in both %s and %s", item.Path, existing, source)
+			}
+			seen[item.Path] = source
+		}
+	}
+	return nil
 }
 
 // buildVolumes returns volumes and mounts for configuration sources.
@@ -320,23 +379,22 @@ func buildVolumes(cluster *v1alpha1.IdentityServerCluster) ([]corev1.Volume, []c
 
 	cfg := cluster.Spec.Configuration.ValueFrom
 
-	if cfg.ConfigMapRef != nil {
-		volName := cfg.ConfigMapRef.Name + "-volume"
-		items := make([]corev1.KeyToPath, 0, len(cfg.ConfigMapRef.Items))
-		for _, item := range cfg.ConfigMapRef.Items {
+	for _, cmRef := range cfg.ConfigMapRefs {
+		volName := cmRef.Name + "-volume"
+		items := make([]corev1.KeyToPath, 0, len(cmRef.Items))
+		for _, item := range cmRef.Items {
 			items = append(items, corev1.KeyToPath{Key: item.Key, Path: item.Path})
 		}
 		volumes = append(volumes, corev1.Volume{
 			Name: volName,
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: cfg.ConfigMapRef.Name},
+					LocalObjectReference: corev1.LocalObjectReference{Name: cmRef.Name},
 					Items:                items,
 				},
 			},
 		})
-		// Mount each item individually with subPath
-		for _, item := range cfg.ConfigMapRef.Items {
+		for _, item := range cmRef.Items {
 			mounts = append(mounts, corev1.VolumeMount{
 				Name:      volName,
 				MountPath: "/opt/idsvr/etc/init/" + item.Path,
@@ -346,23 +404,22 @@ func buildVolumes(cluster *v1alpha1.IdentityServerCluster) ([]corev1.Volume, []c
 		}
 	}
 
-	if cfg.SecretRef != nil {
-		volName := cfg.SecretRef.Name + "-volume"
-		items := make([]corev1.KeyToPath, 0, len(cfg.SecretRef.Items))
-		for _, item := range cfg.SecretRef.Items {
+	for _, secRef := range cfg.SecretRefs {
+		volName := secRef.Name + "-volume"
+		items := make([]corev1.KeyToPath, 0, len(secRef.Items))
+		for _, item := range secRef.Items {
 			items = append(items, corev1.KeyToPath{Key: item.Key, Path: item.Path})
 		}
 		volumes = append(volumes, corev1.Volume{
 			Name: volName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName: cfg.SecretRef.Name,
+					SecretName: secRef.Name,
 					Items:      items,
 				},
 			},
 		})
-		// Mount each item individually with subPath
-		for _, item := range cfg.SecretRef.Items {
+		for _, item := range secRef.Items {
 			mounts = append(mounts, corev1.VolumeMount{
 				Name:      volName,
 				MountPath: "/opt/idsvr/etc/init/" + item.Path,

@@ -5,7 +5,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/gkampitakis/go-snaps/snaps"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -42,8 +41,11 @@ func setup() {
 	}
 }
 
-func teardown(m *testing.M) {
-	_, _ = snaps.Clean(m)
+func teardown(_ *testing.M) {
+	// NOTE: snaps.Clean() is NOT called here because all snapshots are
+	// created via snaps.WithConfig() (per-file instances) which the global
+	// registry does not track. Calling Clean() would empty all snapshot
+	// files. Obsolete snapshots should be removed manually or via git.
 	err := utils.TestEnvironment.Teardown()
 	if err != nil {
 		GinkgoWriter.Println(fmt.Sprintf("Test teardown failed: %v", err.Error()))

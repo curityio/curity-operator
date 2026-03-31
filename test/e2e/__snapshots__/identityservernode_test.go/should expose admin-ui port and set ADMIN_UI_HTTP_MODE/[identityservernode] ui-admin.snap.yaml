@@ -1,5 +1,5 @@
 
-[Test 8: Admin UI port configuration should expose admin-ui port and set ADMIN_UI_HTTP_MODE - 1]
+[IdentityServerNode admin UI and custom ports Admin UI port configuration should expose admin-ui port and set ADMIN_UI_HTTP_MODE - 1]
 metadata:
   name: ui-admin
   namespace: e2e-admin-ui
@@ -9,7 +9,6 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     curity.io/cluster: ui-cluster
-  annotations: <Any value>
   finalizers:
     - curity.io/node-protection
   managedFields: <Any value>
@@ -25,22 +24,22 @@ spec:
 status:
   conditions:
     - type: Ready
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Available
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Progressing
-      status: "True"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Degraded
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""

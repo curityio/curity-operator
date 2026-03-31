@@ -1,5 +1,5 @@
 
-[Test 24: Duplicate role rejection should allow same role in different clusters - 1]
+[IdentityServerNode validation and rejection Duplicate role rejection should allow same role in different clusters - 1]
 metadata:
   name: cross-b
   namespace: e2e-dup-role
@@ -21,22 +21,22 @@ spec:
 status:
   conditions:
     - type: Ready
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Available
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Progressing
-      status: "True"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Degraded
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""

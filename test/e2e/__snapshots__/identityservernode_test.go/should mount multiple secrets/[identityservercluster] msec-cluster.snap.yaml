@@ -1,0 +1,57 @@
+
+[IdentityServerNode configuration Multiple configuration sources should mount multiple secrets - 1]
+metadata:
+  name: msec-cluster
+  namespace: e2e-multi-config
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  finalizers:
+    - curity.io/cluster-protection
+  managedFields: <Any value>
+spec:
+  version: "11.0"
+  configuration:
+    valueFrom:
+      secretRefs:
+        - name: ds-secret
+          items:
+            - key: ds.xml
+              path: ds.xml
+        - name: tls-secret
+          items:
+            - key: tls.xml
+              path: tls.xml
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: ClusterConfigReady
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  nodeCount: <Any value>
+  version: "11.0"
+
+---

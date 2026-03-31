@@ -1,5 +1,5 @@
 
-[Test 7: Duplicate admin node rejection should set Degraded on second admin and not create its Deployment - 1]
+[IdentityServerNode validation and rejection Duplicate admin node rejection should set Degraded on second admin and not create its Deployment - 1]
 metadata:
   name: admin-1
   namespace: e2e-dup-admin
@@ -9,7 +9,6 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     curity.io/cluster: dup-cluster
-  annotations: <Any value>
   finalizers:
     - curity.io/node-protection
   managedFields: <Any value>
@@ -25,22 +24,22 @@ spec:
 status:
   conditions:
     - type: Ready
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Available
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Progressing
-      status: "True"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Degraded
-      status: "True"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""

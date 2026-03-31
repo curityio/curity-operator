@@ -1,0 +1,21 @@
+
+[IdentityServerNode configuration Configuration path validation should set Degraded when path is cluster.xml - 1]
+metadata:
+  name: reserved-cluster
+  namespace: e2e-config-validation
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  managedFields: <Any value>
+spec:
+  version: "11.0"
+  configuration:
+    valueFrom:
+      configMapRefs:
+        - name: user-cfg
+          items:
+            - key: data
+              path: cluster.xml
+
+---

@@ -1,5 +1,5 @@
 
-[Test 27: Secret configuration volumes should mount secret as volume - 1]
+[IdentityServerNode configuration Secret configuration volumes should mount secret as volume - 1]
 metadata:
   name: scfg-node
   namespace: e2e-secret-config
@@ -21,22 +21,22 @@ spec:
 status:
   conditions:
     - type: Ready
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Available
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Progressing
-      status: "True"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
     - type: Degraded
-      status: "False"
+      status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""

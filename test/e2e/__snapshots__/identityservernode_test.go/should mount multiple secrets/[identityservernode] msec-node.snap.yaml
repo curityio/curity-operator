@@ -1,24 +1,23 @@
 
-[IdentityServerNode configuration Secret configuration volumes should mount secret as volume - 1]
+[IdentityServerNode configuration Multiple configuration sources should mount multiple secrets - 1]
 metadata:
-  name: scfg-cluster
-  namespace: e2e-secret-config
+  name: msec-node
+  namespace: e2e-multi-config
   uid: <Any value>
   resourceVersion: <Any value>
   generation: <Any value>
   creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: msec-cluster
   finalizers:
-    - curity.io/cluster-protection
+    - curity.io/node-protection
   managedFields: <Any value>
 spec:
-  version: "11.0"
-  configuration:
-    valueFrom:
-      secretRefs:
-        - name: test-secret-config
-          items:
-            - key: datasource-config.xml
-              path: datasource-config.xml
+  type: runtime
+  role: msec-role
+  identityServerClusterRef:
+    name: msec-cluster
+  replicas: 1
 status:
   conditions:
     - type: Ready
@@ -41,13 +40,11 @@ status:
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
-    - type: ClusterConfigReady
-      status: ""
-      lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
-      message: ""
   observedGeneration: <Any value>
-  nodeCount: <Any value>
-  version: "11.0"
+  replicas: 1
+  updatedReplicas: <Any value>
+  unavailableReplicas: <Any value>
+  deploymentName: msec-node
+  serviceName: msec-node
 
 ---

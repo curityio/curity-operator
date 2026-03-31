@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -306,13 +307,17 @@ func TestBuildDeployment_ConfigurationVolumes(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
 		ValueFrom: v1alpha1.ConfigurationValueFrom{
-			ConfigMapRef: &v1alpha1.ConfigMapRefSource{
-				Name:  "test-config",
-				Items: []v1alpha1.KeyToPath{{Key: "base.xml", Path: "base.xml"}},
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{
+					Name:  "test-config",
+					Items: []v1alpha1.KeyToPath{{Key: "base.xml", Path: "base.xml"}},
+				},
 			},
-			SecretRef: &v1alpha1.SecretKeyRefSource{
-				Name:  "test-secret-config",
-				Items: []v1alpha1.KeyToPath{{Key: "ds.xml", Path: "ds.xml"}},
+			SecretRefs: []v1alpha1.SecretKeyRefSource{
+				{
+					Name:  "test-secret-config",
+					Items: []v1alpha1.KeyToPath{{Key: "ds.xml", Path: "ds.xml"}},
+				},
 			},
 		},
 	}
@@ -1120,9 +1125,11 @@ func TestBuildVolumes_ClusterConfigPlusUserConfig(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
 		ValueFrom: v1alpha1.ConfigurationValueFrom{
-			ConfigMapRef: &v1alpha1.ConfigMapRefSource{
-				Name:  "my-config",
-				Items: []v1alpha1.KeyToPath{{Key: "config.xml", Path: "config.xml"}},
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{
+					Name:  "my-config",
+					Items: []v1alpha1.KeyToPath{{Key: "config.xml", Path: "config.xml"}},
+				},
 			},
 		},
 	}
@@ -1663,5 +1670,463 @@ func TestBuildDeployment_DataSourcesNodeEnvVarOverride(t *testing.T) {
 	}
 	if !foundLiteral {
 		t.Error("expected node-level DB_HOST literal override")
+	}
+}
+
+// --- buildVolumes array tests (happy path) ---
+
+func TestBuildVolumes_SingleConfigMap(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{Name: "base-cfg", Items: []v1alpha1.KeyToPath{{Key: "base.xml", Path: "base.xml"}}},
+			},
+		},
+	}
+	volumes, mounts := buildVolumes(cluster)
+
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes (cluster-config + 1 configmap), got %d", len(volumes))
+	}
+	if volumes[1].Name != "base-cfg-volume" {
+		t.Errorf("expected volume name 'base-cfg-volume', got %q", volumes[1].Name)
+	}
+	if len(mounts) != 2 {
+		t.Fatalf("expected 2 mounts, got %d", len(mounts))
+	}
+}
+
+func TestBuildVolumes_SingleSecret(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			SecretRefs: []v1alpha1.SecretKeyRefSource{
+				{Name: "ds-secret", Items: []v1alpha1.KeyToPath{{Key: "ds.xml", Path: "ds.xml"}}},
+			},
+		},
+	}
+	volumes, mounts := buildVolumes(cluster)
+
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes (cluster-config + 1 secret), got %d", len(volumes))
+	}
+	if volumes[1].Name != "ds-secret-volume" {
+		t.Errorf("expected volume name 'ds-secret-volume', got %q", volumes[1].Name)
+	}
+	if volumes[1].Secret == nil {
+		t.Fatal("expected secret volume source")
+	}
+	if volumes[1].Secret.SecretName != "ds-secret" {
+		t.Errorf("expected secret name 'ds-secret', got %q", volumes[1].Secret.SecretName)
+	}
+	if len(mounts) != 2 {
+		t.Fatalf("expected 2 mounts, got %d", len(mounts))
+	}
+}
+
+func TestBuildVolumes_MultipleConfigMaps(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{Name: "base-cfg", Items: []v1alpha1.KeyToPath{{Key: "base.xml", Path: "base.xml"}}},
+				{Name: "plugin-cfg", Items: []v1alpha1.KeyToPath{{Key: "plugin.xml", Path: "plugin.xml"}}},
+			},
+		},
+	}
+	volumes, mounts := buildVolumes(cluster)
+
+	// 1 cluster-config + 2 configmaps = 3 volumes
+	if len(volumes) != 3 {
+		t.Fatalf("expected 3 volumes, got %d", len(volumes))
+	}
+	if volumes[1].Name != "base-cfg-volume" {
+		t.Errorf("expected 'base-cfg-volume', got %q", volumes[1].Name)
+	}
+	if volumes[2].Name != "plugin-cfg-volume" {
+		t.Errorf("expected 'plugin-cfg-volume', got %q", volumes[2].Name)
+	}
+	// 1 cluster.xml + 1 base.xml + 1 plugin.xml = 3 mounts
+	if len(mounts) != 3 {
+		t.Fatalf("expected 3 mounts, got %d", len(mounts))
+	}
+}
+
+func TestBuildVolumes_MultipleSecrets(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			SecretRefs: []v1alpha1.SecretKeyRefSource{
+				{Name: "ds-secret", Items: []v1alpha1.KeyToPath{{Key: "ds.xml", Path: "ds.xml"}}},
+				{Name: "tls-secret", Items: []v1alpha1.KeyToPath{{Key: "tls.xml", Path: "tls.xml"}}},
+			},
+		},
+	}
+	volumes, mounts := buildVolumes(cluster)
+
+	if len(volumes) != 3 {
+		t.Fatalf("expected 3 volumes, got %d", len(volumes))
+	}
+	if volumes[1].Name != "ds-secret-volume" {
+		t.Errorf("expected 'ds-secret-volume', got %q", volumes[1].Name)
+	}
+	if volumes[2].Name != "tls-secret-volume" {
+		t.Errorf("expected 'tls-secret-volume', got %q", volumes[2].Name)
+	}
+	if len(mounts) != 3 {
+		t.Fatalf("expected 3 mounts, got %d", len(mounts))
+	}
+}
+
+func TestBuildVolumes_MixedSources(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{Name: "base-cfg", Items: []v1alpha1.KeyToPath{{Key: "base.xml", Path: "base.xml"}}},
+				{Name: "plugin-cfg", Items: []v1alpha1.KeyToPath{{Key: "plugin.xml", Path: "plugin.xml"}}},
+			},
+			SecretRefs: []v1alpha1.SecretKeyRefSource{
+				{Name: "ds-secret", Items: []v1alpha1.KeyToPath{{Key: "ds.xml", Path: "ds.xml"}}},
+			},
+		},
+	}
+	volumes, mounts := buildVolumes(cluster)
+
+	// 1 cluster-config + 2 configmaps + 1 secret = 4 volumes
+	if len(volumes) != 4 {
+		t.Fatalf("expected 4 volumes, got %d", len(volumes))
+	}
+	// configmaps come first, then secrets
+	if volumes[1].ConfigMap == nil {
+		t.Error("expected volume[1] to be a ConfigMap")
+	}
+	if volumes[2].ConfigMap == nil {
+		t.Error("expected volume[2] to be a ConfigMap")
+	}
+	if volumes[3].Secret == nil {
+		t.Error("expected volume[3] to be a Secret")
+	}
+	// 1 cluster.xml + 2 configmap items + 1 secret item = 4 mounts
+	if len(mounts) != 4 {
+		t.Fatalf("expected 4 mounts, got %d", len(mounts))
+	}
+}
+
+func TestBuildVolumes_MultipleItemsPerSource(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{
+					Name: "multi-item-cfg",
+					Items: []v1alpha1.KeyToPath{
+						{Key: "base.xml", Path: "base.xml"},
+						{Key: "logging.xml", Path: "logging.xml"},
+						{Key: "auth.xml", Path: "auth.xml"},
+					},
+				},
+			},
+		},
+	}
+	volumes, mounts := buildVolumes(cluster)
+
+	// 1 cluster-config + 1 configmap (with 3 items) = 2 volumes
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(volumes))
+	}
+	// 1 cluster.xml + 3 configmap items = 4 mounts
+	if len(mounts) != 4 {
+		t.Fatalf("expected 4 mounts, got %d", len(mounts))
+	}
+}
+
+func TestBuildVolumes_MountPathsCorrect(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{Name: "cfg", Items: []v1alpha1.KeyToPath{{Key: "myfile.xml", Path: "myfile.xml"}}},
+			},
+		},
+	}
+	_, mounts := buildVolumes(cluster)
+
+	// mounts[0] is cluster.xml, mounts[1] is user config
+	if mounts[1].MountPath != "/opt/idsvr/etc/init/myfile.xml" {
+		t.Errorf("expected mount path '/opt/idsvr/etc/init/myfile.xml', got %q", mounts[1].MountPath)
+	}
+	if mounts[1].SubPath != "myfile.xml" {
+		t.Errorf("expected subPath 'myfile.xml', got %q", mounts[1].SubPath)
+	}
+}
+
+func TestBuildVolumes_VolumesAreReadOnly(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{Name: "cfg", Items: []v1alpha1.KeyToPath{{Key: "a.xml", Path: "a.xml"}}},
+			},
+			SecretRefs: []v1alpha1.SecretKeyRefSource{
+				{Name: "sec", Items: []v1alpha1.KeyToPath{{Key: "b.xml", Path: "b.xml"}}},
+			},
+		},
+	}
+	_, mounts := buildVolumes(cluster)
+
+	for i, m := range mounts {
+		if !m.ReadOnly {
+			t.Errorf("mount[%d] %q should be read-only", i, m.Name)
+		}
+	}
+}
+
+// --- buildVolumes array tests (edge / negative) ---
+
+func TestBuildVolumes_EmptyArrays(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{},
+			SecretRefs:    []v1alpha1.SecretKeyRefSource{},
+		},
+	}
+	volumes, mounts := buildVolumes(cluster)
+
+	if len(volumes) != 1 {
+		t.Fatalf("expected 1 volume (cluster-config only), got %d", len(volumes))
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 mount (cluster-config only), got %d", len(mounts))
+	}
+}
+
+func TestBuildVolumes_NilConfiguration(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = nil
+
+	volumes, mounts := buildVolumes(cluster)
+
+	if len(volumes) != 1 {
+		t.Fatalf("expected 1 volume (cluster-config only), got %d", len(volumes))
+	}
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 mount (cluster-config only), got %d", len(mounts))
+	}
+}
+
+func TestBuildVolumes_EmptyItemsArray(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{Name: "empty-cfg", Items: []v1alpha1.KeyToPath{}},
+			},
+		},
+	}
+	volumes, mounts := buildVolumes(cluster)
+
+	// Volume is still created but has no items or mounts
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(volumes))
+	}
+	// Only cluster.xml mount, no items from empty configmap
+	if len(mounts) != 1 {
+		t.Fatalf("expected 1 mount (cluster-config only), got %d", len(mounts))
+	}
+}
+
+func TestBuildVolumes_VolumeNameFormat(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{Name: "my-app-config", Items: []v1alpha1.KeyToPath{{Key: "a.xml", Path: "a.xml"}}},
+			},
+			SecretRefs: []v1alpha1.SecretKeyRefSource{
+				{Name: "my-app-secret", Items: []v1alpha1.KeyToPath{{Key: "b.xml", Path: "b.xml"}}},
+			},
+		},
+	}
+	volumes, _ := buildVolumes(cluster)
+
+	if volumes[1].Name != "my-app-config-volume" {
+		t.Errorf("expected 'my-app-config-volume', got %q", volumes[1].Name)
+	}
+	if volumes[2].Name != "my-app-secret-volume" {
+		t.Errorf("expected 'my-app-secret-volume', got %q", volumes[2].Name)
+	}
+}
+
+func TestBuildVolumes_ConfigMapAndSecretSameName(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Configuration = &v1alpha1.ConfigurationSource{
+		ValueFrom: v1alpha1.ConfigurationValueFrom{
+			ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+				{Name: "shared-name", Items: []v1alpha1.KeyToPath{{Key: "a.xml", Path: "a.xml"}}},
+			},
+			SecretRefs: []v1alpha1.SecretKeyRefSource{
+				{Name: "shared-name", Items: []v1alpha1.KeyToPath{{Key: "b.xml", Path: "b.xml"}}},
+			},
+		},
+	}
+	volumes, _ := buildVolumes(cluster)
+
+	// Both get "shared-name-volume" — same volume name
+	if len(volumes) != 3 {
+		t.Fatalf("expected 3 volumes, got %d", len(volumes))
+	}
+	if volumes[1].Name != "shared-name-volume" {
+		t.Errorf("expected 'shared-name-volume', got %q", volumes[1].Name)
+	}
+	if volumes[2].Name != "shared-name-volume" {
+		t.Errorf("expected 'shared-name-volume', got %q", volumes[2].Name)
+	}
+}
+
+// --- validateConfigurationPaths tests (happy path) ---
+
+func TestValidateConfigPaths_NoDuplicates(t *testing.T) {
+	cfg := &v1alpha1.ConfigurationValueFrom{
+		ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+			{Name: "cfg1", Items: []v1alpha1.KeyToPath{{Key: "a", Path: "a.xml"}}},
+			{Name: "cfg2", Items: []v1alpha1.KeyToPath{{Key: "b", Path: "b.xml"}}},
+		},
+		SecretRefs: []v1alpha1.SecretKeyRefSource{
+			{Name: "sec1", Items: []v1alpha1.KeyToPath{{Key: "c", Path: "c.xml"}}},
+		},
+	}
+	if err := validateConfigurationPaths(cfg); err != nil {
+		t.Errorf("expected no error, got %v", err)
+	}
+}
+
+func TestValidateConfigPaths_EmptyConfig(t *testing.T) {
+	cfg := &v1alpha1.ConfigurationValueFrom{}
+	if err := validateConfigurationPaths(cfg); err != nil {
+		t.Errorf("expected no error for empty config, got %v", err)
+	}
+}
+
+func TestValidateConfigPaths_EmptyArrays(t *testing.T) {
+	cfg := &v1alpha1.ConfigurationValueFrom{
+		ConfigMapRefs: []v1alpha1.ConfigMapRefSource{},
+		SecretRefs:    []v1alpha1.SecretKeyRefSource{},
+	}
+	if err := validateConfigurationPaths(cfg); err != nil {
+		t.Errorf("expected no error for empty arrays, got %v", err)
+	}
+}
+
+// --- validateConfigurationPaths tests (negative / cluster.xml) ---
+
+func TestValidateConfigPaths_DuplicatePathSameType(t *testing.T) {
+	cfg := &v1alpha1.ConfigurationValueFrom{
+		ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+			{Name: "cfg1", Items: []v1alpha1.KeyToPath{{Key: "a", Path: "base.xml"}}},
+			{Name: "cfg2", Items: []v1alpha1.KeyToPath{{Key: "b", Path: "base.xml"}}},
+		},
+	}
+	err := validateConfigurationPaths(cfg)
+	if err == nil {
+		t.Fatal("expected error for duplicate path, got nil")
+	}
+	if !strings.Contains(err.Error(), "duplicate mount path") {
+		t.Errorf("expected 'duplicate mount path' in error, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "base.xml") {
+		t.Errorf("expected path name in error, got %q", err.Error())
+	}
+}
+
+func TestValidateConfigPaths_DuplicatePathCrossType(t *testing.T) {
+	cfg := &v1alpha1.ConfigurationValueFrom{
+		ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+			{Name: "cfg1", Items: []v1alpha1.KeyToPath{{Key: "a", Path: "config.xml"}}},
+		},
+		SecretRefs: []v1alpha1.SecretKeyRefSource{
+			{Name: "sec1", Items: []v1alpha1.KeyToPath{{Key: "b", Path: "config.xml"}}},
+		},
+	}
+	err := validateConfigurationPaths(cfg)
+	if err == nil {
+		t.Fatal("expected error for cross-type duplicate path, got nil")
+	}
+	if !strings.Contains(err.Error(), "config.xml") {
+		t.Errorf("expected path name in error, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "configMap:cfg1") {
+		t.Errorf("expected source name in error, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "secret:sec1") {
+		t.Errorf("expected source name in error, got %q", err.Error())
+	}
+}
+
+func TestValidateConfigPaths_DuplicateWithinSameSource(t *testing.T) {
+	cfg := &v1alpha1.ConfigurationValueFrom{
+		ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+			{
+				Name: "cfg1",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "key1", Path: "same.xml"},
+					{Key: "key2", Path: "same.xml"},
+				},
+			},
+		},
+	}
+	err := validateConfigurationPaths(cfg)
+	if err == nil {
+		t.Fatal("expected error for duplicate within same source, got nil")
+	}
+	if !strings.Contains(err.Error(), "same.xml") {
+		t.Errorf("expected path name in error, got %q", err.Error())
+	}
+}
+
+func TestValidateConfigPaths_ClusterXmlInConfigMap(t *testing.T) {
+	cfg := &v1alpha1.ConfigurationValueFrom{
+		ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+			{Name: "user-cfg", Items: []v1alpha1.KeyToPath{{Key: "cluster", Path: "cluster.xml"}}},
+		},
+	}
+	err := validateConfigurationPaths(cfg)
+	if err == nil {
+		t.Fatal("expected error for reserved cluster.xml path, got nil")
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("expected 'reserved' in error, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "cluster.xml") {
+		t.Errorf("expected 'cluster.xml' in error, got %q", err.Error())
+	}
+}
+
+func TestValidateConfigPaths_ClusterXmlInSecret(t *testing.T) {
+	cfg := &v1alpha1.ConfigurationValueFrom{
+		SecretRefs: []v1alpha1.SecretKeyRefSource{
+			{Name: "user-sec", Items: []v1alpha1.KeyToPath{{Key: "cluster", Path: "cluster.xml"}}},
+		},
+	}
+	err := validateConfigurationPaths(cfg)
+	if err == nil {
+		t.Fatal("expected error for reserved cluster.xml path in secret, got nil")
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("expected 'reserved' in error, got %q", err.Error())
+	}
+}
+
+func TestValidateConfigPaths_ClusterXmlCaseVariant(t *testing.T) {
+	cfg := &v1alpha1.ConfigurationValueFrom{
+		ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+			{Name: "cfg", Items: []v1alpha1.KeyToPath{{Key: "k", Path: "Cluster.xml"}}},
+		},
+	}
+	// Different case should NOT trigger reserved path error (case-sensitive)
+	if err := validateConfigurationPaths(cfg); err != nil {
+		t.Errorf("expected no error for case-variant 'Cluster.xml', got %v", err)
 	}
 }

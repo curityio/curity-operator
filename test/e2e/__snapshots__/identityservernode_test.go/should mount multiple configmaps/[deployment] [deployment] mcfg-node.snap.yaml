@@ -1,0 +1,151 @@
+
+[IdentityServerNode configuration Multiple configuration sources should mount multiple configmaps - 1]
+metadata:
+  name: mcfg-node
+  namespace: e2e-multi-config
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/instance: mcfg-node
+    app.kubernetes.io/managed-by: curity-operator
+    app.kubernetes.io/name: curity-identity-server
+    app.kubernetes.io/version: "11.0"
+    curity.io/cluster: mcfg-cluster
+    curity.io/role: mcfg-role
+  ownerReferences: <Any value>
+  managedFields: <Any value>
+spec:
+  replicas: 1
+  selector: <Any value>
+  template:
+    metadata: <Any value>
+    spec:
+      volumes:
+        - name: cluster-config
+          secret:
+            secretName: mcfg-cluster-cluster-config
+            items:
+              - key: cluster.xml
+                path: cluster.xml
+            defaultMode: 420
+            optional: true
+        - name: base-cfg-volume
+          configMap:
+            name: base-cfg
+            items:
+              - key: base.xml
+                path: base.xml
+            defaultMode: 420
+        - name: plugin-cfg-volume
+          configMap:
+            name: plugin-cfg
+            items:
+              - key: plugin.xml
+                path: plugin.xml
+            defaultMode: 420
+      containers:
+        - name: curity
+          image: curity.azurecr.io/curity/idsvr:11.0
+          args:
+            - /opt/idsvr/bin/idsvr
+            - -s
+            - mcfg-role
+            - --no-admin
+          ports:
+            - name: health-check
+              containerPort: 4465
+              protocol: TCP
+            - name: metrics
+              containerPort: 4466
+              protocol: TCP
+            - name: http
+              containerPort: 8443
+              protocol: TCP
+          env:
+            - name: STATUS_CMD_PORT
+              value: "4465"
+            - name: LOGGING_LEVEL
+              value: INFO
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcfg-cluster-admin-creds
+                  key: ADMIN_PASSWORD
+            - name: CONFIG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mcfg-cluster-admin-creds
+                  key: CONFIG_ENCRYPTION_KEY
+            - name: KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcfg-cluster-admin-creds
+                  key: KEYSTORE_PASSWORD
+          volumeMounts:
+            - name: cluster-config
+              readOnly: true
+              mountPath: /opt/idsvr/etc/init/cluster.xml
+              subPath: cluster.xml
+            - name: base-cfg-volume
+              readOnly: true
+              mountPath: /opt/idsvr/etc/init/base.xml
+              subPath: base.xml
+            - name: plugin-cfg-volume
+              readOnly: true
+              mountPath: /opt/idsvr/etc/init/plugin.xml
+              subPath: plugin.xml
+          livenessProbe:
+            httpGet:
+              path: /
+              port:
+                type: 0
+                intval: 4465
+                strval: ""
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port:
+                type: 0
+                intval: 4465
+                strval: ""
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 3
+            failureThreshold: 3
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10000
+        fsGroup: 10000
+      schedulerName: default-scheduler
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable:
+        type: 1
+        intval: 0
+        strval: 25%
+      maxSurge:
+        type: 1
+        intval: 0
+        strval: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+
+---

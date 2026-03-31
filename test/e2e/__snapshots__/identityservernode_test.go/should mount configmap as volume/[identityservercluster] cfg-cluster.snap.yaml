@@ -14,11 +14,11 @@ spec:
   version: "11.0"
   configuration:
     valueFrom:
-      configMapRef:
-        name: test-config
-        items:
-          - key: base-config.xml
-            path: base-config.xml
+      configMapRefs:
+        - name: test-config
+          items:
+            - key: base-config.xml
+              path: base-config.xml
 status:
   conditions:
     - type: Ready

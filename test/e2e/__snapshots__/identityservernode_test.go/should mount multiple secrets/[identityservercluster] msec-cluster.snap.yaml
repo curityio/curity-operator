@@ -1,8 +1,8 @@
 
-[IdentityServerNode configuration Secret configuration volumes should mount secret as volume - 1]
+[IdentityServerNode configuration Multiple configuration sources should mount multiple secrets - 1]
 metadata:
-  name: scfg-cluster
-  namespace: e2e-secret-config
+  name: msec-cluster
+  namespace: e2e-multi-config
   uid: <Any value>
   resourceVersion: <Any value>
   generation: <Any value>
@@ -15,10 +15,14 @@ spec:
   configuration:
     valueFrom:
       secretRefs:
-        - name: test-secret-config
+        - name: ds-secret
           items:
-            - key: datasource-config.xml
-              path: datasource-config.xml
+            - key: ds.xml
+              path: ds.xml
+        - name: tls-secret
+          items:
+            - key: tls.xml
+              path: tls.xml
 status:
   conditions:
     - type: Ready

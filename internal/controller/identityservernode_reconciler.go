@@ -173,7 +173,24 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
 	}
 
-	// 6. Build and reconcile the Deployment
+	// 6. Validate configuration paths before building Deployment
+	if cluster.Spec.Configuration != nil {
+		if err := validateConfigurationPaths(&cluster.Spec.Configuration.ValueFrom); err != nil {
+			setCondition(&node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
+				"InvalidConfiguration", err.Error(), node.Generation)
+			setCondition(&node.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
+				"InvalidConfiguration", err.Error(), node.Generation)
+			node.Status.ObservedGeneration = node.Generation
+			if statusErr := r.Status().Update(ctx, &node); statusErr != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to update status: %w", statusErr)
+			}
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "InvalidConfiguration",
+				"Configuration validation failed: %s", err.Error())
+			return ctrl.Result{}, nil
+		}
+	}
+
+	// 7. Build and reconcile the Deployment
 	desiredDeploy := buildDeployment(&cluster, &node)
 
 	// Inject cluster config hash annotation for rolling restart when Secret changes

@@ -918,9 +918,11 @@ var _ = Describe("IdentityServerNode", func() {
 						Version: "11.0",
 						Configuration: &v1alpha1.ConfigurationSource{
 							ValueFrom: v1alpha1.ConfigurationValueFrom{
-								ConfigMapRef: &v1alpha1.ConfigMapRefSource{
-									Name:  "test-config",
-									Items: []v1alpha1.KeyToPath{{Key: "base-config.xml", Path: "base-config.xml"}},
+								ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+									{
+										Name:  "test-config",
+										Items: []v1alpha1.KeyToPath{{Key: "base-config.xml", Path: "base-config.xml"}},
+									},
 								},
 							},
 						},
@@ -970,9 +972,11 @@ var _ = Describe("IdentityServerNode", func() {
 						Version: "11.0",
 						Configuration: &v1alpha1.ConfigurationSource{
 							ValueFrom: v1alpha1.ConfigurationValueFrom{
-								SecretRef: &v1alpha1.SecretKeyRefSource{
-									Name:  "test-secret-config",
-									Items: []v1alpha1.KeyToPath{{Key: "datasource-config.xml", Path: "datasource-config.xml"}},
+								SecretRefs: []v1alpha1.SecretKeyRefSource{
+									{
+										Name:  "test-secret-config",
+										Items: []v1alpha1.KeyToPath{{Key: "datasource-config.xml", Path: "datasource-config.xml"}},
+									},
 								},
 							},
 						},
@@ -1003,6 +1007,279 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.MatchCRDResource(cluster, "scfg-cluster")
 				utils.WaitForConditions(node, e2eTimeout, e2eInterval)
 				utils.MatchCRDResource(node, "scfg-node")
+			})
+		})
+
+		Describe("Multiple configuration sources", Ordered, func() {
+			const ns = "e2e-multi-config"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should mount multiple configmaps", func() {
+				ctx := context.Background()
+				cm1 := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Name: "base-cfg", Namespace: ns},
+					Data:       map[string]string{"base.xml": "<base/>"},
+				}
+				cm2 := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Name: "plugin-cfg", Namespace: ns},
+					Data:       map[string]string{"plugin.xml": "<plugin/>"},
+				}
+				Expect(k().Create(ctx, cm1)).To(Succeed())
+				Expect(k().Create(ctx, cm2)).To(Succeed())
+
+				cluster := &v1alpha1.IdentityServerCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "mcfg-cluster", Namespace: ns},
+					Spec: v1alpha1.IdentityServerClusterSpec{
+						Version: "11.0",
+						Configuration: &v1alpha1.ConfigurationSource{
+							ValueFrom: v1alpha1.ConfigurationValueFrom{
+								ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+									{Name: "base-cfg", Items: []v1alpha1.KeyToPath{{Key: "base.xml", Path: "base.xml"}}},
+									{Name: "plugin-cfg", Items: []v1alpha1.KeyToPath{{Key: "plugin.xml", Path: "plugin.xml"}}},
+								},
+							},
+						},
+					},
+				}
+				Expect(k().Create(ctx, cluster)).To(Succeed())
+
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "mcfg-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "mcfg-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "mcfg-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "mcfg-node", Namespace: ns}}
+				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+				// 1 cluster-config + 2 configmaps = 3 volumes
+				Expect(deploy.Spec.Template.Spec.Volumes).To(HaveLen(3))
+				Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts).To(HaveLen(3))
+
+				utils.MatchYAMLResource(deploy, "[deployment] mcfg-node")
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+				utils.MatchCRDResource(cluster, "mcfg-cluster")
+				utils.WaitForConditions(node, e2eTimeout, e2eInterval)
+				utils.MatchCRDResource(node, "mcfg-node")
+			})
+
+			It("should mount multiple secrets", func() {
+				ctx := context.Background()
+				sec1 := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "ds-secret", Namespace: ns},
+					Data:       map[string][]byte{"ds.xml": []byte("<ds/>")},
+				}
+				sec2 := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "tls-secret", Namespace: ns},
+					Data:       map[string][]byte{"tls.xml": []byte("<tls/>")},
+				}
+				Expect(k().Create(ctx, sec1)).To(Succeed())
+				Expect(k().Create(ctx, sec2)).To(Succeed())
+
+				cluster := &v1alpha1.IdentityServerCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "msec-cluster", Namespace: ns},
+					Spec: v1alpha1.IdentityServerClusterSpec{
+						Version: "11.0",
+						Configuration: &v1alpha1.ConfigurationSource{
+							ValueFrom: v1alpha1.ConfigurationValueFrom{
+								SecretRefs: []v1alpha1.SecretKeyRefSource{
+									{Name: "ds-secret", Items: []v1alpha1.KeyToPath{{Key: "ds.xml", Path: "ds.xml"}}},
+									{Name: "tls-secret", Items: []v1alpha1.KeyToPath{{Key: "tls.xml", Path: "tls.xml"}}},
+								},
+							},
+						},
+					},
+				}
+				Expect(k().Create(ctx, cluster)).To(Succeed())
+
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "msec-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "msec-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "msec-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "msec-node", Namespace: ns}}
+				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+				// 1 cluster-config + 2 secrets = 3 volumes
+				Expect(deploy.Spec.Template.Spec.Volumes).To(HaveLen(3))
+				Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts).To(HaveLen(3))
+
+				utils.MatchYAMLResource(deploy, "[deployment] msec-node")
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+				utils.MatchCRDResource(cluster, "msec-cluster")
+				utils.WaitForConditions(node, e2eTimeout, e2eInterval)
+				utils.MatchCRDResource(node, "msec-node")
+			})
+
+			It("should mount mixed configmaps and secrets", func() {
+				ctx := context.Background()
+				cm := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Name: "mix-cfg", Namespace: ns},
+					Data:       map[string]string{"base.xml": "<base/>"},
+				}
+				sec := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "mix-secret", Namespace: ns},
+					Data:       map[string][]byte{"sensitive.xml": []byte("<secret/>")},
+				}
+				Expect(k().Create(ctx, cm)).To(Succeed())
+				Expect(k().Create(ctx, sec)).To(Succeed())
+
+				cluster := &v1alpha1.IdentityServerCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "mix-cluster", Namespace: ns},
+					Spec: v1alpha1.IdentityServerClusterSpec{
+						Version: "11.0",
+						Configuration: &v1alpha1.ConfigurationSource{
+							ValueFrom: v1alpha1.ConfigurationValueFrom{
+								ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+									{Name: "mix-cfg", Items: []v1alpha1.KeyToPath{{Key: "base.xml", Path: "base.xml"}}},
+								},
+								SecretRefs: []v1alpha1.SecretKeyRefSource{
+									{Name: "mix-secret", Items: []v1alpha1.KeyToPath{{Key: "sensitive.xml", Path: "sensitive.xml"}}},
+								},
+							},
+						},
+					},
+				}
+				Expect(k().Create(ctx, cluster)).To(Succeed())
+
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "mix-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "mix-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "mix-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "mix-node", Namespace: ns}}
+				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+				// 1 cluster-config + 1 configmap + 1 secret = 3 volumes
+				Expect(deploy.Spec.Template.Spec.Volumes).To(HaveLen(3))
+				Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts).To(HaveLen(3))
+
+				utils.MatchYAMLResource(deploy, "[deployment] mix-node")
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+				utils.MatchCRDResource(cluster, "mix-cluster")
+				utils.WaitForConditions(node, e2eTimeout, e2eInterval)
+				utils.MatchCRDResource(node, "mix-node")
+			})
+		})
+
+		Describe("Configuration path validation", Ordered, func() {
+			const ns = "e2e-config-validation"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should set Degraded on duplicate paths", func() {
+				ctx := context.Background()
+
+				cluster := &v1alpha1.IdentityServerCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "dup-cfg-cluster", Namespace: ns},
+					Spec: v1alpha1.IdentityServerClusterSpec{
+						Version: "11.0",
+						Configuration: &v1alpha1.ConfigurationSource{
+							ValueFrom: v1alpha1.ConfigurationValueFrom{
+								ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+									{Name: "cfg-a", Items: []v1alpha1.KeyToPath{{Key: "a", Path: "base.xml"}}},
+									{Name: "cfg-b", Items: []v1alpha1.KeyToPath{{Key: "b", Path: "base.xml"}}},
+								},
+							},
+						},
+					},
+				}
+				Expect(k().Create(ctx, cluster)).To(Succeed())
+
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "dup-cfg-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "dup-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "dup-cfg-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				utils.WaitForConditions(node, e2eTimeout, e2eInterval)
+
+				Expect(k().Get(ctx, client.ObjectKey{Name: "dup-cfg-node", Namespace: ns}, node)).To(Succeed())
+				degraded := false
+				for _, c := range node.Status.Conditions {
+					if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
+						degraded = true
+						Expect(c.Reason).To(Equal("InvalidConfiguration"))
+					}
+				}
+				Expect(degraded).To(BeTrue(), "expected Degraded condition")
+
+				// Verify no Deployment was created
+				deploy := &appsv1.Deployment{}
+				err := k().Get(ctx, client.ObjectKey{Name: "dup-cfg-node", Namespace: ns}, deploy)
+				Expect(err).To(HaveOccurred(), "expected no Deployment for invalid config")
+
+				utils.MatchCRDResource(cluster, "dup-cfg-cluster")
+				utils.MatchCRDResource(node, "dup-cfg-node degraded")
+			})
+
+			It("should set Degraded when path is cluster.xml", func() {
+				ctx := context.Background()
+
+				cluster := &v1alpha1.IdentityServerCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "reserved-cluster", Namespace: ns},
+					Spec: v1alpha1.IdentityServerClusterSpec{
+						Version: "11.0",
+						Configuration: &v1alpha1.ConfigurationSource{
+							ValueFrom: v1alpha1.ConfigurationValueFrom{
+								ConfigMapRefs: []v1alpha1.ConfigMapRefSource{
+									{Name: "user-cfg", Items: []v1alpha1.KeyToPath{{Key: "data", Path: "cluster.xml"}}},
+								},
+							},
+						},
+					},
+				}
+				Expect(k().Create(ctx, cluster)).To(Succeed())
+
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "reserved-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "reserved-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "reserved-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				utils.WaitForConditions(node, e2eTimeout, e2eInterval)
+
+				Expect(k().Get(ctx, client.ObjectKey{Name: "reserved-node", Namespace: ns}, node)).To(Succeed())
+				degraded := false
+				for _, c := range node.Status.Conditions {
+					if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
+						degraded = true
+						Expect(c.Reason).To(Equal("InvalidConfiguration"))
+						Expect(c.Message).To(ContainSubstring("reserved"))
+					}
+				}
+				Expect(degraded).To(BeTrue(), "expected Degraded condition for cluster.xml")
+
+				// Verify no Deployment was created
+				deploy := &appsv1.Deployment{}
+				err := k().Get(ctx, client.ObjectKey{Name: "reserved-node", Namespace: ns}, deploy)
+				Expect(err).To(HaveOccurred(), "expected no Deployment for reserved path")
+
+				utils.MatchCRDResource(cluster, "reserved-cluster")
+				utils.MatchCRDResource(node, "reserved-node degraded")
 			})
 		})
 

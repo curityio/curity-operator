@@ -1,0 +1,35 @@
+
+[IdentityServerNode configuration Configuration path validation should set Degraded on duplicate paths - 1]
+metadata:
+  name: dup-cfg-node
+  namespace: e2e-config-validation
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: dup-cfg-cluster
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: dup-role
+  identityServerClusterRef:
+    name: dup-cfg-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+
+---

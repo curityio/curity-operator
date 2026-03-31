@@ -1,8 +1,8 @@
 
-[IdentityServerNode configuration Secret configuration volumes should mount secret as volume - 1]
+[IdentityServerNode configuration Multiple configuration sources should mount multiple configmaps - 1]
 metadata:
-  name: scfg-cluster
-  namespace: e2e-secret-config
+  name: mcfg-cluster
+  namespace: e2e-multi-config
   uid: <Any value>
   resourceVersion: <Any value>
   generation: <Any value>
@@ -14,11 +14,15 @@ spec:
   version: "11.0"
   configuration:
     valueFrom:
-      secretRefs:
-        - name: test-secret-config
+      configMapRefs:
+        - name: base-cfg
           items:
-            - key: datasource-config.xml
-              path: datasource-config.xml
+            - key: base.xml
+              path: base.xml
+        - name: plugin-cfg
+          items:
+            - key: plugin.xml
+              path: plugin.xml
 status:
   conditions:
     - type: Ready

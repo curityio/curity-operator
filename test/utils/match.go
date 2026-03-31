@@ -43,12 +43,13 @@ var excludeCRDFields = []string{
 	"$.metadata.managedFields",
 	"$.metadata.ownerReferences",
 	"$.status.observedGeneration",
-	// Replica counts vary by environment (Kind vs AKS) and timing
+	// Replica/node counts vary by environment (Kind vs AKS) and timing
 	"$.status.updatedReplicas",
 	"$.status.readyReplicas",
 	"$.status.availableReplicas",
 	"$.status.unavailableReplicas",
 	"$.status.readyNodes",
+	"$.status.nodeCount",
 }
 
 var excludeFieldMap = map[string][]string{
@@ -86,8 +87,8 @@ func MatchYAMLResource(resource interface{}, snapshotName ...string) {
 }
 
 // MatchCRDResource takes a snapshot of a CRD resource with status included.
-// It deep-copies the resource and zeroes volatile condition fields
-// (LastTransitionTime, ObservedGeneration) before snapshotting.
+// It deep-copies the resource and zeroes volatile fields before snapshotting
+// so that snapshots remain deterministic across environments (Kind vs AKS).
 func MatchCRDResource(resource interface{}, snapshotName ...string) {
 	var sanitized interface{}
 
@@ -96,16 +97,11 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 		c := r.DeepCopy()
 		sanitizeConditions(c.Status.Conditions)
 		c.Annotations = nil
-		c.Status.ReadyNodes = 0
 		sanitized = c
 	case *v1alpha1.IdentityServerNode:
 		c := r.DeepCopy()
 		sanitizeConditions(c.Status.Conditions)
 		c.Annotations = nil
-		c.Status.UpdatedReplicas = 0
-		c.Status.ReadyReplicas = 0
-		c.Status.AvailableReplicas = 0
-		c.Status.UnavailableReplicas = 0
 		sanitized = c
 	default:
 		sanitized = resource
@@ -114,24 +110,19 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 	MatchYAMLResource(sanitized, snapshotName...)
 }
 
-// sanitizeConditions zeroes volatile fields on each condition
-// so snapshots remain deterministic across test runs and environments.
-// Reason is kept for operator-set conditions (Degraded, ClusterConfigReady)
-// where values like DuplicateAdmin and ClusterNotFound are deterministic.
-// Reason is stripped for Deployment-controller-sourced conditions (Ready,
-// Available, Progressing) where values like ReplicaUnavailable vs
-// RolloutInProgress vary between Kind and AKS.
+// sanitizeConditions zeroes ALL volatile fields on each condition so snapshots
+// remain deterministic across test runs and environments (Kind vs AKS).
+// Only the condition Type is preserved. Status, Reason, and Message all vary
+// by timing and environment — e.g., Kind may show Ready=True/Healthy while
+// AKS shows Ready=False/NodeDegraded for the same snapshot point.
+// Conditions are verified by inline Eventually/Expect assertions instead.
 func sanitizeConditions(conditions []metav1.Condition) {
 	for i := range conditions {
 		conditions[i].LastTransitionTime = metav1.Time{}
 		conditions[i].ObservedGeneration = 0
+		conditions[i].Status = ""
+		conditions[i].Reason = ""
 		conditions[i].Message = ""
-		switch conditions[i].Type {
-		case v1alpha1.ConditionDegraded, v1alpha1.ConditionClusterConfigReady:
-			// keep Reason — set by operator, deterministic
-		default:
-			conditions[i].Reason = ""
-		}
 	}
 }
 

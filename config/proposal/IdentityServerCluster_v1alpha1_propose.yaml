@@ -47,45 +47,47 @@ spec:
           - key: KEYSTORE_PASSWORD
             path: KEYSTORE_PASSWORD
 
-  # XML configuration fragments mounted at startup; can combine ConfigMap and Secret refs (items define key→path mapping).
-  # +kubebuilder:validation:Required
-  configuration:
-    # +kubebuilder:validation:Required
-    valueFrom:
-      configMapRef:
-        name: curity-base-config
-        items:
-          - key: base-config.xml
-            path: base-config.xml
-      secretRef:
-        name: curity-datasource-config
-        items:
-          - key: base-config.xml
-            path: base-config.xml
+  # REMOVED: We use configmap/secret labels instead
+  # # XML configuration fragments mounted at startup; can combine ConfigMap and Secret refs (items define key→path mapping).
+  # # +kubebuilder:validation:Required
+  # configuration:
+  #   # +kubebuilder:validation:Required
+  #   valueFrom:
+  #     configMapRef:
+  #       name: curity-base-config
+  #       items:
+  #         - key: base-config.xml
+  #           path: base-config.xml
+  #     secretRef:
+  #       name: curity-datasource-config
+  #       items:
+  #         - key: base-config.xml
+  #           path: base-config.xml
 
-  # External database connection: driver/type and credentials supplied via Secret projection.
-  # +kubebuilder:validation:Required
-  dataSource:
-    # JDBC or datasource type (for example `postgres`) used when wiring the external database.
-    # +kubebuilder:validation:Required
-    # +kubebuilder:validation:MinLength=1
-    type: postgres
-    # +kubebuilder:validation:Required
-    valueFrom:
-      secretKeyRef:
-        # +kubebuilder:validation:Required
-        name: curity-datasource-secret
-        items:
-          - key: host
-            path: host
-          - key: port
-            path: port
-          - key: database
-            path: database
-          - key: username
-            path: username
-          - key: password
-            path: password
+  # REMOVED: We use configmap/secret labels instead
+  # # External database connection: driver/type and credentials supplied via Secret projection.
+  # # +kubebuilder:validation:Required
+  # dataSource:
+  #   # JDBC or datasource type (for example `postgres`) used when wiring the external database.
+  #   # +kubebuilder:validation:Required
+  #   # +kubebuilder:validation:MinLength=1
+  #   type: postgres
+  #   # +kubebuilder:validation:Required
+  #   valueFrom:
+  #     secretKeyRef:
+  #       # +kubebuilder:validation:Required
+  #       name: curity-datasource-secret
+  #       items:
+  #         - key: host
+  #           path: host
+  #         - key: port
+  #           path: port
+  #         - key: database
+  #           path: database
+  #         - key: username
+  #           path: username
+  #         - key: password
+  #           path: password
 
 # ------------------------------------------------------------
 # COMMON WORKLOAD CONFIGURATION FOR ALL NODES

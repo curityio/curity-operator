@@ -1,18 +1,44 @@
 apiVersion: curity.io/v1alpha1
 kind: IdentityServerCluster
 metadata:
+  # Kubernetes resource name for this cluster; must be unique within the namespace.
+  # +kubebuilder:validation:Required
   name: cluster-1
+  # Namespace where cluster-scoped secrets/config and node references are resolved.
+  # +kubebuilder:validation:Required
   namespace: curity
 spec:
+  # Tag of the Curity Identity Server container image (for example `11.0`).
+  # +kubebuilder:validation:MinLength=1
+  # +kubebuilder:validation:MaxLength=128
   version: "11.0"
-  # image: ""                        # override when using a private mirror
-  # imagePullSecret: curity-registry-secret
 
-  # Operator create if not exists and dont delete this secret
+  # Full container image reference (repository and tag), for example when using a private registry or mirror. Leave empty to use the default repository and `version` as the tag.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxLength=512
+  image: ""
+
+  # Name of a Secret in this namespace with credentials for pulling the image (for example a docker config). Leave empty when the image does not require pull secrets.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxLength=253
+  imagePullSecret: ""
+
+  # Credentials and key material for admin access, encryption, and keystores; mounted or projected from a Secret.
+  # The operator may create the Secret if missing and will not delete it automatically when the cluster is removed.
+  # +kubebuilder:validation:Required
   adminCredentials:
+    # +kubebuilder:validation:Required
     valueFrom:
       secretKeyRef:
+        # Secret containing ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY, KEYSTORE_PASSWORD (or equivalent keys).
+        # +kubebuilder:validation:Required
         name: curity-admin-secret
+        # Keys listed here are what the workload requests; OpenAPI/kubebuilder cannot verify the Secret object
+        # in the cluster actually contains those keys (no cross-object lookup at CRD validation time).
+        # +kubebuilder:validation:Enum=ADMIN_PASSWORD;CONFIG_ENCRYPTION_KEY;KEYSTORE_PASSWORD
+        # On the items slice:
+        # +kubebuilder:validation:MinItems=3
+        # +kubebuilder:validation:MaxItems=3
         items:
           - key: ADMIN_PASSWORD
             path: ADMIN_PASSWORD
@@ -21,8 +47,10 @@ spec:
           - key: KEYSTORE_PASSWORD
             path: KEYSTORE_PASSWORD
 
-  # XML config files mounted at startup. Accepts ConfigMap and Secret refs.
+  # XML configuration fragments mounted at startup; can combine ConfigMap and Secret refs (items define key→path mapping).
+  # +kubebuilder:validation:Required
   configuration:
+    # +kubebuilder:validation:Required
     valueFrom:
       configMapRef:
         name: curity-base-config
@@ -35,11 +63,17 @@ spec:
           - key: base-config.xml
             path: base-config.xml
 
-  # Database configuration
+  # External database connection: driver/type and credentials supplied via Secret projection.
+  # +kubebuilder:validation:Required
   dataSource:
+    # JDBC or datasource type (for example `postgres`) used when wiring the external database.
+    # +kubebuilder:validation:Required
+    # +kubebuilder:validation:MinLength=1
     type: postgres
+    # +kubebuilder:validation:Required
     valueFrom:
       secretKeyRef:
+        # +kubebuilder:validation:Required
         name: curity-datasource-secret
         items:
           - key: host
@@ -58,39 +92,112 @@ spec:
 # Node can override these configurations.
 # ------------------------------------------------------------
 
-  logging: {}
+  # Default logging options for nodes unless overridden per IdentityServerNode.
+  # When `stdout` is true, the operator adds sidecar containers that tail files under `var/log` for each name in `logs` and stream them to the pod’s stdout.
+  # The `resources` field under `logging` applies only to those sidecars, not the main Identity Server container.
+  # +kubebuilder:validation:Optional
+  logging:
+    # Log level for the main Identity Server container in the pod (default `INFO`).
+    # +kubebuilder:validation:Enum=TRACE;DEBUG;INFO;WARN;ERROR;OFF
+    # +kubebuilder:validation:Optional
+    level: INFO
+    # Container image used for log-tailing sidecars (default `busybox:latest`).
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:MaxLength=512
+    image: busybox:latest
+    # When true, deploy sidecars that tail additional log files listed in `logs` from `var/log` to stdout.
+    # +kubebuilder:validation:Optional
+    stdout: false
+    # Names of extra log streams to tail when `stdout` is true (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts).
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:MaxItems=32
+    # +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts
+    logs: []
+    # CPU and memory limits for logging sidecars. When set, overrides the default logging sidecar resources for this node only.
+    # +kubebuilder:validation:Optional
+    resources: {}
   
+  # Default annotations merged into each node’s Pod template; override per node on IdentityServerNode.
+  # +kubebuilder:validation:Optional
   podAnnotations: {}
+  # Default labels merged into each node’s Pod template.
+  # +kubebuilder:validation:Optional
   podLabels: {}
 
+  # Default CPU and memory requests and limits for the main Identity Server container (not the logging sidecars; use `logging.resources` above for those).
+  # +kubebuilder:validation:Optional
   resources:
+    # +kubebuilder:validation:Optional
     requests:
       cpu: "1"
       memory: 1Gi
+    # +kubebuilder:validation:Optional
     limits:
       cpu: "2"
       memory: 2Gi
 
+  # Default liveness and readiness probes for the main Identity Server container (not sidecars).
+  # Leave `liveness` or `readiness` empty to use built-in defaults (HTTP path, timeouts, thresholds, and intervals).
+  # +kubebuilder:validation:Optional
   probes:
+    # +kubebuilder:validation:Optional
     liveness: {}
+    # +kubebuilder:validation:Optional
     readiness: {}
 
   # ------------------------------------------------------------
   # Advanced Configurations
   # ------------------------------------------------------------
 
+  # Cluster-wide defaults for horizontal pod autoscaling. Nodes inherit these unless overridden on IdentityServerNode.
+  # Typically used for runtime nodes that handle traffic; admin nodes usually keep a fixed replica count. You can also set a memory utilization target in the API when the operator supports it.
+  # Install the Kubernetes metrics server (or a compatible metrics provider) before relying on CPU- or memory-based autoscaling.
+  # +kubebuilder:validation:Optional
   autoscaling:
+    # When true, the operator manages a HorizontalPodAutoscaler for eligible workloads.
+    # +kubebuilder:validation:Required
     enabled: true
+    # Lower bound on replica count while autoscaling is active (commonly `1`; use at least `2` for high availability on runtime nodes).
+    # +kubebuilder:validation:Required
+    # +kubebuilder:validation:Minimum=1
     minReplicas: 2                   # keep ≥ 2 for high availability
+    # Upper bound on replica count while autoscaling is active.
+    # +kubebuilder:validation:Required
+    # +kubebuilder:validation:Minimum=1
+    # +kubebuilder:validation:Maximum=10000
     maxReplicas: 10
+    # Average CPU utilization across pods (1–100) at which the workload scales (typical default `80`).
+    # +kubebuilder:validation:Required
+    # +kubebuilder:validation:Minimum=1
+    # +kubebuilder:validation:Maximum=100
     targetCPUUtilizationPercentage: 80
+    # Additional HorizontalPodAutoscaler metrics beyond CPU (for example external metrics).
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:MaxItems=100
     customMetrics: []
 
-  # Minimum pods available during node drains and rolling upgrades.
+  # Cluster-wide PodDisruptionBudget defaults. Nodes inherit these unless overridden on IdentityServerNode.
+  # During voluntary disruptions (drains, rolling updates), Kubernetes uses this to cap how many pods may be unavailable at once. Set either `minAvailable` or `maxUnavailable`, not both.
+  # +kubebuilder:validation:Optional
   podDisruptionBudget:
+    # Minimum number of pods that must remain available after eviction (integer or percentage string). Use this or `maxUnavailable`, not both.
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:Minimum=0
     minAvailable: 1
   
+  # Cluster-wide node selector: pods run only on nodes whose labels match these key/value pairs.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MinProperties=0
+  # +kubebuilder:validation:MaxProperties=100
   nodeSelector: {}
+  # Cluster-wide tolerations so pods can schedule onto nodes with matching taints.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=100
   tolerations: []
+  # Cluster-wide topology spread constraints to spread pods across failure domains (for example zones or hosts). Requires Kubernetes 1.19 or newer.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=32
   topologySpreadConstraints: []
+  # Cluster-wide affinity: control which nodes pods may use and how pods relate to other pods.
+  # +kubebuilder:validation:Optional
   affinity: {}

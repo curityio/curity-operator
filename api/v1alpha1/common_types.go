@@ -58,16 +58,6 @@ type SecretKeyRefSource struct {
 	Items []KeyToPath `json:"items"`
 }
 
-// ConfigMapRefSource references a ConfigMap with selectable items.
-type ConfigMapRefSource struct {
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-
-	// +kubebuilder:validation:MinItems=1
-	Items []KeyToPath `json:"items"`
-}
-
 // CredentialsSource specifies how to load admin credentials.
 type CredentialsSource struct {
 	ValueFrom CredentialsValueFrom `json:"valueFrom"`
@@ -75,35 +65,6 @@ type CredentialsSource struct {
 
 // CredentialsValueFrom specifies the secret containing admin credentials.
 type CredentialsValueFrom struct {
-	SecretKeyRef SecretKeyRefSource `json:"secretKeyRef"`
-}
-
-// ConfigurationSource specifies how to load XML configuration files.
-type ConfigurationSource struct {
-	ValueFrom ConfigurationValueFrom `json:"valueFrom"`
-}
-
-// ConfigurationValueFrom specifies ConfigMap and Secret sources for configuration.
-type ConfigurationValueFrom struct {
-	// ConfigMapRefs references multiple ConfigMaps with selectable items.
-	// Each ConfigMap gets its own volume; all items mount at /opt/idsvr/etc/init/{path}.
-	ConfigMapRefs []ConfigMapRefSource `json:"configMapRefs,omitempty"`
-
-	// SecretRefs references multiple Secrets with selectable items.
-	// Each Secret gets its own volume; all items mount at /opt/idsvr/etc/init/{path}.
-	SecretRefs []SecretKeyRefSource `json:"secretRefs,omitempty"`
-}
-
-// DataSourceSpec specifies database connection configuration.
-type DataSourceSpec struct {
-	// +kubebuilder:validation:Enum=postgres
-	Type string `json:"type"`
-
-	ValueFrom DataSourceValueFrom `json:"valueFrom"`
-}
-
-// DataSourceValueFrom specifies the secret containing database credentials.
-type DataSourceValueFrom struct {
 	SecretKeyRef SecretKeyRefSource `json:"secretKeyRef"`
 }
 

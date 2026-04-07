@@ -1,0 +1,48 @@
+
+[IdentityServerNode configuration Logging level OFF should suppress sidecars when level is OFF - 1]
+metadata:
+  name: off-sidecar-node
+  namespace: e2e-logging-off
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: off-sidecar-cluster
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: off-sidecar-role
+  identityServerClusterRef:
+    name: off-sidecar-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  deploymentName: off-sidecar-node
+  serviceName: off-sidecar-node
+
+---

@@ -377,6 +377,54 @@ func TestBuildDeployment_LoggingLevelNodeOverridesCluster(t *testing.T) {
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "TRACE")
 }
 
+func TestBuildDeployment_LoggingLevelOff(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF"}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node)
+	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "OFF")
+}
+
+func TestBuildDeployment_LoggingOffSuppressesSidecars(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF", Stdout: true, Logs: []string{"audit"}}
+
+	deploy := buildDeployment(cluster, node)
+
+	if len(deploy.Spec.Template.Spec.Containers) != 1 {
+		t.Errorf("expected 1 container (no sidecars when OFF), got %d", len(deploy.Spec.Template.Spec.Containers))
+	}
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if v.Name == "log-volume" {
+			t.Errorf("log-volume should not exist when level is OFF")
+		}
+	}
+}
+
+func TestBuildDeployment_LoggingOffClusterNodeStdoutOverride(t *testing.T) {
+	// Regression: cluster sets OFF, node overrides only Stdout/Logs (not Level).
+	// resolveLogging returns node spec (Level:""), resolveLoggingLevel returns "OFF".
+	// Sidecars and log-volume must still be suppressed.
+	cluster := newTestCluster()
+	cluster.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF"}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{"audit"}}
+
+	deploy := buildDeployment(cluster, node)
+
+	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "OFF")
+	if len(deploy.Spec.Template.Spec.Containers) != 1 {
+		t.Errorf("expected 1 container (no sidecars when cluster level is OFF), got %d", len(deploy.Spec.Template.Spec.Containers))
+	}
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if v.Name == "log-volume" {
+			t.Errorf("log-volume should not exist when cluster level is OFF")
+		}
+	}
+}
+
 func TestBuildDeployment_LoggingStdoutDisabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)

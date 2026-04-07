@@ -73,9 +73,10 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 
 	// Resolve logging config (node overrides cluster entirely)
 	logging := resolveLogging(cluster, node)
+	effectiveLevel := resolveLoggingLevel(cluster, node)
 
-	// Add log volume mount to main container if stdout logging enabled
-	if logging != nil && logging.Stdout {
+	// Add log volume mount to main container if stdout logging enabled and level is not OFF
+	if logging != nil && logging.Stdout && effectiveLevel != "OFF" {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 			Name:      "log-volume",
 			MountPath: "/opt/idsvr/var/log/",
@@ -88,8 +89,11 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 		})
 	}
 
-	// Build sidecar log tailing containers
-	sidecars := buildLogSidecars(logging)
+	// Build sidecar log tailing containers (skip when effective level is OFF)
+	var sidecars []corev1.Container
+	if effectiveLevel != "OFF" {
+		sidecars = buildLogSidecars(logging)
+	}
 
 	containers := []corev1.Container{container}
 	containers = append(containers, sidecars...)

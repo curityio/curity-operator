@@ -179,13 +179,15 @@ type PDBSpec struct {
 // Matches the Helm chart's per-role logging configuration.
 type LoggingSpec struct {
 	// Level sets the Curity server log level.
-	// Valid values: ERROR, WARN, INFO, DEBUG, TRACE.
+	// Valid values: ERROR, WARN, INFO, DEBUG, TRACE, OFF.
+	// When set to OFF, log sidecar containers and the shared log volume are suppressed.
 	// Defaults to INFO if not set.
-	// +kubebuilder:validation:Enum=ERROR;WARN;INFO;DEBUG;TRACE
+	// +kubebuilder:validation:Enum=ERROR;WARN;INFO;DEBUG;TRACE;OFF
 	Level string `json:"level,omitempty"`
 
 	// Stdout enables sidecar containers that tail Curity log files
 	// to stdout, making them accessible via kubectl logs.
+	// Sidecars are suppressed when Level is OFF, even if Stdout is true.
 	// +kubebuilder:default=false
 	Stdout bool `json:"stdout,omitempty"`
 

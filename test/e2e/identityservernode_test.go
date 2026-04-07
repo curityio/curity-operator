@@ -1347,6 +1347,131 @@ var _ = Describe("IdentityServerNode", func() {
 			})
 		})
 
+		Describe("Logging level OFF", Ordered, func() {
+			const ns = "e2e-logging-off"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should set LOGGING_LEVEL to OFF", func() {
+				ctx := context.Background()
+
+				cluster := &v1alpha1.IdentityServerCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "off-cluster", Namespace: ns},
+					Spec: v1alpha1.IdentityServerClusterSpec{
+						Version: "11.0",
+						Logging: &v1alpha1.LoggingSpec{Level: "OFF"},
+					},
+				}
+				Expect(k().Create(ctx, cluster)).To(Succeed())
+
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "off-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "off-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "off-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "off-node", Namespace: ns}}
+				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+				Expect(deploy.Spec.Template.Spec.Containers[0].Env).To(ContainElement(
+					Satisfy(func(e corev1.EnvVar) bool {
+						return e.Name == "LOGGING_LEVEL" && e.Value == "OFF"
+					}),
+				), "LOGGING_LEVEL should be OFF")
+
+				Expect(k().Get(ctx, client.ObjectKey{Name: "off-cluster", Namespace: ns}, cluster)).To(Succeed())
+				Expect(k().Get(ctx, client.ObjectKey{Name: "off-node", Namespace: ns}, node)).To(Succeed())
+				utils.MatchCRDResource(cluster, "off-cluster")
+				utils.MatchCRDResource(node, "off-node")
+			})
+
+			It("should suppress sidecars when level is OFF", func() {
+				ctx := context.Background()
+
+				cluster := &v1alpha1.IdentityServerCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "off-sidecar-cluster", Namespace: ns},
+					Spec: v1alpha1.IdentityServerClusterSpec{
+						Version: "11.0",
+						Logging: &v1alpha1.LoggingSpec{
+							Level:  "OFF",
+							Stdout: true,
+							Logs:   []string{"audit"},
+						},
+					},
+				}
+				Expect(k().Create(ctx, cluster)).To(Succeed())
+
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "off-sidecar-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "off-sidecar-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "off-sidecar-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "off-sidecar-node", Namespace: ns}}
+				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+				Expect(deploy.Spec.Template.Spec.Containers).To(HaveLen(1),
+					"expected 1 container (no sidecars when level is OFF)")
+
+				for _, v := range deploy.Spec.Template.Spec.Volumes {
+					Expect(v.Name).NotTo(Equal("log-volume"),
+						"log-volume should not exist when level is OFF")
+				}
+
+				Expect(k().Get(ctx, client.ObjectKey{Name: "off-sidecar-cluster", Namespace: ns}, cluster)).To(Succeed())
+				Expect(k().Get(ctx, client.ObjectKey{Name: "off-sidecar-node", Namespace: ns}, node)).To(Succeed())
+				utils.MatchCRDResource(cluster, "off-sidecar-cluster")
+				utils.MatchCRDResource(node, "off-sidecar-node")
+			})
+
+			It("should restore sidecars when level changes from OFF to DEBUG", func() {
+				ctx := context.Background()
+
+				By("updating cluster logging level from OFF to DEBUG")
+				cluster := &v1alpha1.IdentityServerCluster{}
+				Eventually(func() error {
+					if err := k().Get(ctx, client.ObjectKey{Name: "off-sidecar-cluster", Namespace: ns}, cluster); err != nil {
+						return err
+					}
+					cluster.Spec.Logging.Level = "DEBUG"
+					return k().Update(ctx, cluster)
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+
+				By("waiting for sidecars to appear on Deployment")
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "off-sidecar-node", Namespace: ns}}
+				Eventually(func(g Gomega) int {
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: "off-sidecar-node", Namespace: ns}, deploy)).To(Succeed())
+					return len(deploy.Spec.Template.Spec.Containers)
+				}, e2eTimeout, e2eInterval).Should(Equal(2), "expected 1 main + 1 sidecar after level change to DEBUG")
+
+				Expect(deploy.Spec.Template.Spec.Containers).To(ContainElement(
+					Satisfy(func(c corev1.Container) bool {
+						return c.Name == "audit"
+					}),
+				), "expected audit sidecar container")
+
+				Expect(deploy.Spec.Template.Spec.Volumes).To(ContainElement(
+					Satisfy(func(v corev1.Volume) bool {
+						return v.Name == "log-volume" && v.EmptyDir != nil
+					}),
+				), "log-volume should exist after level change to DEBUG")
+
+				Expect(deploy.Spec.Template.Spec.Containers[0].Env).To(ContainElement(
+					Satisfy(func(e corev1.EnvVar) bool {
+						return e.Name == "LOGGING_LEVEL" && e.Value == "DEBUG"
+					}),
+				), "LOGGING_LEVEL should be DEBUG after update")
+			})
+		})
+
 		Describe("Cluster config generation", Label("slow"), Ordered, func() {
 			const ns = "e2e-clusterconfig"
 			BeforeAll(func() { createNS(ns) })

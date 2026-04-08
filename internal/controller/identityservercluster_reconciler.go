@@ -47,7 +47,7 @@ type IdentityServerClusterReconciler struct {
 // +kubebuilder:rbac:groups=curity.io,resources=identityserverclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=curity.io,resources=identityservernodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list
@@ -722,6 +722,11 @@ func (r *IdentityServerClusterReconciler) readJobPodLogs(ctx context.Context, jo
 // if the reconciler should requeue (validation Job is still running).
 func (r *IdentityServerClusterReconciler) ensureConfigValidation(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) (bool, error) {
 	log := ctrl.LoggerFrom(ctx)
+
+	// Default the config-type annotation on managed resources that lack it.
+	if err := defaultConfigTypeAnnotations(ctx, r.Client, cluster.Namespace); err != nil {
+		log.Info("failed to default config-type annotations", "error", err.Error())
+	}
 
 	// Discover managed configs.
 	configs, err := discoverConfigResources(ctx, r.Client, cluster.Namespace)

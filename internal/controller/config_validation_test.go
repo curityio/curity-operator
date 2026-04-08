@@ -131,18 +131,13 @@ func TestBuildConfigValidationJob_MountsDiscoveredConfigs(t *testing.T) {
 	job, _ := buildConfigValidationJob(cluster, configs, "abc", nil)
 	podSpec := job.Spec.Template.Spec
 
-	// Should have cluster-config + 2 discovered config volumes.
-	if len(podSpec.Volumes) != 3 {
-		t.Fatalf("expected 3 volumes, got %d", len(podSpec.Volumes))
-	}
-
-	// First volume is cluster-config.
-	if podSpec.Volumes[0].Name != "cluster-config" {
-		t.Errorf("expected first volume to be cluster-config, got %q", podSpec.Volumes[0].Name)
+	// Should have only discovered config volumes (no cluster-config).
+	if len(podSpec.Volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(podSpec.Volumes))
 	}
 
 	// Check ConfigMap volume.
-	cmVol := podSpec.Volumes[1]
+	cmVol := podSpec.Volumes[0]
 	if cmVol.ConfigMap == nil {
 		t.Fatal("expected ConfigMap volume source for base-config")
 	}
@@ -151,7 +146,7 @@ func TestBuildConfigValidationJob_MountsDiscoveredConfigs(t *testing.T) {
 	}
 
 	// Check Secret volume.
-	secVol := podSpec.Volumes[2]
+	secVol := podSpec.Volumes[1]
 	if secVol.Secret == nil {
 		t.Fatal("expected Secret volume source for license")
 	}
@@ -160,18 +155,13 @@ func TestBuildConfigValidationJob_MountsDiscoveredConfigs(t *testing.T) {
 	}
 }
 
-func TestBuildConfigValidationJob_MountsClusterConfig(t *testing.T) {
+func TestBuildConfigValidationJob_NoClusterConfigVolume(t *testing.T) {
 	cluster := newValidationTestCluster()
 	job, _ := buildConfigValidationJob(cluster, nil, "abc", nil)
-	mounts := job.Spec.Template.Spec.Containers[0].VolumeMounts
-	if len(mounts) < 1 {
-		t.Fatal("expected at least 1 volume mount for cluster-config")
-	}
-	if mounts[0].Name != "cluster-config" {
-		t.Errorf("expected cluster-config mount, got %q", mounts[0].Name)
-	}
-	if mounts[0].MountPath != "/opt/idsvr/etc/init/cluster.xml" {
-		t.Errorf("expected mount path /opt/idsvr/etc/init/cluster.xml, got %q", mounts[0].MountPath)
+	for _, vol := range job.Spec.Template.Spec.Volumes {
+		if vol.Name == "cluster-config" {
+			t.Error("validation Job should not mount cluster-config volume")
+		}
 	}
 }
 
@@ -240,16 +230,13 @@ func TestBuildConfigValidationJob_OwnerReference(t *testing.T) {
 
 // --- buildValidationVolumes ---
 
-func TestBuildValidationVolumes_ClusterConfigAlwaysFirst(t *testing.T) {
-	volumes, mounts := buildValidationVolumes("cluster-1", nil)
-	if len(volumes) != 1 {
-		t.Fatalf("expected 1 volume, got %d", len(volumes))
+func TestBuildValidationVolumes_EmptyConfigs(t *testing.T) {
+	volumes, mounts := buildValidationVolumes(nil)
+	if len(volumes) != 0 {
+		t.Fatalf("expected 0 volumes for nil configs, got %d", len(volumes))
 	}
-	if volumes[0].Name != "cluster-config" {
-		t.Errorf("expected cluster-config volume, got %q", volumes[0].Name)
-	}
-	if len(mounts) != 1 {
-		t.Fatalf("expected 1 mount, got %d", len(mounts))
+	if len(mounts) != 0 {
+		t.Fatalf("expected 0 mounts for nil configs, got %d", len(mounts))
 	}
 }
 
@@ -257,11 +244,11 @@ func TestBuildValidationVolumes_ConfigMapVolume(t *testing.T) {
 	configs := []DiscoveredConfigResource{
 		{Name: "base-cm", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"config.xml": []byte("<c/>")}},
 	}
-	volumes, mounts := buildValidationVolumes("cluster-1", configs)
-	if len(volumes) != 2 {
-		t.Fatalf("expected 2 volumes, got %d", len(volumes))
+	volumes, mounts := buildValidationVolumes(configs)
+	if len(volumes) != 1 {
+		t.Fatalf("expected 1 volume, got %d", len(volumes))
 	}
-	vol := volumes[1]
+	vol := volumes[0]
 	if vol.ConfigMap == nil {
 		t.Fatal("expected ConfigMap volume source")
 	}
@@ -288,11 +275,11 @@ func TestBuildValidationVolumes_SecretVolume(t *testing.T) {
 	configs := []DiscoveredConfigResource{
 		{Name: "lic", IsSecret: true, ConfigType: ConfigTypeLicense, Data: map[string][]byte{"license.json": []byte("{}")}},
 	}
-	volumes, mounts := buildValidationVolumes("cluster-1", configs)
-	if len(volumes) != 2 {
-		t.Fatalf("expected 2 volumes, got %d", len(volumes))
+	volumes, mounts := buildValidationVolumes(configs)
+	if len(volumes) != 1 {
+		t.Fatalf("expected 1 volume, got %d", len(volumes))
 	}
-	vol := volumes[1]
+	vol := volumes[0]
 	if vol.Secret == nil {
 		t.Fatal("expected Secret volume source")
 	}
@@ -319,9 +306,8 @@ func TestBuildValidationVolumes_MixedConfigs(t *testing.T) {
 		{Name: "cm-1", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
 		{Name: "sec-1", IsSecret: true, ConfigType: ConfigTypeLicense, Data: map[string][]byte{"b.json": []byte("{}")}},
 	}
-	volumes, _ := buildValidationVolumes("cluster-1", configs)
-	// 1 cluster-config + 2 discovered = 3
-	if len(volumes) != 3 {
-		t.Fatalf("expected 3 volumes, got %d", len(volumes))
+	volumes, _ := buildValidationVolumes(configs)
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(volumes))
 	}
 }

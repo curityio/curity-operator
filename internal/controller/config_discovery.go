@@ -113,6 +113,54 @@ func discoverConfigResources(ctx context.Context, c client.Client, namespace str
 	return result, nil
 }
 
+// defaultConfigTypeAnnotations writes the curity.io/config-type annotation
+// on managed ConfigMaps/Secrets when absent, so users can see the effective type.
+// Only called from the cluster reconciler (which has update RBAC on configmaps/secrets).
+func defaultConfigTypeAnnotations(ctx context.Context, c client.Client, namespace string) error {
+	managedLabel := client.MatchingLabels{LabelManagedConfig: "true"}
+
+	var configMaps corev1.ConfigMapList
+	if err := c.List(ctx, &configMaps, client.InNamespace(namespace), managedLabel); err != nil {
+		return fmt.Errorf("listing managed ConfigMaps: %w", err)
+	}
+	for i := range configMaps.Items {
+		cm := &configMaps.Items[i]
+		if cm.Annotations[AnnotationConfigType] != "" {
+			continue
+		}
+		if cm.Annotations == nil {
+			cm.Annotations = make(map[string]string)
+		}
+		cm.Annotations[AnnotationConfigType] = ConfigTypeBase
+		if err := c.Update(ctx, cm); err != nil {
+			return fmt.Errorf("setting default config-type on configmap %q: %w", cm.Name, err)
+		}
+	}
+
+	var secrets corev1.SecretList
+	if err := c.List(ctx, &secrets, client.InNamespace(namespace), managedLabel); err != nil {
+		return fmt.Errorf("listing managed Secrets: %w", err)
+	}
+	for i := range secrets.Items {
+		s := &secrets.Items[i]
+		if s.Labels["curity.io/component"] == "cluster-config" {
+			continue
+		}
+		if s.Annotations[AnnotationConfigType] != "" {
+			continue
+		}
+		if s.Annotations == nil {
+			s.Annotations = make(map[string]string)
+		}
+		s.Annotations[AnnotationConfigType] = ConfigTypeBase
+		if err := c.Update(ctx, s); err != nil {
+			return fmt.Errorf("setting default config-type on secret %q: %w", s.Name, err)
+		}
+	}
+
+	return nil
+}
+
 // resolveConfigType reads the curity.io/config-type annotation and validates it.
 // Empty or absent annotation defaults to "base". Unknown values return an error.
 func resolveConfigType(annotations map[string]string) (string, error) {

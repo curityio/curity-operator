@@ -15,7 +15,7 @@ import (
 
 const (
 	configValidationJobSuffix = "-config-validation"
-	validationJobBackoffLimit = int32(3)
+	validationJobBackoffLimit = int32(0)
 	validationTimeoutSeconds  = 60
 	validationContainerName   = "config-validate"
 
@@ -26,19 +26,26 @@ const (
 	annotationValidatedConfigHash = "curity.io/validated-config-hash"
 )
 
-// validationCommand starts the Curity Identity Server, polls the health check
-// endpoint, and exits 0 on success or 1 on timeout. This validates that the
-// mounted XML configuration can be parsed and loaded by idsvr.
+// validationCommand starts the Curity Identity Server as a standalone runtime
+// node (no cluster join), polls the health check port using bash /dev/tcp,
+// and exits 0 on success or 1 on timeout. Uses bash because curl/wget are
+// not available in the Curity container image.
 var validationCommand = fmt.Sprintf(
-	`/opt/idsvr/bin/idsvr &
+	`RESULT_FILE=/tmp/validation_result
+/opt/idsvr/bin/idsvr -s validation --no-admin &
 PID=$!
-for i in $(seq 1 %d); do
-  if curl -sf http://localhost:%d/; then
-    kill $PID 2>/dev/null; exit 0
+# Poll health check — write result and kill idsvr
+(for i in $(seq 1 %d); do
+  if (echo > /dev/tcp/localhost/%d) 2>/dev/null; then
+    echo 0 > $RESULT_FILE; kill $PID 2>/dev/null; exit
   fi
   sleep 1
-done
-kill $PID 2>/dev/null; exit 1`, validationTimeoutSeconds, portHealthCheck)
+done; echo 1 > $RESULT_FILE; kill $PID 2>/dev/null) &
+# Wait for idsvr — returns immediately if it crashes
+wait $PID 2>/dev/null
+# If no result file, idsvr crashed before poll could write one
+if [ ! -f $RESULT_FILE ]; then exit 1; fi
+exit $(cat $RESULT_FILE)`, validationTimeoutSeconds, portHealthCheck)
 
 // buildConfigValidationJob creates a Job that validates discovered configs
 // by starting idsvr and checking if it passes the health check. The Job is
@@ -50,7 +57,7 @@ func buildConfigValidationJob(
 	scheme *runtime.Scheme,
 ) (*batchv1.Job, error) {
 	backoff := validationJobBackoffLimit
-	volumes, mounts := buildValidationVolumes(cluster.Name, configs)
+	volumes, mounts := buildValidationVolumes(configs)
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -86,7 +93,7 @@ func buildConfigValidationJob(
 						{
 							Name:         validationContainerName,
 							Image:        buildImage(cluster),
-							Command:      []string{"/bin/sh", "-c", validationCommand},
+							Command:      []string{"/usr/bin/bash", "-c", validationCommand},
 							VolumeMounts: mounts,
 						},
 					},
@@ -156,31 +163,13 @@ func buildConfigValidationJob(
 // buildValidationVolumes creates volumes and mounts for the validation Job.
 // It mounts the cluster-config secret and all discovered config resources
 // at their production paths.
-func buildValidationVolumes(clusterName string, configs []DiscoveredConfigResource) ([]corev1.Volume, []corev1.VolumeMount) {
-	volumes := make([]corev1.Volume, 0, 1+len(configs))
-	mounts := make([]corev1.VolumeMount, 0, 1+len(configs))
+func buildValidationVolumes(configs []DiscoveredConfigResource) ([]corev1.Volume, []corev1.VolumeMount) {
+	volumes := make([]corev1.Volume, 0, len(configs))
+	mounts := make([]corev1.VolumeMount, 0, len(configs))
 
-	// Cluster-config volume (cluster.xml) — optional so validation can
-	// proceed even if the cluster-config secret isn't ready yet.
-	clusterSecretName := clusterName + "-cluster-config"
-	volumes = append(volumes, corev1.Volume{
-		Name: "cluster-config",
-		VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{
-				SecretName: clusterSecretName,
-				Items: []corev1.KeyToPath{
-					{Key: "cluster.xml", Path: "cluster.xml"},
-				},
-				Optional: ptr.To(true),
-			},
-		},
-	})
-	mounts = append(mounts, corev1.VolumeMount{
-		Name:      "cluster-config",
-		MountPath: "/opt/idsvr/etc/init/cluster.xml",
-		SubPath:   "cluster.xml",
-		ReadOnly:  true,
-	})
+	// No cluster-config volume — the validation pod runs standalone
+	// (--no-admin) and does not join the real cluster. Only user-provided
+	// managed configs are mounted for validation.
 
 	// Discovered config volumes.
 	for _, cfg := range configs {

@@ -202,6 +202,73 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `topologySpreadConstraints` | list | Overrides cluster-level topology |
 | `affinity` | object | Overrides cluster-level affinity |
 
+## Configuration Management
+
+The operator discovers ConfigMaps and Secrets labeled `curity.io/managed: "true"` in the same namespace as the cluster. These are validated, then mounted into the Curity pods.
+
+### Creating a Managed Config
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: curity-base-config
+  namespace: demo
+  labels:
+    curity.io/managed: "true"
+data:
+  base-config.xml: |
+    <config xmlns="http://tail-f.com/ns/config/1.0">
+      <environments xmlns="https://curity.se/ns/conf/base">
+        <environment>
+          <base-url>https://localhost:8443</base-url>
+        </environment>
+      </environments>
+    </config>
+```
+
+### Config Types
+
+Set the `curity.io/config-type` annotation to control where configs are mounted. If omitted, the operator defaults it to `base`.
+
+| Type | Annotation Value | Mount Path |
+|---|---|---|
+| Base config | `base` (default) | `/opt/idsvr/etc/init/{filename}` |
+| License | `license` | `/opt/idsvr/etc/init/license/{filename}` |
+
+### Validation
+
+When managed configs are created or updated, the operator runs a validation Job that starts an isolated Curity instance to verify the config. The status is visible on the cluster:
+
+```bash
+kubectl get isc my-cluster -o jsonpath='{.status.conditions[?(@.type=="ConfigValidationReady")]}'
+```
+
+And on each node:
+
+```bash
+kubectl get isn admin -o jsonpath='{.status.appliedConfigs}'
+```
+
+**What validation catches:**
+- Malformed XML (not well-formed)
+- Unknown or invalid XML schema elements
+
+**What validation does not catch:**
+- Semantic errors that only surface in full cluster mode (e.g., HTTPS service role without an SSL key configured)
+- Unreachable datasource connections
+- Cross-reference errors between config fragments
+
+If validation fails, the `ConfigValidationReady` condition on the cluster shows the reason. Configs are **not** mounted until validation passes. Fix the config content to retry automatically, or delete the validation Job manually for transient infrastructure failures.
+
+### Admin Routing
+
+When an admin node exists, only the admin receives managed configs. It distributes configuration to runtime nodes via the Curity clustering protocol. In runtime-only clusters (no admin node), all nodes receive configs directly.
+
+### Namespace Scoping
+
+All managed configs in a namespace are discovered by all clusters in that namespace. To scope configs to a specific cluster, use separate namespaces.
+
 ## Running Tests
 
 ```bash

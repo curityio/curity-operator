@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -40,6 +42,100 @@ func deleteNS(name string) {
 }
 
 func k() client.Client { return utils.TestEnvironment.K8sClient }
+
+// e2eConfigEntry mirrors DiscoveredConfigResource for config hash computation.
+type e2eConfigEntry struct {
+	Name       string
+	IsSecret   bool
+	ConfigType string
+	Data       map[string][]byte
+}
+
+// e2eComputeConfigHash mirrors computeConfigHash() from config_discovery.go.
+func e2eComputeConfigHash(entries []e2eConfigEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	sorted := make([]e2eConfigEntry, len(entries))
+	copy(sorted, entries)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+
+	h := sha256.New()
+	for _, e := range sorted {
+		h.Write([]byte(e.Name))
+		h.Write([]byte{0})
+		if e.IsSecret {
+			h.Write([]byte("Secret"))
+		} else {
+			h.Write([]byte("ConfigMap"))
+		}
+		h.Write([]byte{0})
+		h.Write([]byte(e.ConfigType))
+		h.Write([]byte{0})
+		keys := make([]string, 0, len(e.Data))
+		for k := range e.Data {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			h.Write([]byte(k))
+			h.Write([]byte{0})
+			h.Write(e.Data[k])
+			h.Write([]byte{0})
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// e2eSimulateValidation sets the validated config hash on a cluster.
+func e2eSimulateValidation(ns, clusterName, configHash string) {
+	ctx := context.Background()
+	Eventually(func() error {
+		cluster := &v1alpha1.IdentityServerCluster{}
+		if err := k().Get(ctx, client.ObjectKey{Name: clusterName, Namespace: ns}, cluster); err != nil {
+			return err
+		}
+		if cluster.Annotations == nil {
+			cluster.Annotations = make(map[string]string)
+		}
+		cluster.Annotations["curity.io/validated-config-hash"] = configHash
+		return k().Update(ctx, cluster)
+	}, e2eTimeout, e2eInterval).Should(Succeed())
+}
+
+// e2eHasCfgVolume checks if a Deployment has a volume with the given prefix.
+func e2eHasCfgVolume(deploy *appsv1.Deployment, volumeName string) bool {
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if v.Name == volumeName {
+			return true
+		}
+	}
+	return false
+}
+
+// e2eCountCfgVolumes counts volumes with "cfg-" prefix.
+func e2eCountCfgVolumes(deploy *appsv1.Deployment) int {
+	count := 0
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if strings.HasPrefix(v.Name, "cfg-") {
+			count++
+		}
+	}
+	return count
+}
+
+// e2eHasVolumeMount checks if the first container has a mount with the given name and path.
+func e2eHasVolumeMount(deploy *appsv1.Deployment, name, mountPath string) bool {
+	if len(deploy.Spec.Template.Spec.Containers) == 0 {
+		return false
+	}
+	for _, m := range deploy.Spec.Template.Spec.Containers[0].VolumeMounts {
+		if m.Name == name && m.MountPath == mountPath {
+			return true
+		}
+	}
+	return false
+}
 
 var _ = Describe("IdentityServerNode", func() {
 
@@ -1245,6 +1341,533 @@ var _ = Describe("IdentityServerNode", func() {
 				}, e2eTimeout, e2eInterval).Should(BeTrue())
 
 				utils.MatchCRDResource(cluster, "job-cluster with-job")
+			})
+		})
+
+		Describe("Label-based config discovery", func() {
+
+			Describe("Admin routing — config mounts only on admin", Ordered, func() {
+				const ns = "e2e-cfg-admin-routing"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should mount base ConfigMap only on admin when admin exists", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-ar-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "cfg-ar-admin", "namespace": ns, "clusterName": "cfg-ar-cluster"})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "cfg-ar-runtime", "namespace": ns, "clusterName": "cfg-ar-cluster"})
+
+					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-ar-admin", Namespace: ns}}
+					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
+					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-ar-runtime", Namespace: ns}}
+					utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
+
+					By("creating labeled ConfigMap")
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "routing-config", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"},
+						},
+						Data: map[string]string{"settings.xml": "<settings/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					By("simulating validation")
+					hash := e2eComputeConfigHash([]e2eConfigEntry{{
+						Name: "routing-config", IsSecret: false, ConfigType: "base",
+						Data: map[string][]byte{"settings.xml": []byte("<settings/>")},
+					}})
+					e2eSimulateValidation(ns, "cfg-ar-cluster", hash)
+
+					By("verifying admin gets config volume")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-ar-admin", Namespace: ns}, adminDeploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(adminDeploy, "cfg-cm-routing-config")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(adminDeploy, "cfg-cm-routing-config", "/opt/idsvr/etc/init/settings.xml")).To(BeTrue())
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("verifying runtime does NOT get config volume")
+					Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-ar-runtime", Namespace: ns}, runtimeDeploy)).To(Succeed())
+					Expect(e2eCountCfgVolumes(runtimeDeploy)).To(Equal(0), "runtime should not have config volumes when admin exists")
+
+					By("snapshotting")
+					utils.MatchYAMLResource(adminDeploy, "[deployment] cfg-ar-admin")
+					utils.MatchYAMLResource(runtimeDeploy, "[deployment] cfg-ar-runtime")
+
+					adminNode := &v1alpha1.IdentityServerNode{}
+					Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-ar-admin", Namespace: ns}, adminNode)).To(Succeed())
+					utils.MatchCRDResource(adminNode, "cfg-ar-admin")
+
+					runtimeNode := &v1alpha1.IdentityServerNode{}
+					Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-ar-runtime", Namespace: ns}, runtimeNode)).To(Succeed())
+					utils.MatchCRDResource(runtimeNode, "cfg-ar-runtime")
+				})
+			})
+
+			Describe("No admin — config mounts on runtime", Ordered, func() {
+				const ns = "e2e-cfg-no-admin"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should mount base ConfigMap on runtime when no admin exists", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-na-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "cfg-na-runtime", "namespace": ns, "clusterName": "cfg-na-cluster"})
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-na-runtime", Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "runtime-cfg", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"},
+						},
+						Data: map[string]string{"app.xml": "<app/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					hash := e2eComputeConfigHash([]e2eConfigEntry{{
+						Name: "runtime-cfg", IsSecret: false, ConfigType: "base",
+						Data: map[string][]byte{"app.xml": []byte("<app/>")},
+					}})
+					e2eSimulateValidation(ns, "cfg-na-cluster", hash)
+
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-na-runtime", Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-runtime-cfg")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-runtime-cfg", "/opt/idsvr/etc/init/app.xml")).To(BeTrue())
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					utils.MatchYAMLResource(deploy, "[deployment] cfg-na-runtime")
+				})
+			})
+
+			Describe("License Secret mount path", Ordered, func() {
+				const ns = "e2e-cfg-license"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should mount license Secret at license path", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-lic-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "cfg-lic-admin", "namespace": ns, "clusterName": "cfg-lic-cluster"})
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-lic-admin", Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					secret := &corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "my-license", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/config-type": "license"},
+						},
+						Data: map[string][]byte{"license.json": []byte(`{"key":"val"}`)},
+					}
+					Expect(k().Create(ctx, secret)).To(Succeed())
+
+					hash := e2eComputeConfigHash([]e2eConfigEntry{{
+						Name: "my-license", IsSecret: true, ConfigType: "license",
+						Data: map[string][]byte{"license.json": []byte(`{"key":"val"}`)},
+					}})
+					e2eSimulateValidation(ns, "cfg-lic-cluster", hash)
+
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-lic-admin", Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-secret-my-license")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-secret-my-license", "/opt/idsvr/etc/init/license/license.json")).To(BeTrue())
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					utils.MatchYAMLResource(deploy, "[deployment] cfg-lic-admin")
+				})
+			})
+
+			Describe("Multiple discovered configs", Ordered, func() {
+				const ns = "e2e-cfg-multi"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should mount multiple discovered configs", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-multi-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "cfg-multi-admin", "namespace": ns, "clusterName": "cfg-multi-cluster"})
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-multi-admin", Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					By("creating 2 ConfigMaps + 1 Secret")
+					cm1 := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Name: "base-config-a", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"}},
+						Data: map[string]string{"a.xml": "<a/>"},
+					}
+					cm2 := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Name: "base-config-b", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"}},
+						Data: map[string]string{"b.xml": "<b/>"},
+					}
+					sec := &corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{Name: "secret-config", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"}},
+						Data: map[string][]byte{"s.xml": []byte("<s/>")},
+					}
+					Expect(k().Create(ctx, cm1)).To(Succeed())
+					Expect(k().Create(ctx, cm2)).To(Succeed())
+					Expect(k().Create(ctx, sec)).To(Succeed())
+
+					hash := e2eComputeConfigHash([]e2eConfigEntry{
+						{Name: "base-config-a", IsSecret: false, ConfigType: "base", Data: map[string][]byte{"a.xml": []byte("<a/>")}},
+						{Name: "base-config-b", IsSecret: false, ConfigType: "base", Data: map[string][]byte{"b.xml": []byte("<b/>")}},
+						{Name: "secret-config", IsSecret: true, ConfigType: "base", Data: map[string][]byte{"s.xml": []byte("<s/>")}},
+					})
+					e2eSimulateValidation(ns, "cfg-multi-cluster", hash)
+
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-multi-admin", Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eCountCfgVolumes(deploy)).To(Equal(3))
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-base-config-a")).To(BeTrue())
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-base-config-b")).To(BeTrue())
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-secret-secret-config")).To(BeTrue())
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					utils.MatchYAMLResource(deploy, "[deployment] cfg-multi-admin")
+				})
+			})
+
+			Describe("Rolling restart on config change", Ordered, func() {
+				const ns = "e2e-cfg-rolling"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should trigger rolling restart on config data change", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-roll-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "cfg-roll-runtime", "namespace": ns, "clusterName": "cfg-roll-cluster"})
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-roll-runtime", Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Name: "rolling-config", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"}},
+						Data: map[string]string{"init.xml": "<v1/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					hash1 := e2eComputeConfigHash([]e2eConfigEntry{{
+						Name: "rolling-config", IsSecret: false, ConfigType: "base",
+						Data: map[string][]byte{"init.xml": []byte("<v1/>")},
+					}})
+					e2eSimulateValidation(ns, "cfg-roll-cluster", hash1)
+
+					By("recording initial config-hash annotation")
+					var initialHash string
+					Eventually(func() string {
+						Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-roll-runtime", Namespace: ns}, deploy)).To(Succeed())
+						initialHash = deploy.Spec.Template.Annotations["curity.io/config-hash"]
+						return initialHash
+					}, e2eTimeout, e2eInterval).ShouldNot(BeEmpty())
+
+					By("updating ConfigMap data")
+					Expect(k().Get(ctx, client.ObjectKey{Name: "rolling-config", Namespace: ns}, cm)).To(Succeed())
+					cm.Data["init.xml"] = "<v2/>"
+					Expect(k().Update(ctx, cm)).To(Succeed())
+
+					hash2 := e2eComputeConfigHash([]e2eConfigEntry{{
+						Name: "rolling-config", IsSecret: false, ConfigType: "base",
+						Data: map[string][]byte{"init.xml": []byte("<v2/>")},
+					}})
+					e2eSimulateValidation(ns, "cfg-roll-cluster", hash2)
+
+					By("verifying config-hash annotation changed")
+					Eventually(func() string {
+						Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-roll-runtime", Namespace: ns}, deploy)).To(Succeed())
+						return deploy.Spec.Template.Annotations["curity.io/config-hash"]
+					}, e2eTimeout, e2eInterval).ShouldNot(Equal(initialHash))
+				})
+			})
+
+			Describe("Unlabeled ConfigMap not mounted", Ordered, func() {
+				const ns = "e2e-cfg-unlabeled"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should not mount unlabeled ConfigMap", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-ul-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "cfg-ul-runtime", "namespace": ns, "clusterName": "cfg-ul-cluster"})
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-ul-runtime", Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					// Create ConfigMap WITHOUT managed label
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Name: "unlabeled-config", Namespace: ns},
+						Data:       map[string]string{"data.xml": "<data/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					// Deployment should not gain any config volumes
+					Consistently(func() int {
+						Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-ul-runtime", Namespace: ns}, deploy)).To(Succeed())
+						return e2eCountCfgVolumes(deploy)
+					}, 5*time.Second, e2eInterval).Should(Equal(0), "unlabeled ConfigMap should not be mounted")
+
+					utils.MatchYAMLResource(deploy, "[deployment] cfg-ul-runtime")
+				})
+			})
+
+			Describe("Pending validation status", Ordered, func() {
+				const ns = "e2e-cfg-pending"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should set AppliedConfigs status to Pending when not yet validated", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-pend-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "cfg-pend-admin", "namespace": ns, "clusterName": "cfg-pend-cluster"})
+
+					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-pend-admin", Namespace: ns}}
+					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
+
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Name: "pending-config", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"}},
+						Data: map[string]string{"pend.xml": "<pending/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					By("verifying node status shows Pending")
+					node := &v1alpha1.IdentityServerNode{}
+					Eventually(func() string {
+						if err := k().Get(ctx, client.ObjectKey{Name: "cfg-pend-admin", Namespace: ns}, node); err != nil {
+							return ""
+						}
+						if len(node.Status.AppliedConfigs) == 0 {
+							return ""
+						}
+						return node.Status.AppliedConfigs[0].ValidationStatus
+					}, e2eTimeout, e2eInterval).Should(Equal("Pending"))
+
+					Expect(node.Status.AppliedConfigs[0].Name).To(Equal("pending-config"))
+					Expect(node.Status.AppliedConfigs[0].Kind).To(Equal("ConfigMap"))
+
+					By("verifying Deployment has no config volumes")
+					Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-pend-admin", Namespace: ns}, adminDeploy)).To(Succeed())
+					Expect(e2eCountCfgVolumes(adminDeploy)).To(Equal(0), "no config volumes when validation pending")
+
+					utils.MatchCRDResource(node, "cfg-pend-admin pending")
+				})
+			})
+
+			Describe("Validation Job creation", Ordered, func() {
+				const ns = "e2e-cfg-validation-job"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should create validation Job for managed config", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-vj-cluster", "namespace": ns})
+
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Name: "vj-config", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"}},
+						Data: map[string]string{"test.xml": "<test/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					By("verifying validation Job is created")
+					job := &batchv1.Job{}
+					Eventually(func() error {
+						return k().Get(ctx, client.ObjectKey{Name: "cfg-vj-cluster-config-validation", Namespace: ns}, job)
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					Expect(job.Annotations).To(HaveKey("curity.io/config-hash"))
+					Expect(job.Labels["curity.io/component"]).To(Equal("config-validation"))
+
+					By("verifying cluster condition")
+					cluster := &v1alpha1.IdentityServerCluster{}
+					Eventually(func() bool {
+						if err := k().Get(ctx, client.ObjectKey{Name: "cfg-vj-cluster", Namespace: ns}, cluster); err != nil {
+							return false
+						}
+						for _, c := range cluster.Status.Conditions {
+							if c.Type == "ConfigValidationReady" {
+								return true
+							}
+						}
+						return false
+					}, e2eTimeout, e2eInterval).Should(BeTrue())
+
+					utils.MatchResource(job, "job", "cfg-vj-cluster-config-validation")
+					utils.MatchCRDResource(cluster, "cfg-vj-cluster with-validation")
+				})
+			})
+
+			Describe("Coexistence with cluster-config", Ordered, func() {
+				const ns = "e2e-cfg-coexist"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should coexist with cluster-config volume", func() {
+					ctx := context.Background()
+
+					By("pre-creating populated cluster-config Secret")
+					configSecret := &corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "cfg-co-cluster-cluster-config", Namespace: ns,
+							Labels: map[string]string{
+								"curity.io/cluster":   "cfg-co-cluster",
+								"curity.io/component": "cluster-config",
+							},
+							Annotations: map[string]string{
+								"curity.io/admin-node":               "cfg-co-admin",
+								"argocd.argoproj.io/compare-options": "IgnoreExtraneous",
+							},
+						},
+						Data: map[string][]byte{"cluster.xml": []byte("<config>coexist-test</config>")},
+					}
+					Expect(k().Create(ctx, configSecret)).To(Succeed())
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-co-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "cfg-co-admin", "namespace": ns, "clusterName": "cfg-co-cluster"})
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-co-admin", Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Name: "coexist-config", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"}},
+						Data: map[string]string{"extra.xml": "<extra/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					hash := e2eComputeConfigHash([]e2eConfigEntry{{
+						Name: "coexist-config", IsSecret: false, ConfigType: "base",
+						Data: map[string][]byte{"extra.xml": []byte("<extra/>")},
+					}})
+					e2eSimulateValidation(ns, "cfg-co-cluster", hash)
+
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-co-admin", Namespace: ns}, deploy)).To(Succeed())
+						// Both volumes should exist
+						g.Expect(e2eHasCfgVolume(deploy, "cluster-config")).To(BeTrue(), "should have cluster-config volume")
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-coexist-config")).To(BeTrue(), "should have discovered config volume")
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					utils.MatchYAMLResource(deploy, "[deployment] cfg-co-admin")
+				})
+			})
+
+			Describe("Config type defaulting", Ordered, func() {
+				const ns = "e2e-cfg-type-default"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should handle config type defaulting by cluster reconciler", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-td-cluster", "namespace": ns})
+
+					// Create ConfigMap WITHOUT config-type annotation
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Name: "no-type-config", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"}},
+						Data: map[string]string{"x.xml": "<x/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					// Cluster reconciler should default the annotation
+					Eventually(func() string {
+						updated := &corev1.ConfigMap{}
+						if err := k().Get(ctx, client.ObjectKey{Name: "no-type-config", Namespace: ns}, updated); err != nil {
+							return ""
+						}
+						return updated.Annotations["curity.io/config-type"]
+					}, e2eTimeout, e2eInterval).Should(Equal("base"))
+				})
+			})
+
+			Describe("Admin node added re-routes configs", Ordered, func() {
+				const ns = "e2e-cfg-admin-added"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("should re-route configs when admin node is added", func() {
+					ctx := context.Background()
+
+					By("setting up cluster + runtime (no admin) + managed config")
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cfg-aa-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "cfg-aa-runtime", "namespace": ns, "clusterName": "cfg-aa-cluster"})
+
+					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-aa-runtime", Namespace: ns}}
+					utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
+
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Name: "reroute-config", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"}},
+						Data: map[string]string{"reroute.xml": "<reroute/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					hash := e2eComputeConfigHash([]e2eConfigEntry{{
+						Name: "reroute-config", IsSecret: false, ConfigType: "base",
+						Data: map[string][]byte{"reroute.xml": []byte("<reroute/>")},
+					}})
+					e2eSimulateValidation(ns, "cfg-aa-cluster", hash)
+
+					By("verifying runtime gets config (no admin exists)")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-aa-runtime", Namespace: ns}, runtimeDeploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(runtimeDeploy, "cfg-cm-reroute-config")).To(BeTrue())
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("adding admin node")
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "cfg-aa-admin", "namespace": ns, "clusterName": "cfg-aa-cluster"})
+
+					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-aa-admin", Namespace: ns}}
+					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
+
+					By("verifying admin gets config and runtime loses it")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-aa-admin", Namespace: ns}, adminDeploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(adminDeploy, "cfg-cm-reroute-config")).To(BeTrue(), "admin should get config")
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					Eventually(func() int {
+						Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-aa-runtime", Namespace: ns}, runtimeDeploy)).To(Succeed())
+						return e2eCountCfgVolumes(runtimeDeploy)
+					}, e2eTimeout, e2eInterval).Should(Equal(0), "runtime should lose config when admin added")
+				})
 			})
 		})
 	})

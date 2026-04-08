@@ -1,0 +1,56 @@
+
+[IdentityServerNode configuration Label-based config discovery Admin routing — config mounts only on admin should mount base ConfigMap only on admin when admin exists - 1]
+metadata:
+  name: cfg-ar-admin
+  namespace: e2e-cfg-admin-routing
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: cfg-ar-cluster
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: admin
+  role: admin-role
+  ui:
+    enabled: true
+    secure: true
+  identityServerClusterRef:
+    name: cfg-ar-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  deploymentName: cfg-ar-admin
+  serviceName: cfg-ar-admin
+  appliedConfigs:
+    - name: routing-config
+      kind: ConfigMap
+      configType: base
+      validationStatus: Validated
+
+---

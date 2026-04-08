@@ -91,13 +91,21 @@ func buildConfigValidationJob(
 					},
 					Containers: []corev1.Container{
 						{
-							Name:         validationContainerName,
-							Image:        buildImage(cluster),
-							Command:      []string{"/usr/bin/bash", "-c", validationCommand},
-							VolumeMounts: mounts,
+							Name:    validationContainerName,
+							Image:   buildImage(cluster),
+							Command: []string{"/usr/bin/bash", "-c", validationCommand},
+							VolumeMounts: append(mounts, corev1.VolumeMount{
+								Name:      "tmp",
+								MountPath: "/tmp",
+							}),
 						},
 					},
-					Volumes: volumes,
+					Volumes: append(volumes, corev1.Volume{
+						Name: "tmp",
+						VolumeSource: corev1.VolumeSource{
+							EmptyDir: &corev1.EmptyDirVolumeSource{},
+						},
+					}),
 				},
 			},
 		},
@@ -161,8 +169,7 @@ func buildConfigValidationJob(
 }
 
 // buildValidationVolumes creates volumes and mounts for the validation Job.
-// It mounts the cluster-config secret and all discovered config resources
-// at their production paths.
+// It mounts all discovered config resources at their production paths.
 func buildValidationVolumes(configs []DiscoveredConfigResource) ([]corev1.Volume, []corev1.VolumeMount) {
 	volumes := make([]corev1.Volume, 0, len(configs))
 	mounts := make([]corev1.VolumeMount, 0, len(configs))

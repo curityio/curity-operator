@@ -184,9 +184,10 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	allConfigs, err := discoverConfigResources(ctx, r.Client, node.Namespace)
 	if err != nil {
 		if errors.Is(err, ErrUnknownConfigType) {
-			// Config type error is surfaced by the cluster reconciler.
-			// Node skips mounting but logs for visibility.
+			// Config type error is also surfaced by the cluster reconciler via condition.
+			// Record an event on the node so users see it on kubectl describe.
 			log.Info("skipping config mounting due to unknown config type", "error", err.Error())
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "UnknownConfigType", "%s", err)
 			allConfigs = nil
 		} else {
 			return ctrl.Result{}, fmt.Errorf("discovering managed configs: %w", err)
@@ -224,14 +225,16 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Inject cluster config hash annotation for rolling restart when Secret changes
 	configSecretName := cluster.Name + "-cluster-config"
 	var configSecret corev1.Secret
-	if err := r.Get(ctx, client.ObjectKey{Name: configSecretName, Namespace: node.Namespace}, &configSecret); err == nil {
-		if data, ok := configSecret.Data["cluster.xml"]; ok && len(data) > 0 {
-			h := sha256.Sum256(data)
-			if desiredDeploy.Spec.Template.Annotations == nil {
-				desiredDeploy.Spec.Template.Annotations = make(map[string]string)
-			}
-			desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = hex.EncodeToString(h[:])
+	if err := r.Get(ctx, client.ObjectKey{Name: configSecretName, Namespace: node.Namespace}, &configSecret); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("getting cluster-config secret %q: %w", configSecretName, err)
 		}
+	} else if data, ok := configSecret.Data["cluster.xml"]; ok && len(data) > 0 {
+		h := sha256.Sum256(data)
+		if desiredDeploy.Spec.Template.Annotations == nil {
+			desiredDeploy.Spec.Template.Annotations = make(map[string]string)
+		}
+		desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = hex.EncodeToString(h[:])
 	}
 
 	// Inject discovered config hash annotation for rolling restart on config changes.

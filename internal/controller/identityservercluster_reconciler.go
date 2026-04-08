@@ -612,7 +612,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 
 				// Clean up Job
 				if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
-					log.Info("failed to delete completed Job", "error", err)
+					log.Error(err, "failed to delete completed Job")
 				}
 
 				cluster.Status.ClusterConfigSecretName = secretName
@@ -725,7 +725,7 @@ func (r *IdentityServerClusterReconciler) ensureConfigValidation(ctx context.Con
 
 	// Default the config-type annotation on managed resources that lack it.
 	if err := defaultConfigTypeAnnotations(ctx, r.Client, cluster.Namespace); err != nil {
-		log.Info("failed to default config-type annotations", "error", err.Error())
+		log.Error(err, "failed to default config-type annotations")
 	}
 
 	// Discover managed configs.
@@ -824,7 +824,7 @@ func (r *IdentityServerClusterReconciler) ensureConfigValidation(ctx context.Con
 				// Leave the failed Job in place — only deleted when config hash changes.
 				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady,
 					metav1.ConditionFalse, "ValidationFailed",
-					fmt.Sprintf("Config validation Job failed: %s", cond.Message), cluster.Generation)
+					fmt.Sprintf("Config validation Job failed: %s. Fix the config to retry automatically, or delete Job %q for transient failures", cond.Message, jobName), cluster.Generation)
 				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigValidationFailed",
 					"Config validation Job failed: %s", cond.Message)
 				return false, nil

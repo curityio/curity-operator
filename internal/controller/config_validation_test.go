@@ -131,9 +131,9 @@ func TestBuildConfigValidationJob_MountsDiscoveredConfigs(t *testing.T) {
 	job, _ := buildConfigValidationJob(cluster, configs, "abc", nil)
 	podSpec := job.Spec.Template.Spec
 
-	// Should have only discovered config volumes (no cluster-config).
-	if len(podSpec.Volumes) != 2 {
-		t.Fatalf("expected 2 volumes, got %d", len(podSpec.Volumes))
+	// Should have discovered config volumes + tmp emptyDir (no cluster-config).
+	if len(podSpec.Volumes) != 3 {
+		t.Fatalf("expected 3 volumes (2 configs + tmp), got %d", len(podSpec.Volumes))
 	}
 
 	// Check ConfigMap volume.
@@ -162,6 +162,37 @@ func TestBuildConfigValidationJob_NoClusterConfigVolume(t *testing.T) {
 		if vol.Name == "cluster-config" {
 			t.Error("validation Job should not mount cluster-config volume")
 		}
+	}
+}
+
+func TestBuildConfigValidationJob_TmpEmptyDir(t *testing.T) {
+	cluster := newValidationTestCluster()
+	job, _ := buildConfigValidationJob(cluster, nil, "abc", nil)
+	podSpec := job.Spec.Template.Spec
+
+	// Check tmp volume exists as emptyDir.
+	var foundVol bool
+	for _, vol := range podSpec.Volumes {
+		if vol.Name == "tmp" {
+			foundVol = true
+			if vol.EmptyDir == nil {
+				t.Error("expected emptyDir volume source for tmp")
+			}
+		}
+	}
+	if !foundVol {
+		t.Error("expected tmp volume")
+	}
+
+	// Check tmp mount exists at /tmp.
+	var foundMount bool
+	for _, m := range podSpec.Containers[0].VolumeMounts {
+		if m.Name == "tmp" && m.MountPath == "/tmp" {
+			foundMount = true
+		}
+	}
+	if !foundMount {
+		t.Error("expected /tmp volume mount")
 	}
 }
 

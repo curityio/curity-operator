@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -228,6 +229,127 @@ func TestDiscoverConfigResources_EmptyNamespace(t *testing.T) {
 	}
 	if len(configs) != 0 {
 		t.Errorf("expected 0 configs, got %d", len(configs))
+	}
+}
+
+// --- defaultConfigTypeAnnotations ---
+
+func TestDefaultConfigTypeAnnotations_SetsMissingAnnotation(t *testing.T) {
+	ctx := context.Background()
+	s := newScheme(t)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "no-annotation",
+			Namespace: "ns",
+			Labels:    map[string]string{LabelManagedConfig: "true"},
+		},
+		Data: map[string]string{"config.xml": "<config/>"},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
+
+	if err := defaultConfigTypeAnnotations(ctx, c, "ns"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var updated corev1.ConfigMap
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cm), &updated); err != nil {
+		t.Fatalf("getting configmap: %v", err)
+	}
+	if updated.Annotations[AnnotationConfigType] != ConfigTypeBase {
+		t.Errorf("expected annotation %q=%q, got %q", AnnotationConfigType, ConfigTypeBase, updated.Annotations[AnnotationConfigType])
+	}
+}
+
+func TestDefaultConfigTypeAnnotations_SkipsExistingAnnotation(t *testing.T) {
+	ctx := context.Background()
+	s := newScheme(t)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "has-annotation",
+			Namespace: "ns",
+			Labels:    map[string]string{LabelManagedConfig: "true"},
+			Annotations: map[string]string{
+				AnnotationConfigType: ConfigTypeLicense,
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
+
+	if err := defaultConfigTypeAnnotations(ctx, c, "ns"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var updated corev1.ConfigMap
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cm), &updated); err != nil {
+		t.Fatalf("getting configmap: %v", err)
+	}
+	if updated.Annotations[AnnotationConfigType] != ConfigTypeLicense {
+		t.Errorf("expected annotation unchanged at %q, got %q", ConfigTypeLicense, updated.Annotations[AnnotationConfigType])
+	}
+}
+
+func TestDefaultConfigTypeAnnotations_SkipsClusterConfigSecret(t *testing.T) {
+	ctx := context.Background()
+	s := newScheme(t)
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cluster-1-cluster-config",
+			Namespace: "ns",
+			Labels: map[string]string{
+				LabelManagedConfig:    "true",
+				"curity.io/component": "cluster-config",
+			},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(sec).Build()
+
+	if err := defaultConfigTypeAnnotations(ctx, c, "ns"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var updated corev1.Secret
+	if err := c.Get(ctx, client.ObjectKeyFromObject(sec), &updated); err != nil {
+		t.Fatalf("getting secret: %v", err)
+	}
+	if updated.Annotations != nil && updated.Annotations[AnnotationConfigType] != "" {
+		t.Errorf("cluster-config secret should not get annotation, got %q", updated.Annotations[AnnotationConfigType])
+	}
+}
+
+func TestDefaultConfigTypeAnnotations_NilAnnotationsMap(t *testing.T) {
+	ctx := context.Background()
+	s := newScheme(t)
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nil-annotations",
+			Namespace: "ns",
+			Labels:    map[string]string{LabelManagedConfig: "true"},
+			// Annotations is nil
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(sec).Build()
+
+	if err := defaultConfigTypeAnnotations(ctx, c, "ns"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var updated corev1.Secret
+	if err := c.Get(ctx, client.ObjectKeyFromObject(sec), &updated); err != nil {
+		t.Fatalf("getting secret: %v", err)
+	}
+	if updated.Annotations[AnnotationConfigType] != ConfigTypeBase {
+		t.Errorf("expected annotation %q=%q on secret with nil annotations map, got %q",
+			AnnotationConfigType, ConfigTypeBase, updated.Annotations[AnnotationConfigType])
+	}
+}
+
+func TestDefaultConfigTypeAnnotations_EmptyNamespace(t *testing.T) {
+	ctx := context.Background()
+	s := newScheme(t)
+	c := fake.NewClientBuilder().WithScheme(s).Build()
+
+	if err := defaultConfigTypeAnnotations(ctx, c, "empty-ns"); err != nil {
+		t.Fatalf("unexpected error for empty namespace: %v", err)
 	}
 }
 

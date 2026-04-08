@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -46,6 +47,7 @@ type IdentityServerClusterReconciler struct {
 // +kubebuilder:rbac:groups=curity.io,resources=identityserverclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=curity.io,resources=identityservernodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list
@@ -127,7 +129,13 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// 6. Compute and update status
+	// 6. Ensure config validation (validate discovered managed configs via Job)
+	requeue, err := r.ensureConfigValidation(ctx, &cluster)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 7. Compute and update status
 	readyCount := int32(0)
 	for i := range childNodes {
 		readyCond := apimeta.FindStatusCondition(childNodes[i].Status.Conditions, v1alpha1.ConditionReady)
@@ -136,13 +144,17 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	// Preserve ClusterConfigReady condition (set by ensureClusterConfig above)
+	// Preserve conditions set by ensureClusterConfig and ensureConfigValidation
 	// before overwriting with computed node conditions.
 	configReadyCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+	validationReadyCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady)
 	conditions := computeClusterConditions(childNodes, cluster.Generation)
 	cluster.Status.Conditions = conditions
 	if configReadyCond != nil {
 		apimeta.SetStatusCondition(&cluster.Status.Conditions, *configReadyCond)
+	}
+	if validationReadyCond != nil {
+		apimeta.SetStatusCondition(&cluster.Status.Conditions, *validationReadyCond)
 	}
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.NodeCount = int32(len(childNodes))
@@ -156,6 +168,9 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, fmt.Errorf("failed to update cluster status: %w", err)
 	}
 
+	if requeue {
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
 	return ctrl.Result{}, nil
 }
 
@@ -274,6 +289,16 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findClusterForSecret),
+		).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.findClustersForManagedConfig),
+			builder.WithPredicates(managedConfigPredicate{}),
+		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findClustersForManagedConfig),
+			builder.WithPredicates(managedConfigPredicate{}),
 		).
 		Complete(r)
 }
@@ -587,7 +612,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 
 				// Clean up Job
 				if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
-					log.Info("failed to delete completed Job", "error", err)
+					log.Error(err, "failed to delete completed Job")
 				}
 
 				cluster.Status.ClusterConfigSecretName = secretName
@@ -688,6 +713,167 @@ func (r *IdentityServerClusterReconciler) readJobPodLogs(ctx context.Context, jo
 	}
 
 	return nil, fmt.Errorf("no succeeded pod found for Job %s", job.Name)
+}
+
+// --- Config validation (managed ConfigMaps/Secrets) ---
+
+// ensureConfigValidation discovers managed configs, validates them via a Job,
+// and stores the validated hash as an annotation on the cluster. Returns true
+// if the reconciler should requeue (validation Job is still running).
+func (r *IdentityServerClusterReconciler) ensureConfigValidation(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) (bool, error) {
+	log := ctrl.LoggerFrom(ctx)
+
+	// Default the config-type annotation on managed resources that lack it.
+	if err := defaultConfigTypeAnnotations(ctx, r.Client, cluster.Namespace); err != nil {
+		log.Error(err, "failed to default config-type annotations")
+	}
+
+	// Discover managed configs.
+	configs, err := discoverConfigResources(ctx, r.Client, cluster.Namespace)
+	if err != nil {
+		if errors.Is(err, ErrUnknownConfigType) {
+			setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady,
+				metav1.ConditionFalse, "UnknownConfigType", err.Error(), cluster.Generation)
+			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "UnknownConfigType", "%s", err)
+			return false, nil
+		}
+		return false, fmt.Errorf("discovering managed configs: %w", err)
+	}
+
+	if len(configs) == 0 {
+		// No managed configs — clear any stale validation state.
+		needsUpdate := false
+		if cluster.Annotations != nil && cluster.Annotations[annotationValidatedConfigHash] != "" {
+			delete(cluster.Annotations, annotationValidatedConfigHash)
+			needsUpdate = true
+		}
+		if needsUpdate {
+			if err := r.Update(ctx, cluster); err != nil {
+				if apierrors.IsConflict(err) {
+					return true, nil
+				}
+				return false, fmt.Errorf("clearing validated config hash: %w", err)
+			}
+		}
+		// Remove stale condition.
+		apimeta.RemoveStatusCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady)
+		return false, nil
+	}
+
+	configHash := computeConfigHash(configs)
+
+	// Already validated — nothing to do.
+	if cluster.Annotations != nil && cluster.Annotations[annotationValidatedConfigHash] == configHash {
+		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady,
+			metav1.ConditionTrue, "Validated", "All configs validated successfully", cluster.Generation)
+		return false, nil
+	}
+
+	// Check for existing validation Job.
+	jobName := cluster.Name + configValidationJobSuffix
+	var job batchv1.Job
+	jobExists := true
+	if err := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: cluster.Namespace}, &job); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("getting validation Job: %w", err)
+		}
+		jobExists = false
+	}
+
+	if jobExists {
+		jobHash := job.Annotations[annotationConfigHash]
+
+		// Hash mismatch — configs changed since Job was created.
+		if jobHash != configHash {
+			log.Info("config hash changed, deleting stale validation Job", "job", jobName)
+			if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
+				return false, fmt.Errorf("deleting stale validation Job: %w", err)
+			}
+			jobExists = false
+		}
+	}
+
+	if jobExists {
+		// Check Job completion status.
+		for _, cond := range job.Status.Conditions {
+			if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
+				log.Info("config validation succeeded", "job", jobName)
+				// Delete the completed Job.
+				if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
+					log.Error(err, "failed to delete completed validation Job", "job", jobName)
+				}
+				// Store validated hash on the cluster annotation.
+				if cluster.Annotations == nil {
+					cluster.Annotations = make(map[string]string)
+				}
+				cluster.Annotations[annotationValidatedConfigHash] = configHash
+				if err := r.Update(ctx, cluster); err != nil {
+					if apierrors.IsConflict(err) {
+						return true, nil
+					}
+					return false, fmt.Errorf("storing validated config hash: %w", err)
+				}
+				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady,
+					metav1.ConditionTrue, "Validated", "All configs validated successfully", cluster.Generation)
+				r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ConfigValidated",
+					"Config validation succeeded for hash %s", configHash)
+				return false, nil
+			}
+			if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
+				log.Info("config validation failed", "job", jobName, "message", cond.Message)
+				// Leave the failed Job in place — only deleted when config hash changes.
+				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady,
+					metav1.ConditionFalse, "ValidationFailed",
+					fmt.Sprintf("Config validation Job failed: %s. Fix the config to retry automatically, or delete Job %q for transient failures", cond.Message, jobName), cluster.Generation)
+				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigValidationFailed",
+					"Config validation Job failed: %s", cond.Message)
+				return false, nil
+			}
+		}
+		// Job still running.
+		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady,
+			metav1.ConditionFalse, "ValidationPending", "Validation Job is running", cluster.Generation)
+		return true, nil
+	}
+
+	// No Job exists — create one.
+	newJob, err := buildConfigValidationJob(cluster, configs, configHash, r.Scheme)
+	if err != nil {
+		return false, fmt.Errorf("building validation Job: %w", err)
+	}
+	if err := r.Create(ctx, newJob); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("creating validation Job: %w", err)
+	}
+	log.Info("created config validation Job", "name", jobName)
+	r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ConfigValidationStarted",
+		"Created validation Job %q for config hash %s", jobName, configHash)
+	setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady,
+		metav1.ConditionFalse, "ValidationPending",
+		"Validation Job created, waiting for completion", cluster.Generation)
+	return true, nil
+}
+
+// findClustersForManagedConfig maps a managed ConfigMap/Secret change to reconcile
+// requests for all IdentityServerClusters in the same namespace.
+func (r *IdentityServerClusterReconciler) findClustersForManagedConfig(ctx context.Context, obj client.Object) []ctrl.Request {
+	log := ctrl.LoggerFrom(ctx)
+
+	var clusterList v1alpha1.IdentityServerClusterList
+	if err := r.List(ctx, &clusterList, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.Error(err, "failed to list clusters for managed config watch", "resource", obj.GetName())
+		return nil
+	}
+
+	requests := make([]ctrl.Request, 0, len(clusterList.Items))
+	for i := range clusterList.Items {
+		requests = append(requests, ctrl.Request{
+			NamespacedName: client.ObjectKeyFromObject(&clusterList.Items[i]),
+		})
+	}
+	return requests
 }
 
 // findClusterForJob maps a Job change to a reconcile request for the owning cluster.

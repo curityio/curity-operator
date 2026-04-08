@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"time"
 
+	"errors"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +39,8 @@ type IdentityServerNodeReconciler struct {
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 
 // Reconcile handles a single reconciliation loop for an IdentityServerNode.
 func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -174,20 +178,71 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
 	}
 
+	// 5.5. Discover managed ConfigMaps/Secrets and check validation status.
+	// The cluster reconciler handles validation via a Job. The node reconciler
+	// only mounts configs that the cluster has already validated.
+	allConfigs, err := discoverConfigResources(ctx, r.Client, node.Namespace)
+	if err != nil {
+		if errors.Is(err, ErrUnknownConfigType) {
+			// Config type error is also surfaced by the cluster reconciler via condition.
+			// Record an event on the node so users see it on kubectl describe.
+			log.Info("skipping config mounting due to unknown config type", "error", err.Error())
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "UnknownConfigType", "%s", err)
+			allConfigs = nil
+		} else {
+			return ctrl.Result{}, fmt.Errorf("discovering managed configs: %w", err)
+		}
+	}
+
+	// Determine admin routing.
+	adminExists := findAdminNodeName(nodeList.Items) != ""
+	var applicableConfigs []DiscoveredConfigResource
+	if shouldMountConfig(node.Spec.Type, adminExists) {
+		applicableConfigs = allConfigs
+	}
+
+	// Check if the cluster has validated the current config set.
+	var validatedConfigs []DiscoveredConfigResource
+	configHash := computeConfigHash(applicableConfigs)
+
+	if len(applicableConfigs) > 0 {
+		validatedHash := cluster.Annotations[annotationValidatedConfigHash]
+		if validatedHash == configHash {
+			validatedConfigs = applicableConfigs
+			node.Status.AppliedConfigs = buildAppliedConfigStatus(applicableConfigs, v1alpha1.ValidationStatusValidated)
+		} else {
+			// Configs not yet validated — don't mount. The cluster reconciler
+			// will create the validation Job and update the annotation.
+			node.Status.AppliedConfigs = buildAppliedConfigStatus(applicableConfigs, v1alpha1.ValidationStatusPending)
+		}
+	} else {
+		node.Status.AppliedConfigs = nil
+	}
+
 	// 6. Build and reconcile the Deployment
-	desiredDeploy := buildDeployment(&cluster, &node)
+	desiredDeploy := buildDeployment(&cluster, &node, validatedConfigs)
 
 	// Inject cluster config hash annotation for rolling restart when Secret changes
 	configSecretName := cluster.Name + "-cluster-config"
 	var configSecret corev1.Secret
-	if err := r.Get(ctx, client.ObjectKey{Name: configSecretName, Namespace: node.Namespace}, &configSecret); err == nil {
-		if data, ok := configSecret.Data["cluster.xml"]; ok && len(data) > 0 {
-			h := sha256.Sum256(data)
-			if desiredDeploy.Spec.Template.Annotations == nil {
-				desiredDeploy.Spec.Template.Annotations = make(map[string]string)
-			}
-			desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = hex.EncodeToString(h[:])
+	if err := r.Get(ctx, client.ObjectKey{Name: configSecretName, Namespace: node.Namespace}, &configSecret); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("getting cluster-config secret %q: %w", configSecretName, err)
 		}
+	} else if data, ok := configSecret.Data["cluster.xml"]; ok && len(data) > 0 {
+		h := sha256.Sum256(data)
+		if desiredDeploy.Spec.Template.Annotations == nil {
+			desiredDeploy.Spec.Template.Annotations = make(map[string]string)
+		}
+		desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = hex.EncodeToString(h[:])
+	}
+
+	// Inject discovered config hash annotation for rolling restart on config changes.
+	if configHash != "" {
+		if desiredDeploy.Spec.Template.Annotations == nil {
+			desiredDeploy.Spec.Template.Annotations = make(map[string]string)
+		}
+		desiredDeploy.Spec.Template.Annotations[annotationConfigHash] = configHash
 	}
 
 	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}}
@@ -260,6 +315,16 @@ func (r *IdentityServerNodeReconciler) SetupWithManager(mgr ctrl.Manager) error 
 			handler.EnqueueRequestsFromMapFunc(r.findNodesForCluster),
 			builder.WithPredicates(clusterSpecOrNodeCountChangedPredicate{}),
 		).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.findNodesForManagedConfig),
+			builder.WithPredicates(managedConfigPredicate{}),
+		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findNodesForManagedConfig),
+			builder.WithPredicates(managedConfigPredicate{}),
+		).
 		Complete(r)
 }
 
@@ -272,15 +337,38 @@ func (r *IdentityServerNodeReconciler) findNodesForCluster(ctx context.Context, 
 		return nil
 	}
 
+	log := ctrl.LoggerFrom(ctx)
+
 	var nodeList v1alpha1.IdentityServerNodeList
 	if err := r.List(ctx, &nodeList,
 		client.InNamespace(cluster.Namespace),
 		client.MatchingLabels{"curity.io/cluster": cluster.Name},
 	); err != nil {
+		log.Error(err, "failed to list nodes for cluster watch", "cluster", cluster.Name)
 		return nil
 	}
 
 	var requests []ctrl.Request
+	for i := range nodeList.Items {
+		requests = append(requests, ctrl.Request{
+			NamespacedName: client.ObjectKeyFromObject(&nodeList.Items[i]),
+		})
+	}
+	return requests
+}
+
+// findNodesForManagedConfig maps a managed ConfigMap/Secret change to reconcile
+// requests for all IdentityServerNodes in the same namespace.
+func (r *IdentityServerNodeReconciler) findNodesForManagedConfig(ctx context.Context, obj client.Object) []ctrl.Request {
+	log := ctrl.LoggerFrom(ctx)
+
+	var nodeList v1alpha1.IdentityServerNodeList
+	if err := r.List(ctx, &nodeList, client.InNamespace(obj.GetNamespace())); err != nil {
+		log.Error(err, "failed to list nodes for managed config watch", "resource", obj.GetName())
+		return nil
+	}
+
+	requests := make([]ctrl.Request, 0, len(nodeList.Items))
 	for i := range nodeList.Items {
 		requests = append(requests, ctrl.Request{
 			NamespacedName: client.ObjectKeyFromObject(&nodeList.Items[i]),

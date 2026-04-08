@@ -110,6 +110,9 @@ type IdentityServerNodeStatus struct {
 
 	// ServiceName is the name of the Service created by this node.
 	ServiceName string `json:"serviceName,omitempty"`
+
+	// AppliedConfigs lists the discovered configuration resources and their validation status.
+	AppliedConfigs []AppliedConfigStatus `json:"appliedConfigs,omitempty"`
 }
 
 // +kubebuilder:object:root=true

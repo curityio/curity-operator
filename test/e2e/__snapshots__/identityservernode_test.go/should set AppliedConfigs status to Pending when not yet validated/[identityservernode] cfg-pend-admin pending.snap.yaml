@@ -1,0 +1,56 @@
+
+[IdentityServerNode configuration Label-based config discovery Pending validation status should set AppliedConfigs status to Pending when not yet validated - 1]
+metadata:
+  name: cfg-pend-admin
+  namespace: e2e-cfg-pending
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: cfg-pend-cluster
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: admin
+  role: admin-role
+  ui:
+    enabled: true
+    secure: true
+  identityServerClusterRef:
+    name: cfg-pend-cluster
+  replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  deploymentName: cfg-pend-admin
+  serviceName: cfg-pend-admin
+  appliedConfigs:
+    - name: pending-config
+      kind: ConfigMap
+      configType: base
+      validationStatus: Pending
+
+---

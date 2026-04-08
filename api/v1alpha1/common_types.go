@@ -17,11 +17,12 @@ const (
 
 // Condition type constants for status reporting.
 const (
-	ConditionReady              = "Ready"
-	ConditionAvailable          = "Available"
-	ConditionProgressing        = "Progressing"
-	ConditionDegraded           = "Degraded"
-	ConditionClusterConfigReady = "ClusterConfigReady"
+	ConditionReady                 = "Ready"
+	ConditionAvailable             = "Available"
+	ConditionProgressing           = "Progressing"
+	ConditionDegraded              = "Degraded"
+	ConditionClusterConfigReady    = "ClusterConfigReady"
+	ConditionConfigValidationReady = "ConfigValidationReady"
 )
 
 // Finalizer names.
@@ -134,6 +135,32 @@ type AutoscalingSpec struct {
 type PDBSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	MinAvailable *int32 `json:"minAvailable,omitempty"`
+}
+
+// Validation status values for AppliedConfigStatus.
+const (
+	ValidationStatusValidated = "Validated"
+	ValidationStatusPending   = "Pending"
+	ValidationStatusFailed    = "Failed"
+)
+
+// AppliedConfigStatus represents the status of a discovered configuration resource.
+// +kubebuilder:object:generate=true
+type AppliedConfigStatus struct {
+	// Name is the name of the ConfigMap or Secret.
+	Name string `json:"name"`
+
+	// Kind is "ConfigMap" or "Secret".
+	// +kubebuilder:validation:Enum=ConfigMap;Secret
+	Kind string `json:"kind"`
+
+	// ConfigType is the curity.io/config-type annotation value ("base" or "license").
+	// +kubebuilder:validation:Enum=base;license
+	ConfigType string `json:"configType"`
+
+	// ValidationStatus is "Validated", "Pending", or "Failed".
+	// +kubebuilder:validation:Enum=Validated;Pending;Failed
+	ValidationStatus string `json:"validationStatus"`
 }
 
 // LoggingSpec configures logging behavior.

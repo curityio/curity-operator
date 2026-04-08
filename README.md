@@ -256,14 +256,15 @@ kubectl get isn admin -o jsonpath='{.status.appliedConfigs}'
 
 **What validation does not catch:**
 - Semantic errors that only surface in full cluster mode (e.g., HTTPS service role without an SSL key configured)
-- Unreachable datasource connections
-- Cross-reference errors between config fragments
 
 If validation fails, the `ConfigValidationReady` condition on the cluster shows the reason. Configs are **not** mounted until validation passes. Fix the config content to retry automatically, or delete the validation Job manually for transient infrastructure failures.
 
 ### Admin Routing
 
-When an admin node exists, only the admin receives managed configs. It distributes configuration to runtime nodes via the Curity clustering protocol. In runtime-only clusters (no admin node), all nodes receive configs directly.
+Config volumes are mounted based on whether an admin node exists:
+
+- **With admin node**: Only the admin pod gets the config volumes. Runtime pods do not.
+- **Without admin node** (runtime-only cluster): All runtime pods get the config volumes.
 
 ### Namespace Scoping
 

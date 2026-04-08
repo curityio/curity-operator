@@ -18,5 +18,31 @@ spec:
   identityServerClusterRef:
     name: log-cluster
   replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  deploymentName: log-node
+  serviceName: log-node
 
 ---

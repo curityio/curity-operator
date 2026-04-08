@@ -7,7 +7,7 @@ Built with Go and controller-runtime, distributed via Helm and GHCR.
 
 The operator uses a **two-CRD design**:
 
-- **IdentityServerCluster** (`isc`) — cluster-wide configuration: version, credentials, data sources, logging, scheduling defaults.
+- **IdentityServerCluster** (`isc`) — cluster-wide configuration: version, credentials, logging, scheduling defaults.
 - **IdentityServerNode** (`isn`) — individual node deployments (admin or runtime). Each node references a cluster and inherits its settings, with optional node-level overrides.
 
 The operator automatically creates Deployments, Services, and Secrets for each node. Cluster-level settings (resources, probes, scheduling, labels) are inherited by nodes unless overridden.
@@ -167,8 +167,6 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `image` | string | Override container image (for private mirrors) |
 | `imagePullSecret` | string | Secret name for pulling images |
 | `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`, `KEYSTORE_PASSWORD`; auto-generated if omitted |
-| `configuration` | object | ConfigMap/Secret sources for XML config |
-| `dataSources` | list | Database connection specs (PostgreSQL); each injects env vars from a Secret |
 | `logging` | object | Log level, stdout tailing, sidecar config |
 | `resources` | object | Default CPU/memory requests/limits |
 | `probes` | object | Default liveness/readiness probe config |

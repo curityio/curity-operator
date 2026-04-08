@@ -36,7 +36,7 @@ func TestBuildDeployment_AdminArgs(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	args := deploy.Spec.Template.Spec.Containers[0].Args
 	assertContains(t, args, "--admin")
@@ -49,7 +49,7 @@ func TestBuildDeployment_RuntimeArgs(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	args := deploy.Spec.Template.Spec.Containers[0].Args
 	assertContains(t, args, "--no-admin")
@@ -62,7 +62,7 @@ func TestBuildDeployment_AdminPorts(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
 
 	assertPortExists(t, ports, "config", portConfig)
@@ -77,7 +77,7 @@ func TestBuildDeployment_RuntimePorts(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
 
 	assertPortExists(t, ports, "http", portHTTP)
@@ -93,7 +93,7 @@ func TestBuildDeployment_AdminReplicasForcedTo1(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.Replicas = ptr.To(int32(5))
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	if *deploy.Spec.Replicas != 1 {
 		t.Errorf("expected admin replicas to be 1, got %d", *deploy.Spec.Replicas)
@@ -105,7 +105,7 @@ func TestBuildDeployment_RuntimeReplicasFromSpec(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Replicas = ptr.To(int32(3))
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	if *deploy.Spec.Replicas != 3 {
 		t.Errorf("expected runtime replicas to be 3, got %d", *deploy.Spec.Replicas)
@@ -116,7 +116,7 @@ func TestBuildDeployment_DefaultImage(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	image := deploy.Spec.Template.Spec.Containers[0].Image
 
 	expected := "curity.azurecr.io/curity/idsvr:11.0"
@@ -130,7 +130,7 @@ func TestBuildDeployment_ImageOverride(t *testing.T) {
 	cluster.Spec.Image = "my-registry/curity:custom"
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	image := deploy.Spec.Template.Spec.Containers[0].Image
 
 	if image != "my-registry/curity:custom" {
@@ -143,7 +143,7 @@ func TestBuildDeployment_ImagePullSecret(t *testing.T) {
 	cluster.Spec.ImagePullSecret = "my-secret"
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	if len(deploy.Spec.Template.Spec.ImagePullSecrets) != 1 {
 		t.Fatalf("expected 1 image pull secret, got %d", len(deploy.Spec.Template.Spec.ImagePullSecrets))
@@ -157,7 +157,7 @@ func TestBuildDeployment_SecurityContext(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	podSC := deploy.Spec.Template.Spec.SecurityContext
 
 	if *podSC.RunAsUser != 10001 {
@@ -177,7 +177,7 @@ func TestBuildDeployment_LabelMerging(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.PodLabels = map[string]string{"shared": "node-val", "custom": "true"}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	labels := deploy.Spec.Template.Labels
 
 	if labels["team"] != "platform" {
@@ -197,7 +197,7 @@ func TestBuildDeployment_AnnotationMerging(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.PodAnnotations = map[string]string{"team": "identity"}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	annotations := deploy.Spec.Template.Annotations
 
 	if annotations["prometheus.io/scrape"] != "true" {
@@ -218,7 +218,7 @@ func TestBuildDeployment_NodeResourcesOverrideCluster(t *testing.T) {
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	cpu := deploy.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 
 	if cpu.String() != "2" {
@@ -233,7 +233,7 @@ func TestBuildDeployment_ClusterResourcesUsedWhenNodeNil(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	cpu := deploy.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 
 	if cpu.String() != "500m" {
@@ -245,7 +245,7 @@ func TestBuildDeployment_ProbeDefaults(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	liveness := deploy.Spec.Template.Spec.Containers[0].LivenessProbe
 	readiness := deploy.Spec.Template.Spec.Containers[0].ReadinessProbe
 
@@ -266,7 +266,7 @@ func TestBuildDeployment_ProbeOverrides(t *testing.T) {
 		},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	liveness := deploy.Spec.Template.Spec.Containers[0].LivenessProbe
 
 	if liveness.InitialDelaySeconds != 60 {
@@ -283,7 +283,7 @@ func TestBuildDeployment_UIEnabled(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(false)}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
@@ -296,7 +296,7 @@ func TestBuildDeployment_UIDisabled(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: false}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
 
 	assertPortNotExists(t, ports, "admin-ui")
@@ -309,7 +309,7 @@ func TestBuildDeployment_EnvironmentVariables(t *testing.T) {
 		{Name: "CUSTOM_VAR", Value: "custom-value"},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertEnvVar(t, envVars, "STATUS_CMD_PORT", "4465")
@@ -321,7 +321,7 @@ func TestBuildDeployment_LoggingLevelDefault(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "INFO")
 }
 
@@ -330,7 +330,7 @@ func TestBuildDeployment_LoggingLevelFromCluster(t *testing.T) {
 	cluster.Spec.Logging = &v1alpha1.LoggingSpec{Level: "DEBUG"}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "DEBUG")
 }
 
@@ -340,7 +340,7 @@ func TestBuildDeployment_LoggingLevelNodeOverridesCluster(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "TRACE"}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "TRACE")
 }
 
@@ -349,7 +349,7 @@ func TestBuildDeployment_LoggingLevelOff(t *testing.T) {
 	cluster.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF"}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "OFF")
 }
 
@@ -358,7 +358,7 @@ func TestBuildDeployment_LoggingOffSuppressesSidecars(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF", Stdout: true, Logs: []string{"audit"}}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
 		t.Errorf("expected 1 container (no sidecars when OFF), got %d", len(deploy.Spec.Template.Spec.Containers))
@@ -379,7 +379,7 @@ func TestBuildDeployment_LoggingOffClusterNodeStdoutOverride(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{"audit"}}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "OFF")
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
@@ -396,7 +396,7 @@ func TestBuildDeployment_LoggingStdoutDisabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	// stdout=false (default) → no log volume, no sidecars
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
 		t.Errorf("expected 1 container (no sidecars), got %d", len(deploy.Spec.Template.Spec.Containers))
@@ -413,7 +413,7 @@ func TestBuildDeployment_LoggingStdoutEnabledNoLogs(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{}}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	// Volume should exist (stdout=true) but no sidecars (logs=[])
 	foundLogVol := false
@@ -438,7 +438,7 @@ func TestBuildDeployment_LoggingSidecars(t *testing.T) {
 		Logs:   []string{"audit", "request"},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	// 1 main + 2 sidecars
 	if len(deploy.Spec.Template.Spec.Containers) != 3 {
@@ -480,7 +480,7 @@ func TestBuildDeployment_LoggingCustomImage(t *testing.T) {
 		Image:  "alpine:3.19",
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	sidecar := deploy.Spec.Template.Spec.Containers[1]
 	if sidecar.Image != "alpine:3.19" {
 		t.Errorf("expected custom image alpine:3.19, got %q", sidecar.Image)
@@ -500,7 +500,7 @@ func TestBuildDeployment_LoggingResources(t *testing.T) {
 		},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	sidecar := deploy.Spec.Template.Spec.Containers[1]
 	cpu := sidecar.Resources.Requests[corev1.ResourceCPU]
 	if cpu.String() != "10m" {
@@ -520,7 +520,7 @@ func TestBuildDeployment_LoggingNodeOverridesCluster(t *testing.T) {
 		Logs:   []string{"cluster"},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	// Node overrides entirely: only 1 sidecar (cluster), not 2 (audit, request)
 	if len(deploy.Spec.Template.Spec.Containers) != 2 {
@@ -633,7 +633,7 @@ func TestBuildDeployment_AdminCredentialsEnvVarUsesPath(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	// Env var name must come from Path, not from a hardcoded mapping
@@ -656,7 +656,7 @@ func TestBuildDeployment_AdminCredentialsMultipleItems(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
@@ -679,7 +679,7 @@ func TestBuildDeployment_AdminCredentialsNoSpecialMapping(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	// Should use Path as-is, not rename to PASSWORD
@@ -706,7 +706,7 @@ func TestBuildDeployment_UIEnabled_AutoInjectsPassword(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
@@ -730,7 +730,7 @@ func TestBuildDeployment_UIEnabled_ExplicitPasswordMapping_NoDuplicate(t *testin
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	// Count PASSWORD env vars — should be exactly one
@@ -751,7 +751,7 @@ func TestBuildDeployment_UIEnabled_NoCredentials_NoPassword(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	for _, e := range envVars {
@@ -777,7 +777,7 @@ func TestBuildDeployment_UIDisabled_NoAutoInject(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: false}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	for _, e := range envVars {
@@ -802,7 +802,7 @@ func TestBuildDeployment_RuntimeNode_NoAutoInject(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	for _, e := range envVars {
@@ -846,7 +846,7 @@ func TestBuildDeployment_DefaultedCredentials_InjectsEnvVars(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
@@ -860,7 +860,7 @@ func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
 	cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
@@ -1107,7 +1107,7 @@ func TestBuildClusterConfigJob_Labels(t *testing.T) {
 
 func TestBuildVolumes_OnlyClusterConfig(t *testing.T) {
 	cluster := newTestCluster()
-	volumes, mounts := buildVolumes(cluster)
+	volumes, mounts := buildVolumes(cluster.Name, nil)
 
 	if len(volumes) != 1 {
 		t.Fatalf("expected exactly 1 volume, got %d", len(volumes))
@@ -1228,7 +1228,7 @@ func TestBuildDeployment_NodeSelectorClusterOnly(t *testing.T) {
 	cluster.Spec.NodeSelector = map[string]string{"pool": "curity", "env": "prod"}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	ns := deploy.Spec.Template.Spec.NodeSelector
 	if ns["pool"] != "curity" || ns["env"] != "prod" {
@@ -1241,7 +1241,7 @@ func TestBuildDeployment_NodeSelectorNodeOnly(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.NodeSelector = map[string]string{"disk": "ssd"}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	ns := deploy.Spec.Template.Spec.NodeSelector
 	if ns["disk"] != "ssd" {
@@ -1255,7 +1255,7 @@ func TestBuildDeployment_NodeSelectorMerge(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.NodeSelector = map[string]string{"pool": "gpu", "disk": "ssd"}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	ns := deploy.Spec.Template.Spec.NodeSelector
 	if ns["pool"] != "gpu" {
@@ -1276,7 +1276,7 @@ func TestBuildDeployment_TolerationsClusterOnly(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	tols := deploy.Spec.Template.Spec.Tolerations
 	if len(tols) != 1 || tols[0].Key != "special" {
@@ -1291,7 +1291,7 @@ func TestBuildDeployment_TolerationsNodeOnly(t *testing.T) {
 		{Key: "gpu", Operator: corev1.TolerationOpEqual, Value: "true"},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	tols := deploy.Spec.Template.Spec.Tolerations
 	if len(tols) != 1 || tols[0].Key != "gpu" {
@@ -1310,7 +1310,7 @@ func TestBuildDeployment_TolerationsNodeOverridesCluster(t *testing.T) {
 		{Key: "new", Operator: corev1.TolerationOpEqual, Value: "yes"},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	tols := deploy.Spec.Template.Spec.Tolerations
 	if len(tols) != 1 || tols[0].Key != "new" {
@@ -1335,7 +1335,7 @@ func TestBuildDeployment_AffinityClusterOnly(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	aff := deploy.Spec.Template.Spec.Affinity
 	if aff == nil || aff.NodeAffinity == nil {
@@ -1357,7 +1357,7 @@ func TestBuildDeployment_AffinityNodeOnly(t *testing.T) {
 		},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	aff := deploy.Spec.Template.Spec.Affinity
 	if aff == nil || aff.PodAntiAffinity == nil {
@@ -1375,7 +1375,7 @@ func TestBuildDeployment_AffinityNodeOverridesCluster(t *testing.T) {
 		PodAntiAffinity: &corev1.PodAntiAffinity{},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	aff := deploy.Spec.Template.Spec.Affinity
 	if aff.NodeAffinity != nil {
@@ -1395,7 +1395,7 @@ func TestBuildDeployment_TopologySpreadClusterOnly(t *testing.T) {
 	}}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	tsc := deploy.Spec.Template.Spec.TopologySpreadConstraints
 	if len(tsc) != 1 || tsc[0].TopologyKey != "topology.kubernetes.io/zone" {
@@ -1412,7 +1412,7 @@ func TestBuildDeployment_TopologySpreadNodeOnly(t *testing.T) {
 		WhenUnsatisfiable: corev1.DoNotSchedule,
 	}}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	tsc := deploy.Spec.Template.Spec.TopologySpreadConstraints
 	if len(tsc) != 1 || tsc[0].TopologyKey != "kubernetes.io/hostname" {
@@ -1431,7 +1431,7 @@ func TestBuildDeployment_TopologySpreadNodeOverridesCluster(t *testing.T) {
 		{MaxSkew: 3, TopologyKey: "hostname", WhenUnsatisfiable: corev1.DoNotSchedule},
 	}
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	tsc := deploy.Spec.Template.Spec.TopologySpreadConstraints
 	if len(tsc) != 1 || tsc[0].TopologyKey != "hostname" {
@@ -1443,7 +1443,7 @@ func TestBuildDeployment_SchedulingNilSafe(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node)
+	deploy := buildDeployment(cluster, node, nil)
 
 	if deploy.Spec.Template.Spec.NodeSelector != nil {
 		t.Error("expected nil nodeSelector")
@@ -1472,5 +1472,133 @@ func TestBuildClusterConfigJob_TopologySpreadConstraints(t *testing.T) {
 	tsc := job.Spec.Template.Spec.TopologySpreadConstraints
 	if len(tsc) != 1 || tsc[0].TopologyKey != "topology.kubernetes.io/zone" {
 		t.Errorf("expected topology spread on job, got %v", tsc)
+	}
+}
+
+// --- buildVolumes with discovered configs ---
+
+func TestBuildVolumes_BaseConfigMap(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "base-cm", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"config.xml": []byte("<c/>")}},
+	}
+	volumes, mounts := buildVolumes("cluster-1", configs)
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes (cluster-config + base-cm), got %d", len(volumes))
+	}
+	if volumes[0].Name != "cluster-config" {
+		t.Errorf("expected first volume to be cluster-config, got %q", volumes[0].Name)
+	}
+	vol := volumes[1]
+	if vol.ConfigMap == nil || vol.ConfigMap.Name != "base-cm" {
+		t.Errorf("expected ConfigMap volume for base-cm, got %v", vol)
+	}
+	found := false
+	for _, m := range mounts {
+		if m.SubPath == "config.xml" && m.MountPath == MountPathBase+"config.xml" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected mount at /opt/idsvr/etc/init/config.xml")
+	}
+}
+
+func TestBuildVolumes_LicenseSecret(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "lic", IsSecret: true, ConfigType: ConfigTypeLicense, Data: map[string][]byte{"license.json": []byte("{}")}},
+	}
+	volumes, mounts := buildVolumes("cluster-1", configs)
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes, got %d", len(volumes))
+	}
+	vol := volumes[1]
+	if vol.Secret == nil || vol.Secret.SecretName != "lic" {
+		t.Errorf("expected Secret volume for lic, got %v", vol)
+	}
+	found := false
+	for _, m := range mounts {
+		if m.SubPath == "license.json" && m.MountPath == MountPathLicense+"license.json" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected mount at /opt/idsvr/etc/init/license/license.json")
+	}
+}
+
+func TestBuildVolumes_MultipleDiscoveredConfigs(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "cm-1", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
+		{Name: "sec-1", IsSecret: true, ConfigType: ConfigTypeLicense, Data: map[string][]byte{"b.json": []byte("{}")}},
+	}
+	volumes, _ := buildVolumes("cluster-1", configs)
+	// 1 cluster-config + 2 discovered = 3
+	if len(volumes) != 3 {
+		t.Fatalf("expected 3 volumes, got %d", len(volumes))
+	}
+}
+
+func TestBuildVolumes_ClusterConfigAlwaysFirst(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "aaa", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
+	}
+	volumes, _ := buildVolumes("cluster-1", configs)
+	if volumes[0].Name != "cluster-config" {
+		t.Errorf("expected cluster-config first, got %q", volumes[0].Name)
+	}
+}
+
+func TestBuildVolumes_VolumeNaming(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "foo", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"x.xml": []byte("<x/>")}},
+		{Name: "foo", IsSecret: true, ConfigType: ConfigTypeBase, Data: map[string][]byte{"y.xml": []byte("<y/>")}},
+	}
+	volumes, _ := buildVolumes("cluster-1", configs)
+	if len(volumes) != 3 {
+		t.Fatalf("expected 3 volumes, got %d", len(volumes))
+	}
+	// ConfigMap and Secret with same name should have different volume names.
+	if volumes[1].Name == volumes[2].Name {
+		t.Errorf("expected different volume names for cm and secret, both got %q", volumes[1].Name)
+	}
+}
+
+func TestBuildVolumes_DeterministicMountOrder(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "cm", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{
+			"z.xml": []byte("<z/>"),
+			"a.xml": []byte("<a/>"),
+		}},
+	}
+	_, mounts := buildVolumes("cluster-1", configs)
+	// First mount is cluster-config, then sorted keys: a.xml before z.xml
+	configMounts := mounts[1:]
+	if len(configMounts) != 2 {
+		t.Fatalf("expected 2 config mounts, got %d", len(configMounts))
+	}
+	if configMounts[0].SubPath != "a.xml" {
+		t.Errorf("expected first config mount to be a.xml, got %q", configMounts[0].SubPath)
+	}
+	if configMounts[1].SubPath != "z.xml" {
+		t.Errorf("expected second config mount to be z.xml, got %q", configMounts[1].SubPath)
+	}
+}
+
+func TestBuildDeployment_WithDiscoveredConfigs(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	configs := []DiscoveredConfigResource{
+		{Name: "base-config", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"cfg.xml": []byte("<cfg/>")}},
+	}
+	deploy := buildDeployment(cluster, node, configs)
+	container := deploy.Spec.Template.Spec.Containers[0]
+	found := false
+	for _, m := range container.VolumeMounts {
+		if m.SubPath == "cfg.xml" && m.MountPath == MountPathBase+"cfg.xml" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected discovered config mount in deployment container")
 	}
 }

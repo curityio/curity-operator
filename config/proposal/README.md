@@ -20,7 +20,7 @@ labels:
 
 Once a resource is selected, the operator reads the optional `curity.io/config-type`
 annotation to determine which business logic to apply when mounting the configuration.
-When omitted, the type defaults to `basic`:
+When omitted, the type defaults to `base`:
 
 ```yaml
 annotations:
@@ -36,7 +36,7 @@ This separation follows the Kubernetes convention of using **labels for selectio
 
 | Type | Mounted to | Notes |
 |------|-----------|-------|
-| `basic` | `/opt/idsvr/etc/init/` | General XML configuration fragments. Each data key becomes a file at that path. Equivalent to `curity.config.configuration[].configMapRef` in the Helm chart. |
+| `base` | `/opt/idsvr/etc/init/` | General XML configuration fragments. Each data key becomes a file at that path. Equivalent to `curity.config.configuration[].configMapRef` in the Helm chart. |
 | `license` | `/opt/idsvr/etc/init/license/` | License file. Mounted to a dedicated sub-directory under `init` as required by the Identity Server. |
 
 > Additional types (e.g. `post-commit-script`) may be introduced as the operator evolves.
@@ -101,7 +101,7 @@ Values in `#{...}` are substituted at load time from environment variables or
 Use a `Secret` for anything that must not live in a `ConfigMap`: credentials, connection
 strings, or the license file.
 
-**Datasource credentials** (`basic` type — mounts to `/opt/idsvr/etc/init/`):
+**Datasource credentials** (`base` type — mounts to `/opt/idsvr/etc/init/`):
 
 ```yaml
 apiVersion: v1

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -34,7 +35,8 @@ const (
 )
 
 // buildDeployment constructs the desired Deployment for an IdentityServerNode.
-func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *appsv1.Deployment {
+// configs contains the validated discovered ConfigMaps/Secrets to mount (may be nil).
+func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode, configs []DiscoveredConfigResource) *appsv1.Deployment {
 	labels := buildLabels(cluster, node)
 	podAnnotations := mergeMaps(cluster.Spec.PodAnnotations, node.Spec.PodAnnotations)
 	podLabels := mergeMaps(labels, mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels))
@@ -68,7 +70,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 	}
 
 	// Add volume mounts for configuration
-	volumes, mounts := buildVolumes(cluster)
+	volumes, mounts := buildVolumes(cluster.Name, configs)
 	container.VolumeMounts = mounts
 
 	// Resolve logging config (node overrides cluster entirely)
@@ -300,14 +302,15 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 	return envVars
 }
 
-// buildVolumes returns volumes and mounts for the cluster-config (cluster.xml) volume.
-func buildVolumes(cluster *v1alpha1.IdentityServerCluster) ([]corev1.Volume, []corev1.VolumeMount) {
-	var volumes []corev1.Volume
-	var mounts []corev1.VolumeMount
+// buildVolumes returns volumes and mounts for the cluster-config (cluster.xml)
+// and any discovered config resources. Cluster-config is always first.
+func buildVolumes(clusterName string, configs []DiscoveredConfigResource) ([]corev1.Volume, []corev1.VolumeMount) {
+	volumes := make([]corev1.Volume, 0, 1+len(configs))
+	mounts := make([]corev1.VolumeMount, 0, 1+len(configs))
 
 	// Cluster config (cluster.xml) — always mounted for inter-node TLS.
 	// Optional so pods can start before the genclust Job completes.
-	secretName := cluster.Name + "-cluster-config"
+	secretName := clusterName + "-cluster-config"
 	volumes = append(volumes, corev1.Volume{
 		Name: "cluster-config",
 		VolumeSource: corev1.VolumeSource{
@@ -326,6 +329,47 @@ func buildVolumes(cluster *v1alpha1.IdentityServerCluster) ([]corev1.Volume, []c
 		SubPath:   "cluster.xml",
 		ReadOnly:  true,
 	})
+
+	// Discovered config volumes.
+	for _, cfg := range configs {
+		volName := configVolumeName(cfg.IsSecret, cfg.Name)
+		mountBase := mountPathForConfigType(cfg.ConfigType)
+
+		if cfg.IsSecret {
+			volumes = append(volumes, corev1.Volume{
+				Name: volName,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: cfg.Name,
+					},
+				},
+			})
+		} else {
+			volumes = append(volumes, corev1.Volume{
+				Name: volName,
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: cfg.Name},
+					},
+				},
+			})
+		}
+
+		// Mount each data key as a SubPath mount.
+		keys := make([]string, 0, len(cfg.Data))
+		for k := range cfg.Data {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			mounts = append(mounts, corev1.VolumeMount{
+				Name:      volName,
+				MountPath: mountBase + key,
+				SubPath:   key,
+				ReadOnly:  true,
+			})
+		}
+	}
 
 	return volumes, mounts
 }

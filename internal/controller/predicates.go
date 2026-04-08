@@ -76,7 +76,42 @@ func (p clusterSpecOrNodeCountChangedPredicate) Update(e event.UpdateEvent) bool
 	if !oldOK || !newOK {
 		return true
 	}
-	return oldCluster.Status.NodeCount != newCluster.Status.NodeCount
+	if oldCluster.Status.NodeCount != newCluster.Status.NodeCount {
+		return true
+	}
+
+	// Check if the validated config hash annotation changed. This annotation
+	// is set by the cluster reconciler when config validation succeeds, and
+	// nodes need to re-reconcile to mount the newly validated configs.
+	return e.ObjectOld.GetAnnotations()[annotationValidatedConfigHash] !=
+		e.ObjectNew.GetAnnotations()[annotationValidatedConfigHash]
+}
+
+// managedConfigPredicate passes events for ConfigMaps/Secrets that have (or had)
+// the curity.io/managed=true label. For updates, it checks both old and new objects
+// so that label removal also triggers reconciliation (to un-mount the config).
+type managedConfigPredicate struct {
+	predicate.Funcs
+}
+
+func (p managedConfigPredicate) Create(e event.CreateEvent) bool {
+	return hasManagedLabel(e.Object)
+}
+
+func (p managedConfigPredicate) Update(e event.UpdateEvent) bool {
+	return hasManagedLabel(e.ObjectNew) || hasManagedLabel(e.ObjectOld)
+}
+
+func (p managedConfigPredicate) Delete(e event.DeleteEvent) bool {
+	return hasManagedLabel(e.Object)
+}
+
+// hasManagedLabel returns true if the object carries curity.io/managed=true.
+func hasManagedLabel(obj client.Object) bool {
+	if obj == nil {
+		return false
+	}
+	return obj.GetLabels()[LabelManagedConfig] == "true"
 }
 
 // conditionsEqual returns true if two condition slices are semantically equal.

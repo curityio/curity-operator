@@ -236,6 +236,29 @@ func TestClusterPredicate_UpdateNoMaterialChange(t *testing.T) {
 	}
 }
 
+func TestClusterPredicate_UpdateValidatedConfigHashChanged(t *testing.T) {
+	p := clusterSpecOrNodeCountChangedPredicate{}
+	old := cluster(1, 2)
+	new := cluster(1, 2)
+	new.Annotations = map[string]string{annotationValidatedConfigHash: "abc123"}
+	e := event.UpdateEvent{ObjectOld: old, ObjectNew: new}
+	if !p.Update(e) {
+		t.Error("expected pass when validated config hash annotation changed")
+	}
+}
+
+func TestClusterPredicate_UpdateValidatedConfigHashUnchanged(t *testing.T) {
+	p := clusterSpecOrNodeCountChangedPredicate{}
+	old := cluster(1, 2)
+	old.Annotations = map[string]string{annotationValidatedConfigHash: "abc123"}
+	new := cluster(1, 2)
+	new.Annotations = map[string]string{annotationValidatedConfigHash: "abc123"}
+	e := event.UpdateEvent{ObjectOld: old, ObjectNew: new}
+	if p.Update(e) {
+		t.Error("expected block when validated config hash unchanged")
+	}
+}
+
 func TestClusterPredicate_UpdateStatusOnlyNoNodeCountChange(t *testing.T) {
 	p := clusterSpecOrNodeCountChangedPredicate{}
 	old := cluster(1, 2)
@@ -298,5 +321,101 @@ func cluster(generation int64, nodeCount int32) *v1alpha1.IdentityServerCluster 
 	return &v1alpha1.IdentityServerCluster{
 		ObjectMeta: metav1.ObjectMeta{Generation: generation},
 		Status:     v1alpha1.IdentityServerClusterStatus{NodeCount: nodeCount},
+	}
+}
+
+// --- managedConfigPredicate ---
+
+func configMapWithLabels(labels map[string]string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "test-cm",
+			Labels: labels,
+		},
+	}
+}
+
+func TestManagedConfigPredicate_CreateWithLabel(t *testing.T) {
+	p := managedConfigPredicate{}
+	e := event.CreateEvent{Object: configMapWithLabels(map[string]string{LabelManagedConfig: "true"})}
+	if !p.Create(e) {
+		t.Error("expected pass for labeled ConfigMap create")
+	}
+}
+
+func TestManagedConfigPredicate_CreateWithoutLabel(t *testing.T) {
+	p := managedConfigPredicate{}
+	e := event.CreateEvent{Object: configMapWithLabels(nil)}
+	if p.Create(e) {
+		t.Error("expected filter for unlabeled ConfigMap create")
+	}
+}
+
+func TestManagedConfigPredicate_UpdateDataChange(t *testing.T) {
+	p := managedConfigPredicate{}
+	managed := map[string]string{LabelManagedConfig: "true"}
+	e := event.UpdateEvent{
+		ObjectOld: configMapWithLabels(managed),
+		ObjectNew: configMapWithLabels(managed),
+	}
+	if !p.Update(e) {
+		t.Error("expected pass for labeled ConfigMap update")
+	}
+}
+
+func TestManagedConfigPredicate_UpdateLabelAdded(t *testing.T) {
+	p := managedConfigPredicate{}
+	e := event.UpdateEvent{
+		ObjectOld: configMapWithLabels(nil),
+		ObjectNew: configMapWithLabels(map[string]string{LabelManagedConfig: "true"}),
+	}
+	if !p.Update(e) {
+		t.Error("expected pass when managed label added")
+	}
+}
+
+func TestManagedConfigPredicate_UpdateLabelRemoved(t *testing.T) {
+	p := managedConfigPredicate{}
+	e := event.UpdateEvent{
+		ObjectOld: configMapWithLabels(map[string]string{LabelManagedConfig: "true"}),
+		ObjectNew: configMapWithLabels(nil),
+	}
+	if !p.Update(e) {
+		t.Error("expected pass when managed label removed (to un-mount)")
+	}
+}
+
+func TestManagedConfigPredicate_UpdateNoLabel(t *testing.T) {
+	p := managedConfigPredicate{}
+	e := event.UpdateEvent{
+		ObjectOld: configMapWithLabels(nil),
+		ObjectNew: configMapWithLabels(nil),
+	}
+	if p.Update(e) {
+		t.Error("expected filter when neither old nor new has label")
+	}
+}
+
+func TestManagedConfigPredicate_DeleteWithLabel(t *testing.T) {
+	p := managedConfigPredicate{}
+	e := event.DeleteEvent{Object: configMapWithLabels(map[string]string{LabelManagedConfig: "true"})}
+	if !p.Delete(e) {
+		t.Error("expected pass for labeled ConfigMap delete")
+	}
+}
+
+func TestManagedConfigPredicate_DeleteWithoutLabel(t *testing.T) {
+	p := managedConfigPredicate{}
+	e := event.DeleteEvent{Object: configMapWithLabels(nil)}
+	if p.Delete(e) {
+		t.Error("expected filter for unlabeled ConfigMap delete")
+	}
+}
+
+func TestManagedConfigPredicate_CreateNilObject(t *testing.T) {
+	p := managedConfigPredicate{}
+	e := event.CreateEvent{Object: nil}
+	if p.Create(e) {
+		t.Error("expected filter for nil object")
 	}
 }

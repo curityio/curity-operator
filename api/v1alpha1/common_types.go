@@ -184,7 +184,7 @@ type LoggingSpec struct {
 	Stdout bool `json:"stdout,omitempty"`
 
 	// Logs is the list of Curity log files to stream when stdout is enabled.
-	// Common values: audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts.
+	// Allowed values: audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts.
 	// +kubebuilder:validation:MaxItems=32
 	// +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts
 	Logs []string `json:"logs,omitempty"`

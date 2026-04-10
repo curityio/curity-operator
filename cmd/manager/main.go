@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,6 +32,7 @@ func init() {
 	utilruntime.Must(corev1.AddToScheme(scheme))
 	utilruntime.Must(appsv1.AddToScheme(scheme))
 	utilruntime.Must(batchv1.AddToScheme(scheme))
+	utilruntime.Must(autoscalingv2.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 }
 

@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -130,7 +131,7 @@ type configHashEntry struct {
 }
 
 // testComputeConfigHash mirrors computeConfigHash() from config_discovery.go.
-// See config_discovery.go:198 for the canonical implementation.
+// See computeConfigHash() in config_discovery.go for the canonical implementation.
 func testComputeConfigHash(entries []configHashEntry) string {
 	if len(entries) == 0 {
 		return ""
@@ -1126,6 +1127,50 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			err := k8sClient.Create(ctx, node)
 			Expect(err).To(HaveOccurred(), "replicas=0 should be rejected by Minimum=1")
 			Expect(err.Error()).To(ContainSubstring("spec.replicas"))
+		})
+
+		// --- Autoscaling validations ---
+
+		It("should reject node with minReplicas > maxReplicas", func() {
+			testCreateCluster(ns, "val-cluster-hpa")
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-bad-hpa", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeRuntime,
+					Role:                     "bad-hpa-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-hpa"},
+					Replicas:                 ptr.To(int32(1)),
+					Autoscaling: &v1alpha1.AutoscalingSpec{
+						Enabled:                        true,
+						MinReplicas:                    10,
+						MaxReplicas:                    5,
+						TargetCPUUtilizationPercentage: 80,
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, node)
+			Expect(err).To(HaveOccurred(), "minReplicas > maxReplicas should be rejected by CEL validation")
+			Expect(err.Error()).To(ContainSubstring("minReplicas must be less than or equal to maxReplicas"))
+		})
+
+		It("should accept node with minReplicas == maxReplicas", func() {
+			testCreateCluster(ns, "val-cluster-hpa-eq")
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-hpa-eq", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeRuntime,
+					Role:                     "hpa-eq-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-hpa-eq"},
+					Replicas:                 ptr.To(int32(1)),
+					Autoscaling: &v1alpha1.AutoscalingSpec{
+						Enabled:                        true,
+						MinReplicas:                    5,
+						MaxReplicas:                    5,
+						TargetCPUUtilizationPercentage: 80,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed(), "minReplicas == maxReplicas should be accepted")
 		})
 
 		// --- Service validations ---
@@ -2566,5 +2611,182 @@ var _ = Describe("Deployment scheduling", func() {
 			_ = k8sClient.Get(ctx, types.NamespacedName{Name: "update-node", Namespace: ns}, deploy)
 			return deploy.Spec.Template.Spec.NodeSelector["env"]
 		}, timeout, interval).Should(Equal("production"))
+	})
+
+	// =================================================================
+	// HPA lifecycle
+	// =================================================================
+
+	It("should create HPA for runtime node with autoscaling enabled", func() {
+		testCreateCluster(ns, "hpa-cluster")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "hpa-node", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "hpa-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-cluster"},
+				Replicas:                 ptr.To(int32(1)),
+				Autoscaling: &v1alpha1.AutoscalingSpec{
+					Enabled:                        true,
+					MinReplicas:                    2,
+					MaxReplicas:                    10,
+					TargetCPUUtilizationPercentage: 80,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+		hpa := &autoscalingv2.HorizontalPodAutoscaler{}
+		eventuallyGetResource(ns, "hpa-node", hpa)
+
+		Expect(hpa.Spec.ScaleTargetRef.Kind).To(Equal("Deployment"))
+		Expect(hpa.Spec.ScaleTargetRef.Name).To(Equal("hpa-node"))
+		Expect(*hpa.Spec.MinReplicas).To(Equal(int32(2)))
+		Expect(hpa.Spec.MaxReplicas).To(Equal(int32(10)))
+		Expect(hpa.OwnerReferences).To(HaveLen(1))
+		Expect(hpa.OwnerReferences[0].Kind).To(Equal("IdentityServerNode"))
+	})
+
+	It("should set Deployment replicas to minReplicas when HPA enabled", func() {
+		testCreateCluster(ns, "hpa-rep-cluster")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "hpa-rep-node", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "hpa-rep-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-rep-cluster"},
+				Replicas:                 ptr.To(int32(5)),
+				Autoscaling: &v1alpha1.AutoscalingSpec{
+					Enabled:                        true,
+					MinReplicas:                    3,
+					MaxReplicas:                    10,
+					TargetCPUUtilizationPercentage: 80,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+		deploy := &appsv1.Deployment{}
+		eventuallyGetResource(ns, "hpa-rep-node", deploy)
+
+		Eventually(func(g Gomega) int32 {
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "hpa-rep-node", Namespace: ns}, deploy)).To(Succeed())
+			if deploy.Spec.Replicas == nil {
+				return 0
+			}
+			return *deploy.Spec.Replicas
+		}, 30*time.Second, 250*time.Millisecond).Should(Equal(int32(3)))
+	})
+
+	It("should not create HPA for admin node", func() {
+		testCreateCluster(ns, "hpa-adm-cluster")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "hpa-admin", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeAdmin,
+				Role:                     "admin-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-adm-cluster"},
+				Replicas:                 ptr.To(int32(1)),
+				Autoscaling: &v1alpha1.AutoscalingSpec{
+					Enabled:                        true,
+					MinReplicas:                    2,
+					MaxReplicas:                    10,
+					TargetCPUUtilizationPercentage: 80,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+		// Wait for Deployment to confirm reconciliation happened
+		deploy := &appsv1.Deployment{}
+		eventuallyGetResource(ns, "hpa-admin", deploy)
+		Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
+
+		// HPA should never be created
+		Consistently(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx,
+				types.NamespacedName{Name: "hpa-admin", Namespace: ns},
+				&autoscalingv2.HorizontalPodAutoscaler{}))
+		}, 5*time.Second, 250*time.Millisecond).Should(BeTrue())
+	})
+
+	It("should delete HPA when autoscaling is disabled", func() {
+		testCreateCluster(ns, "hpa-del-cluster")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "hpa-del-node", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "del-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-del-cluster"},
+				Replicas:                 ptr.To(int32(1)),
+				Autoscaling: &v1alpha1.AutoscalingSpec{
+					Enabled:                        true,
+					MinReplicas:                    2,
+					MaxReplicas:                    10,
+					TargetCPUUtilizationPercentage: 80,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+		// Wait for HPA to be created
+		eventuallyGetResource(ns, "hpa-del-node", &autoscalingv2.HorizontalPodAutoscaler{})
+
+		// Disable autoscaling
+		Eventually(func() error {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hpa-del-node", Namespace: ns}, node); err != nil {
+				return err
+			}
+			node.Spec.Autoscaling.Enabled = false
+			return k8sClient.Update(ctx, node)
+		}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
+
+		// HPA should be deleted
+		eventuallyDeleted(ns, "hpa-del-node", &autoscalingv2.HorizontalPodAutoscaler{})
+	})
+
+	It("should clean up stale HPA when node type changes to admin", func() {
+		testCreateCluster(ns, "hpa-stale-cluster")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "hpa-stale", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "stale-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-stale-cluster"},
+				Replicas:                 ptr.To(int32(1)),
+				Autoscaling: &v1alpha1.AutoscalingSpec{
+					Enabled:                        true,
+					MinReplicas:                    2,
+					MaxReplicas:                    10,
+					TargetCPUUtilizationPercentage: 80,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+		// Wait for HPA to be created
+		eventuallyGetResource(ns, "hpa-stale", &autoscalingv2.HorizontalPodAutoscaler{})
+
+		// Change node type to admin
+		Eventually(func() error {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hpa-stale", Namespace: ns}, node); err != nil {
+				return err
+			}
+			node.Spec.Type = v1alpha1.NodeTypeAdmin
+			return k8sClient.Update(ctx, node)
+		}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
+
+		// HPA should be cleaned up even though node is now admin
+		eventuallyDeleted(ns, "hpa-stale", &autoscalingv2.HorizontalPodAutoscaler{})
+
+		// Deployment replicas should be forced to 1
+		deploy := &appsv1.Deployment{}
+		Eventually(func(g Gomega) int32 {
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "hpa-stale", Namespace: ns}, deploy)).To(Succeed())
+			if deploy.Spec.Replicas == nil {
+				return 0
+			}
+			return *deploy.Spec.Replicas
+		}, 30*time.Second, 250*time.Millisecond).Should(Equal(int32(1)))
 	})
 })

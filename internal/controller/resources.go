@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -41,7 +42,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 	podAnnotations := mergeMaps(cluster.Spec.PodAnnotations, node.Spec.PodAnnotations)
 	podLabels := mergeMaps(labels, mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels))
 
-	replicas := resolveReplicas(node)
+	replicas := resolveReplicas(cluster, node)
 	resources := resolveResources(cluster, node)
 	probes := resolveProbes(cluster, node)
 
@@ -397,14 +398,27 @@ func buildSelectorLabels(node *v1alpha1.IdentityServerNode) map[string]string {
 
 // resolveReplicas returns the replica count for the Deployment.
 // Admin nodes are always forced to 1 replica.
-func resolveReplicas(node *v1alpha1.IdentityServerNode) *int32 {
+// Runtime nodes with HPA enabled return minReplicas as the initial baseline.
+func resolveReplicas(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *int32 {
 	if node.Spec.Type == v1alpha1.NodeTypeAdmin {
 		return ptr.To(int32(1))
+	}
+	as := resolveAutoscaling(cluster, node)
+	if as != nil && as.Enabled {
+		return ptr.To(as.MinReplicas)
 	}
 	if node.Spec.Replicas != nil {
 		return node.Spec.Replicas
 	}
 	return ptr.To(int32(1))
+}
+
+// resolveAutoscaling returns the effective autoscaling spec, preferring node over cluster entirely.
+func resolveAutoscaling(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *v1alpha1.AutoscalingSpec {
+	if node.Spec.Autoscaling != nil {
+		return node.Spec.Autoscaling
+	}
+	return cluster.Spec.Autoscaling
 }
 
 // resolveResources returns the resource requirements, preferring node over cluster.
@@ -595,4 +609,42 @@ func mergeMaps(base, override map[string]string) map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+// buildHPA constructs the desired HorizontalPodAutoscaler for a runtime node.
+// The as parameter must be non-nil; callers must guard with a nil/enabled check.
+func buildHPA(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode, as *v1alpha1.AutoscalingSpec) *autoscalingv2.HorizontalPodAutoscaler {
+
+	metrics := []autoscalingv2.MetricSpec{
+		{
+			Type: autoscalingv2.ResourceMetricSourceType,
+			Resource: &autoscalingv2.ResourceMetricSource{
+				Name: corev1.ResourceCPU,
+				Target: autoscalingv2.MetricTarget{
+					Type:               autoscalingv2.UtilizationMetricType,
+					AverageUtilization: ptr.To(as.TargetCPUUtilizationPercentage),
+				},
+			},
+		},
+	}
+
+	metrics = append(metrics, as.CustomMetrics...)
+
+	return &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      node.Name,
+			Namespace: node.Namespace,
+			Labels:    buildLabels(cluster, node),
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       node.Name,
+			},
+			MinReplicas: ptr.To(as.MinReplicas),
+			MaxReplicas: as.MaxReplicas,
+			Metrics:     metrics,
+		},
+	}
 }

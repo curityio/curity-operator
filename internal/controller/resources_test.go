@@ -3,6 +3,7 @@ package controller
 import (
 	"testing"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1600,5 +1601,350 @@ func TestBuildDeployment_WithDiscoveredConfigs(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected discovered config mount in deployment container")
+	}
+}
+
+// --- resolveAutoscaling tests ---
+
+func TestResolveAutoscaling_BothNil(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	result := resolveAutoscaling(cluster, node)
+	if result != nil {
+		t.Errorf("expected nil, got %+v", result)
+	}
+}
+
+func TestResolveAutoscaling_ClusterOnly(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:                        true,
+		MinReplicas:                    3,
+		MaxReplicas:                    8,
+		TargetCPUUtilizationPercentage: 70,
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	result := resolveAutoscaling(cluster, node)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if !result.Enabled || result.MinReplicas != 3 || result.MaxReplicas != 8 || result.TargetCPUUtilizationPercentage != 70 {
+		t.Errorf("expected cluster spec, got %+v", result)
+	}
+}
+
+func TestResolveAutoscaling_NodeOnly(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:     true,
+		MinReplicas: 1,
+		MaxReplicas: 5,
+	}
+	result := resolveAutoscaling(cluster, node)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.MinReplicas != 1 || result.MaxReplicas != 5 {
+		t.Errorf("expected node spec, got %+v", result)
+	}
+}
+
+func TestResolveAutoscaling_NodeOverridesCluster(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:                        true,
+		MinReplicas:                    2,
+		MaxReplicas:                    10,
+		TargetCPUUtilizationPercentage: 80,
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:                        true,
+		MinReplicas:                    5,
+		MaxReplicas:                    20,
+		TargetCPUUtilizationPercentage: 60,
+	}
+	result := resolveAutoscaling(cluster, node)
+	if result.MinReplicas != 5 || result.MaxReplicas != 20 || result.TargetCPUUtilizationPercentage != 60 {
+		t.Errorf("expected node to override cluster, got %+v", result)
+	}
+}
+
+// --- resolveReplicas tests ---
+
+func TestResolveReplicas_AdminForcedToOne(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{Enabled: true, MinReplicas: 3}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.Replicas = ptr.To(int32(5))
+	result := resolveReplicas(cluster, node)
+	if result == nil || *result != 1 {
+		t.Errorf("expected 1 for admin, got %v", result)
+	}
+}
+
+func TestResolveReplicas_RuntimeFromSpec(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Replicas = ptr.To(int32(3))
+	result := resolveReplicas(cluster, node)
+	if result == nil || *result != 3 {
+		t.Errorf("expected 3, got %v", result)
+	}
+}
+
+func TestResolveReplicas_RuntimeDefaultsToOne(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Replicas = nil
+	result := resolveReplicas(cluster, node)
+	if result == nil || *result != 1 {
+		t.Errorf("expected 1, got %v", result)
+	}
+}
+
+func TestResolveReplicas_HPAEnabledReturnsMinReplicas(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Replicas = ptr.To(int32(5))
+	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{Enabled: true, MinReplicas: 3}
+	result := resolveReplicas(cluster, node)
+	if result == nil || *result != 3 {
+		t.Errorf("expected minReplicas=3, got %v", result)
+	}
+}
+
+func TestResolveReplicas_ClusterLevelHPAReturnsMinReplicas(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{Enabled: true, MinReplicas: 2}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Replicas = ptr.To(int32(3))
+	result := resolveReplicas(cluster, node)
+	if result == nil || *result != 2 {
+		t.Errorf("expected cluster minReplicas=2, got %v", result)
+	}
+}
+
+// --- buildHPA tests ---
+
+func TestBuildHPA_NilAutoscaling(t *testing.T) {
+	// Caller is responsible for nil-checking resolveAutoscaling before calling buildHPA.
+	// Verify resolveAutoscaling returns nil when neither cluster nor node has autoscaling.
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	as := resolveAutoscaling(cluster, node)
+	if as != nil {
+		t.Errorf("expected nil autoscaling, got %+v", as)
+	}
+}
+
+func TestBuildHPA_BasicCPU(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:                        true,
+		MinReplicas:                    2,
+		MaxReplicas:                    10,
+		TargetCPUUtilizationPercentage: 80,
+	}
+	hpa := buildHPA(cluster, node, resolveAutoscaling(cluster, node))
+	if hpa.Name != "node-1" {
+		t.Errorf("expected name node-1, got %q", hpa.Name)
+	}
+	if hpa.Namespace != "test-ns" {
+		t.Errorf("expected namespace test-ns, got %q", hpa.Namespace)
+	}
+	if hpa.Spec.ScaleTargetRef.Kind != "Deployment" {
+		t.Errorf("expected target kind Deployment, got %q", hpa.Spec.ScaleTargetRef.Kind)
+	}
+	if hpa.Spec.ScaleTargetRef.Name != "node-1" {
+		t.Errorf("expected target name node-1, got %q", hpa.Spec.ScaleTargetRef.Name)
+	}
+	if hpa.Spec.ScaleTargetRef.APIVersion != "apps/v1" {
+		t.Errorf("expected apiVersion apps/v1, got %q", hpa.Spec.ScaleTargetRef.APIVersion)
+	}
+	if *hpa.Spec.MinReplicas != 2 {
+		t.Errorf("expected minReplicas 2, got %d", *hpa.Spec.MinReplicas)
+	}
+	if hpa.Spec.MaxReplicas != 10 {
+		t.Errorf("expected maxReplicas 10, got %d", hpa.Spec.MaxReplicas)
+	}
+	if len(hpa.Spec.Metrics) != 1 {
+		t.Fatalf("expected 1 metric, got %d", len(hpa.Spec.Metrics))
+	}
+	m := hpa.Spec.Metrics[0]
+	if m.Type != autoscalingv2.ResourceMetricSourceType {
+		t.Errorf("expected Resource metric type, got %q", m.Type)
+	}
+	if *m.Resource.Target.AverageUtilization != 80 {
+		t.Errorf("expected 80%% CPU target, got %d", *m.Resource.Target.AverageUtilization)
+	}
+}
+
+func TestBuildHPA_WithCustomMetrics(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:                        true,
+		MinReplicas:                    2,
+		MaxReplicas:                    10,
+		TargetCPUUtilizationPercentage: 80,
+		CustomMetrics: []autoscalingv2.MetricSpec{
+			{
+				Type: autoscalingv2.PodsMetricSourceType,
+				Pods: &autoscalingv2.PodsMetricSource{
+					Metric: autoscalingv2.MetricIdentifier{Name: "http_requests_per_second"},
+					Target: autoscalingv2.MetricTarget{
+						Type:         autoscalingv2.AverageValueMetricType,
+						AverageValue: ptr.To(resource.MustParse("1000")),
+					},
+				},
+			},
+		},
+	}
+	hpa := buildHPA(cluster, node, resolveAutoscaling(cluster, node))
+	if len(hpa.Spec.Metrics) != 2 {
+		t.Fatalf("expected 2 metrics (CPU + custom), got %d", len(hpa.Spec.Metrics))
+	}
+	if hpa.Spec.Metrics[0].Type != autoscalingv2.ResourceMetricSourceType {
+		t.Errorf("expected first metric to be Resource (CPU), got %q", hpa.Spec.Metrics[0].Type)
+	}
+	if hpa.Spec.Metrics[1].Type != autoscalingv2.PodsMetricSourceType {
+		t.Errorf("expected second metric to be Pods, got %q", hpa.Spec.Metrics[1].Type)
+	}
+}
+
+func TestBuildHPA_PassesThroughSpecValues(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:                        true,
+		MinReplicas:                    2,
+		MaxReplicas:                    10,
+		TargetCPUUtilizationPercentage: 80,
+	}
+	hpa := buildHPA(cluster, node, resolveAutoscaling(cluster, node))
+	if *hpa.Spec.MinReplicas != 2 {
+		t.Errorf("expected default minReplicas 2, got %d", *hpa.Spec.MinReplicas)
+	}
+	if hpa.Spec.MaxReplicas != 10 {
+		t.Errorf("expected default maxReplicas 10, got %d", hpa.Spec.MaxReplicas)
+	}
+}
+
+func TestBuildHPA_Labels(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{Enabled: true, MinReplicas: 2, MaxReplicas: 10, TargetCPUUtilizationPercentage: 80}
+	hpa := buildHPA(cluster, node, resolveAutoscaling(cluster, node))
+	expectedLabels := map[string]string{
+		"app.kubernetes.io/name":       "curity-identity-server",
+		"app.kubernetes.io/instance":   "node-1",
+		"app.kubernetes.io/managed-by": "curity-operator",
+		"app.kubernetes.io/component":  "runtime",
+		"app.kubernetes.io/version":    "11.0",
+		"curity.io/cluster":            "cluster-1",
+		"curity.io/role":               "test-role",
+	}
+	for k, v := range expectedLabels {
+		if hpa.Labels[k] != v {
+			t.Errorf("label %q: expected %q, got %q", k, v, hpa.Labels[k])
+		}
+	}
+}
+
+func TestBuildHPA_NodeOverridesClusterValues(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:                        true,
+		MinReplicas:                    2,
+		MaxReplicas:                    10,
+		TargetCPUUtilizationPercentage: 80,
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:                        true,
+		MinReplicas:                    5,
+		MaxReplicas:                    20,
+		TargetCPUUtilizationPercentage: 60,
+	}
+	hpa := buildHPA(cluster, node, resolveAutoscaling(cluster, node))
+	if *hpa.Spec.MinReplicas != 5 {
+		t.Errorf("expected node minReplicas 5, got %d", *hpa.Spec.MinReplicas)
+	}
+	if hpa.Spec.MaxReplicas != 20 {
+		t.Errorf("expected node maxReplicas 20, got %d", hpa.Spec.MaxReplicas)
+	}
+	if *hpa.Spec.Metrics[0].Resource.Target.AverageUtilization != 60 {
+		t.Errorf("expected node CPU target 60, got %d", *hpa.Spec.Metrics[0].Resource.Target.AverageUtilization)
+	}
+}
+
+func TestBuildHPA_ClusterLevelCustomMetrics(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:                        true,
+		MinReplicas:                    2,
+		MaxReplicas:                    10,
+		TargetCPUUtilizationPercentage: 80,
+		CustomMetrics: []autoscalingv2.MetricSpec{
+			{
+				Type: autoscalingv2.PodsMetricSourceType,
+				Pods: &autoscalingv2.PodsMetricSource{
+					Metric: autoscalingv2.MetricIdentifier{Name: "http_requests_per_second"},
+					Target: autoscalingv2.MetricTarget{
+						Type:         autoscalingv2.AverageValueMetricType,
+						AverageValue: ptr.To(resource.MustParse("500")),
+					},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	// Node has no autoscaling — should inherit cluster spec including custom metrics
+	hpa := buildHPA(cluster, node, resolveAutoscaling(cluster, node))
+	if len(hpa.Spec.Metrics) != 2 {
+		t.Fatalf("expected 2 metrics (CPU + cluster custom), got %d", len(hpa.Spec.Metrics))
+	}
+	if hpa.Spec.Metrics[0].Type != autoscalingv2.ResourceMetricSourceType {
+		t.Errorf("expected first metric CPU, got %q", hpa.Spec.Metrics[0].Type)
+	}
+	if hpa.Spec.Metrics[1].Type != autoscalingv2.PodsMetricSourceType {
+		t.Errorf("expected second metric Pods, got %q", hpa.Spec.Metrics[1].Type)
+	}
+	if hpa.Spec.Metrics[1].Pods.Metric.Name != "http_requests_per_second" {
+		t.Errorf("expected metric name http_requests_per_second, got %q", hpa.Spec.Metrics[1].Pods.Metric.Name)
+	}
+}
+
+// --- buildDeployment + HPA integration tests ---
+
+func TestBuildDeployment_HPAEnabled_ReplicasMatchMinReplicas(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{
+		Enabled:                        true,
+		MinReplicas:                    2,
+		MaxReplicas:                    10,
+		TargetCPUUtilizationPercentage: 80,
+	}
+	deploy := buildDeployment(cluster, node, nil)
+	if deploy.Spec.Replicas == nil {
+		t.Fatal("expected non-nil replicas")
+	}
+	if *deploy.Spec.Replicas != 2 {
+		t.Errorf("expected replicas=minReplicas=2, got %d", *deploy.Spec.Replicas)
+	}
+}
+
+func TestBuildDeployment_HPADisabled_ReplicasFromSpec(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{Enabled: false}
+	node.Spec.Replicas = ptr.To(int32(3))
+	deploy := buildDeployment(cluster, node, nil)
+	if deploy.Spec.Replicas == nil || *deploy.Spec.Replicas != 3 {
+		t.Errorf("expected replicas=3, got %v", deploy.Spec.Replicas)
 	}
 }

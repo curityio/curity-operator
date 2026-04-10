@@ -18,6 +18,8 @@ type IdentityServerNodeSpec struct {
 	// Role is a unique identifier for this node within the cluster.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 	Role string `json:"role"`
 
 	// UI configures the admin UI. Only applicable for admin-type nodes.
@@ -30,7 +32,8 @@ type IdentityServerNodeSpec struct {
 	// Replicas is the number of pods (Deployment replicas) for this node.
 	// For admin-type nodes, this is always forced to 1 regardless of the value.
 	// +kubebuilder:default=1
-	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
 	Replicas *int32 `json:"replicas,omitempty"`
 
 	// PodAnnotations are annotations applied to pods.
@@ -55,6 +58,7 @@ type IdentityServerNodeSpec struct {
 	// EnvironmentVariables are additional environment variables passed to the
 	// Curity container. Uses standard Kubernetes env var format with support
 	// for valueFrom (secretKeyRef, configMapKeyRef).
+	// +kubebuilder:validation:MaxItems=1000
 	EnvironmentVariables []corev1.EnvVar `json:"environmentVariables,omitempty"`
 
 	// Logging configures logging behavior.
@@ -67,12 +71,15 @@ type IdentityServerNodeSpec struct {
 	PodDisruptionBudget *PDBSpec `json:"podDisruptionBudget,omitempty"`
 
 	// NodeSelector constrains pods to nodes with matching labels.
+	// +kubebuilder:validation:MaxProperties=100
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
 	// Tolerations allow pods to schedule onto nodes with matching taints.
+	// +kubebuilder:validation:MaxItems=100
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
 	// TopologySpreadConstraints describe how pods should be spread across topology domains.
+	// +kubebuilder:validation:MaxItems=32
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 
 	// Affinity defines scheduling constraints for pods.

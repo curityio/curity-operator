@@ -11,6 +11,7 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/ginkgo/v2/dsl/core"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -53,9 +54,10 @@ var excludeCRDFields = []string{
 }
 
 var excludeFieldMap = map[string][]string{
-	"job":                   excludeJobFields,
-	"identityservercluster": excludeCRDFields,
-	"identityservernode":    excludeCRDFields,
+	"job":                     excludeJobFields,
+	"horizontalpodautoscaler": excludeFields,
+	"identityservercluster":   excludeCRDFields,
+	"identityservernode":      excludeCRDFields,
 }
 
 // MatchYAMLResource takes a snapshot of the resource and compares it.
@@ -143,6 +145,11 @@ func sanitizeVolatileFields(resource interface{}) interface{} {
 		d.Annotations = nil
 		d.Status = appsv1.DeploymentStatus{}
 		return d
+	case *autoscalingv2.HorizontalPodAutoscaler:
+		h := r.DeepCopy()
+		h.Annotations = nil
+		h.Status = autoscalingv2.HorizontalPodAutoscalerStatus{}
+		return h
 	case *batchv1.Job:
 		j := r.DeepCopy()
 		j.Status = batchv1.JobStatus{}

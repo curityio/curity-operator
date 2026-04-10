@@ -2,6 +2,7 @@
 package v1alpha1
 
 import (
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -116,6 +117,7 @@ type ProbeConfig struct {
 }
 
 // AutoscalingSpec configures horizontal pod autoscaling.
+// +kubebuilder:validation:XValidation:rule="self.minReplicas <= self.maxReplicas",message="minReplicas must be less than or equal to maxReplicas"
 type AutoscalingSpec struct {
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
@@ -133,6 +135,12 @@ type AutoscalingSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
 	TargetCPUUtilizationPercentage int32 `json:"targetCPUUtilizationPercentage,omitempty"`
+
+	// CustomMetrics defines additional HPA metrics beyond CPU utilization.
+	// A CPU utilization metric is always included automatically; do not duplicate it here.
+	// Uses the standard Kubernetes MetricSpec from autoscaling/v2.
+	// +kubebuilder:validation:MaxItems=100
+	CustomMetrics []autoscalingv2.MetricSpec `json:"customMetrics,omitempty"`
 }
 
 // PDBSpec configures a PodDisruptionBudget.

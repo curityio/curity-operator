@@ -12,9 +12,11 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -2284,6 +2286,503 @@ spec:
 				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
 				Expect(k().Get(ctx, client.ObjectKey{Name: "ovr-cluster", Namespace: ns}, cluster)).To(Succeed())
 				utils.MatchCRDResource(cluster, "ovr-cluster")
+			})
+		})
+	})
+
+	// =================================================================
+	// autoscaling
+	// =================================================================
+	Context("autoscaling", func() {
+
+		Describe("HPA created for runtime with autoscaling enabled", Label("smoke"), Ordered, func() {
+			const ns = "e2e-hpa"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should create HPA for runtime node with autoscaling enabled", func() {
+				ctx := context.Background()
+
+				By("creating cluster")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "hpa-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "hpa-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				By("creating runtime node with autoscaling")
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "hpa-runtime", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						Autoscaling: &v1alpha1.AutoscalingSpec{
+							Enabled:                        true,
+							MinReplicas:                    2,
+							MaxReplicas:                    10,
+							TargetCPUUtilizationPercentage: 80,
+						},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("verifying HPA is created")
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-runtime", Namespace: ns}}
+				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
+
+				Expect(*hpa.Spec.MinReplicas).To(Equal(int32(2)))
+				Expect(hpa.Spec.MaxReplicas).To(Equal(int32(10)))
+				Expect(hpa.Spec.ScaleTargetRef.Name).To(Equal("hpa-runtime"))
+				Expect(hpa.Spec.ScaleTargetRef.Kind).To(Equal("Deployment"))
+				Expect(hpa.Spec.Metrics).To(HaveLen(1))
+				Expect(*hpa.Spec.Metrics[0].Resource.Target.AverageUtilization).To(Equal(int32(80)))
+
+				By("verifying HPA owner reference")
+				Expect(hpa.OwnerReferences).To(HaveLen(1))
+				Expect(hpa.OwnerReferences[0].Kind).To(Equal("IdentityServerNode"))
+
+				utils.MatchYAMLResource(hpa, "hpa-runtime")
+			})
+
+			It("should set Deployment replicas to minReplicas when autoscaling enabled", func() {
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "hpa-runtime", Namespace: ns}}
+				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+				Expect(*deploy.Spec.Replicas).To(Equal(int32(2)))
+			})
+		})
+
+		Describe("HPA not created for admin node", Label("smoke"), Ordered, func() {
+			const ns = "e2e-hpa-admin"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should not create HPA for admin node even with autoscaling enabled", func() {
+				ctx := context.Background()
+
+				By("creating cluster")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "hpa-adm-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "hpa-adm-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				By("creating admin node with autoscaling enabled")
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "hpa-admin", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-adm-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						Autoscaling: &v1alpha1.AutoscalingSpec{
+							Enabled:                        true,
+							MinReplicas:                    2,
+							MaxReplicas:                    10,
+							TargetCPUUtilizationPercentage: 80,
+						},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("verifying Deployment exists")
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "hpa-admin", Namespace: ns}}
+				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+				Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
+
+				By("verifying HPA never created")
+				Consistently(func() bool {
+					return apierrors.IsNotFound(k().Get(ctx,
+						client.ObjectKey{Name: "hpa-admin", Namespace: ns},
+						&autoscalingv2.HorizontalPodAutoscaler{}))
+				}, 5*time.Second, e2eInterval).Should(BeTrue())
+			})
+		})
+
+		Describe("HPA deleted when autoscaling disabled", Label("smoke"), Ordered, func() {
+			const ns = "e2e-hpa-toggle"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should delete HPA when autoscaling is disabled", func() {
+				ctx := context.Background()
+
+				By("creating cluster and runtime node with autoscaling")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "hpa-tog-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "hpa-tog-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "hpa-toggle", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-tog-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						Autoscaling: &v1alpha1.AutoscalingSpec{
+							Enabled:                        true,
+							MinReplicas:                    2,
+							MaxReplicas:                    10,
+							TargetCPUUtilizationPercentage: 80,
+						},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("waiting for HPA to be created")
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-toggle", Namespace: ns}}
+				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
+
+				By("disabling autoscaling")
+				Eventually(func() error {
+					if err := k().Get(ctx, client.ObjectKey{Name: "hpa-toggle", Namespace: ns}, node); err != nil {
+						return err
+					}
+					node.Spec.Autoscaling.Enabled = false
+					return k().Update(ctx, node)
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+
+				By("verifying HPA is deleted")
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k().Get(ctx,
+						client.ObjectKey{Name: "hpa-toggle", Namespace: ns},
+						&autoscalingv2.HorizontalPodAutoscaler{}))
+				}, e2eTimeout, e2eInterval).Should(BeTrue())
+			})
+		})
+
+		Describe("HPA updated when autoscaling spec changes", Ordered, func() {
+			const ns = "e2e-hpa-update"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should update HPA when maxReplicas and custom metrics change", func() {
+				ctx := context.Background()
+
+				By("creating cluster and runtime node with CPU-only autoscaling")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "hpa-upd-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "hpa-upd-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "hpa-update", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-upd-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						Autoscaling: &v1alpha1.AutoscalingSpec{
+							Enabled:                        true,
+							MinReplicas:                    2,
+							MaxReplicas:                    10,
+							TargetCPUUtilizationPercentage: 80,
+						},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("verifying initial HPA: maxReplicas=10, 1 metric (CPU)")
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-update", Namespace: ns}}
+				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
+				Expect(hpa.Spec.MaxReplicas).To(Equal(int32(10)))
+				Expect(hpa.Spec.Metrics).To(HaveLen(1))
+
+				By("updating node: maxReplicas=20 and adding a custom metric")
+				Eventually(func() error {
+					if err := k().Get(ctx, client.ObjectKey{Name: "hpa-update", Namespace: ns}, node); err != nil {
+						return err
+					}
+					node.Spec.Autoscaling.MaxReplicas = 20
+					node.Spec.Autoscaling.CustomMetrics = []autoscalingv2.MetricSpec{
+						{
+							Type: autoscalingv2.PodsMetricSourceType,
+							Pods: &autoscalingv2.PodsMetricSource{
+								Metric: autoscalingv2.MetricIdentifier{Name: "http_requests_per_second"},
+								Target: autoscalingv2.MetricTarget{
+									Type:         autoscalingv2.AverageValueMetricType,
+									AverageValue: ptr.To(resource.MustParse("1000")),
+								},
+							},
+						},
+					}
+					return k().Update(ctx, node)
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+
+				By("verifying HPA updated: maxReplicas=20, 2 metrics")
+				Eventually(func(g Gomega) {
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: "hpa-update", Namespace: ns}, hpa)).To(Succeed())
+					g.Expect(hpa.Spec.MaxReplicas).To(Equal(int32(20)))
+					g.Expect(hpa.Spec.Metrics).To(HaveLen(2))
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+
+				Expect(hpa.Spec.Metrics[0].Type).To(Equal(autoscalingv2.ResourceMetricSourceType))
+				Expect(hpa.Spec.Metrics[1].Type).To(Equal(autoscalingv2.PodsMetricSourceType))
+
+				By("removing custom metrics")
+				Eventually(func() error {
+					if err := k().Get(ctx, client.ObjectKey{Name: "hpa-update", Namespace: ns}, node); err != nil {
+						return err
+					}
+					node.Spec.Autoscaling.CustomMetrics = nil
+					return k().Update(ctx, node)
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+
+				By("verifying HPA reverted to CPU-only")
+				Eventually(func(g Gomega) int {
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: "hpa-update", Namespace: ns}, hpa)).To(Succeed())
+					return len(hpa.Spec.Metrics)
+				}, e2eTimeout, e2eInterval).Should(Equal(1))
+			})
+		})
+
+		Describe("Cluster-level autoscaling defaults inherited", Ordered, func() {
+			const ns = "e2e-hpa-cluster"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should inherit cluster-level autoscaling defaults", func() {
+				ctx := context.Background()
+
+				By("creating cluster with autoscaling enabled")
+				cluster := &v1alpha1.IdentityServerCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "hpa-cl-cluster", Namespace: ns},
+					Spec: v1alpha1.IdentityServerClusterSpec{
+						Version: "11.0",
+						Autoscaling: &v1alpha1.AutoscalingSpec{
+							Enabled:                        true,
+							MinReplicas:                    3,
+							MaxReplicas:                    15,
+							TargetCPUUtilizationPercentage: 70,
+						},
+					},
+				}
+				Expect(k().Create(ctx, cluster)).To(Succeed())
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				By("creating runtime node WITHOUT node-level autoscaling")
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "hpa-inherit", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-cl-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("verifying HPA is created with cluster defaults")
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-inherit", Namespace: ns}}
+				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
+
+				Expect(*hpa.Spec.MinReplicas).To(Equal(int32(3)))
+				Expect(hpa.Spec.MaxReplicas).To(Equal(int32(15)))
+				Expect(*hpa.Spec.Metrics[0].Resource.Target.AverageUtilization).To(Equal(int32(70)))
+			})
+		})
+
+		Describe("Cluster-level custom metrics inherited", Ordered, func() {
+			const ns = "e2e-hpa-clcm"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should inherit cluster-level custom metrics into HPA", func() {
+				ctx := context.Background()
+
+				By("creating cluster with custom metrics")
+				cluster := &v1alpha1.IdentityServerCluster{
+					ObjectMeta: metav1.ObjectMeta{Name: "hpa-clcm-cluster", Namespace: ns},
+					Spec: v1alpha1.IdentityServerClusterSpec{
+						Version: "11.0",
+						Autoscaling: &v1alpha1.AutoscalingSpec{
+							Enabled:                        true,
+							MinReplicas:                    2,
+							MaxReplicas:                    10,
+							TargetCPUUtilizationPercentage: 80,
+							CustomMetrics: []autoscalingv2.MetricSpec{
+								{
+									Type: autoscalingv2.PodsMetricSourceType,
+									Pods: &autoscalingv2.PodsMetricSource{
+										Metric: autoscalingv2.MetricIdentifier{Name: "http_requests_per_second"},
+										Target: autoscalingv2.MetricTarget{
+											Type:         autoscalingv2.AverageValueMetricType,
+											AverageValue: ptr.To(resource.MustParse("500")),
+										},
+									},
+								},
+							},
+						},
+					},
+				}
+				Expect(k().Create(ctx, cluster)).To(Succeed())
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				By("creating runtime node WITHOUT node-level autoscaling")
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "hpa-clcm-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-clcm-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("verifying HPA has CPU + cluster-level custom metric")
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-clcm-node", Namespace: ns}}
+				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
+
+				Expect(hpa.Spec.Metrics).To(HaveLen(2))
+				Expect(hpa.Spec.Metrics[0].Type).To(Equal(autoscalingv2.ResourceMetricSourceType))
+				Expect(hpa.Spec.Metrics[1].Type).To(Equal(autoscalingv2.PodsMetricSourceType))
+				Expect(hpa.Spec.Metrics[1].Pods.Metric.Name).To(Equal("http_requests_per_second"))
+			})
+		})
+
+		Describe("HPA with custom metrics", Ordered, func() {
+			const ns = "e2e-hpa-custom"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should support custom metrics in HPA", func() {
+				ctx := context.Background()
+
+				By("creating cluster")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "hpa-cust-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "hpa-cust-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				By("creating runtime node with custom metrics")
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "hpa-custom", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-cust-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						Autoscaling: &v1alpha1.AutoscalingSpec{
+							Enabled:                        true,
+							MinReplicas:                    2,
+							MaxReplicas:                    10,
+							TargetCPUUtilizationPercentage: 80,
+							CustomMetrics: []autoscalingv2.MetricSpec{
+								{
+									Type: autoscalingv2.PodsMetricSourceType,
+									Pods: &autoscalingv2.PodsMetricSource{
+										Metric: autoscalingv2.MetricIdentifier{Name: "http_requests_per_second"},
+										Target: autoscalingv2.MetricTarget{
+											Type:         autoscalingv2.AverageValueMetricType,
+											AverageValue: ptr.To(resource.MustParse("1000")),
+										},
+									},
+								},
+							},
+						},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("verifying HPA has CPU + custom metrics")
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-custom", Namespace: ns}}
+				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
+
+				Expect(hpa.Spec.Metrics).To(HaveLen(2))
+				Expect(hpa.Spec.Metrics[0].Type).To(Equal(autoscalingv2.ResourceMetricSourceType))
+				Expect(hpa.Spec.Metrics[1].Type).To(Equal(autoscalingv2.PodsMetricSourceType))
+				utils.MatchYAMLResource(hpa, "hpa-custom-metrics")
+			})
+		})
+
+		Describe("No HPA when autoscaling nil", Ordered, func() {
+			const ns = "e2e-hpa-nil"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should not create HPA when autoscaling is nil", func() {
+				ctx := context.Background()
+
+				By("creating cluster and runtime node with no autoscaling")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "hpa-nil-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "hpa-nil-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+					map[string]interface{}{"name": "hpa-nil-runtime", "namespace": ns, "clusterName": "hpa-nil-cluster"})
+
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "hpa-nil-runtime", Namespace: ns}}
+				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+				By("verifying no HPA created")
+				Consistently(func() bool {
+					return apierrors.IsNotFound(k().Get(ctx,
+						client.ObjectKey{Name: "hpa-nil-runtime", Namespace: ns},
+						&autoscalingv2.HorizontalPodAutoscaler{}))
+				}, 5*time.Second, e2eInterval).Should(BeTrue())
+			})
+		})
+
+		Describe("Replica preservation on re-reconcile", Ordered, func() {
+			const ns = "e2e-hpa-noreset"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should not reset replicas on re-reconcile when HPA is active", func() {
+				ctx := context.Background()
+
+				By("creating cluster and runtime node with autoscaling")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "hpa-nr-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "hpa-nr-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "hpa-noreset", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-nr-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						Autoscaling: &v1alpha1.AutoscalingSpec{
+							Enabled:                        true,
+							MinReplicas:                    2,
+							MaxReplicas:                    10,
+							TargetCPUUtilizationPercentage: 80,
+						},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("waiting for Deployment and HPA")
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "hpa-noreset", Namespace: ns}}
+				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-noreset", Namespace: ns}}
+				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
+
+				By("simulating HPA scaling: patch Deployment replicas to 5")
+				Eventually(func() error {
+					if err := k().Get(ctx, client.ObjectKey{Name: "hpa-noreset", Namespace: ns}, deploy); err != nil {
+						return err
+					}
+					deploy.Spec.Replicas = ptr.To(int32(5))
+					return k().Update(ctx, deploy)
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+
+				By("triggering re-reconcile via node annotation change")
+				Eventually(func() error {
+					if err := k().Get(ctx, client.ObjectKey{Name: "hpa-noreset", Namespace: ns}, node); err != nil {
+						return err
+					}
+					if node.Spec.PodAnnotations == nil {
+						node.Spec.PodAnnotations = make(map[string]string)
+					}
+					node.Spec.PodAnnotations["trigger-reconcile"] = "true"
+					return k().Update(ctx, node)
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+
+				By("verifying replicas preserved at 5 (not reset to minReplicas=2)")
+				Consistently(func(g Gomega) int32 {
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: "hpa-noreset", Namespace: ns}, deploy)).To(Succeed())
+					if deploy.Spec.Replicas == nil {
+						return 0
+					}
+					return *deploy.Spec.Replicas
+				}, 5*time.Second, e2eInterval).Should(Equal(int32(5)))
 			})
 		})
 	})

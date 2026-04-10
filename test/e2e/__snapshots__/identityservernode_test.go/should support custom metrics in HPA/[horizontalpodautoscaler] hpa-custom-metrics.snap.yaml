@@ -1,0 +1,42 @@
+
+[IdentityServerNode autoscaling HPA with custom metrics should support custom metrics in HPA - 1]
+metadata:
+  name: hpa-custom
+  namespace: e2e-hpa-custom
+  uid: <Any value>
+  resourceVersion: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/instance: hpa-custom
+    app.kubernetes.io/managed-by: curity-operator
+    app.kubernetes.io/name: curity-identity-server
+    app.kubernetes.io/version: "11.0"
+    curity.io/cluster: hpa-cust-cluster
+    curity.io/role: runtime-role
+  ownerReferences: <Any value>
+  managedFields: <Any value>
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: hpa-custom
+    apiVersion: apps/v1
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue:
+            format: DecimalSI
+
+---

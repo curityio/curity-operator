@@ -10,6 +10,7 @@ import (
 	"errors"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,6 +42,7 @@ type IdentityServerNodeReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile handles a single reconciliation loop for an IdentityServerNode.
 func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -220,6 +222,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// 6. Build and reconcile the Deployment
+	as := resolveAutoscaling(&cluster, &node)
 	desiredDeploy := buildDeployment(&cluster, &node, validatedConfigs)
 
 	// Inject cluster config hash annotation for rolling restart when Secret changes
@@ -248,8 +251,15 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}}
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+		currentReplicas := deploy.Spec.Replicas
 		deploy.Labels = desiredDeploy.Labels
 		deploy.Spec = desiredDeploy.Spec
+		// Preserve HPA-managed replicas on update to avoid replica flapping.
+		if as != nil && as.Enabled &&
+			node.Spec.Type != v1alpha1.NodeTypeAdmin &&
+			currentReplicas != nil {
+			deploy.Spec.Replicas = currentReplicas
+		}
 		return controllerutil.SetControllerReference(&node, deploy, r.Scheme)
 	})
 	if err != nil {
@@ -281,7 +291,60 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			"Service %q %s", svc.Name, result)
 	}
 
-	// 8. Compute status from Deployment
+	// 8. Reconcile HorizontalPodAutoscaler
+	if node.Spec.Type != v1alpha1.NodeTypeAdmin && as != nil && as.Enabled {
+		desiredHPA := buildHPA(&cluster, &node, as)
+		hpa := &autoscalingv2.HorizontalPodAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      desiredHPA.Name,
+				Namespace: desiredHPA.Namespace,
+			},
+		}
+		result, err = controllerutil.CreateOrUpdate(ctx, r.Client, hpa, func() error {
+			hpa.Labels = desiredHPA.Labels
+			hpa.Spec = desiredHPA.Spec
+			return controllerutil.SetControllerReference(&node, hpa, r.Scheme)
+		})
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile HPA: %w", err)
+		}
+		if result != controllerutil.OperationResultNone {
+			log.Info("HPA reconciled", "operation", result, "name", hpa.Name)
+			r.Recorder.Eventf(&node, corev1.EventTypeNormal, "HPAReconciled",
+				"HorizontalPodAutoscaler %q %s", hpa.Name, result)
+		}
+	} else {
+		// HPA not needed (admin node, autoscaling disabled, or nil) — clean up if stale.
+		var existingHPA autoscalingv2.HorizontalPodAutoscaler
+		if err := r.Get(ctx, client.ObjectKey{
+			Name: node.Name, Namespace: node.Namespace,
+		}, &existingHPA); err == nil {
+			if !metav1.IsControlledBy(&existingHPA, &node) {
+				log.Info("skipping HPA deletion, not owned by this node", "name", existingHPA.Name)
+				r.Recorder.Eventf(&node, corev1.EventTypeWarning, "HPANotOwned",
+					"HPA %q exists but is not managed by this node; skipping deletion", existingHPA.Name)
+			} else {
+				if err := r.Delete(ctx, &existingHPA); err != nil {
+					if !apierrors.IsNotFound(err) {
+						return ctrl.Result{}, fmt.Errorf("failed to delete HPA: %w", err)
+					}
+				} else {
+					log.Info("HPA deleted", "name", existingHPA.Name)
+					if node.Spec.Type == v1alpha1.NodeTypeAdmin {
+						r.Recorder.Eventf(&node, corev1.EventTypeWarning, "AutoscalingIgnored",
+							"HPA %q deleted: autoscaling is not supported on admin nodes", existingHPA.Name)
+					} else {
+						r.Recorder.Eventf(&node, corev1.EventTypeNormal, "HPADeleted",
+							"HorizontalPodAutoscaler %q deleted", existingHPA.Name)
+					}
+				}
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("failed to get HPA: %w", err)
+		}
+	}
+
+	// 9. Compute status from Deployment
 	conditions, rs := computeNodeConditions(deploy, node.Generation)
 	node.Status.Conditions = conditions
 	node.Status.ObservedGeneration = node.Generation
@@ -293,7 +356,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	node.Status.DeploymentName = deploy.Name
 	node.Status.ServiceName = svc.Name
 
-	// 9. Update status
+	// 10. Update status
 	if err := r.Status().Update(ctx, &node); err != nil {
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, nil
@@ -310,6 +373,7 @@ func (r *IdentityServerNodeReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		For(&v1alpha1.IdentityServerNode{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
+		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Watches(
 			&v1alpha1.IdentityServerCluster{},
 			handler.EnqueueRequestsFromMapFunc(r.findNodesForCluster),

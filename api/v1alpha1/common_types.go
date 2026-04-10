@@ -82,7 +82,7 @@ type UISpec struct {
 // ServiceSpec configures the Kubernetes Service for the node.
 type ServiceSpec struct {
 	// +kubebuilder:default=ClusterIP
-	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort
+	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort;ExternalName
 	Type corev1.ServiceType `json:"type,omitempty"`
 
 	// +kubebuilder:default=8443
@@ -125,9 +125,13 @@ type AutoscalingSpec struct {
 	MinReplicas int32 `json:"minReplicas,omitempty"`
 
 	// +kubebuilder:default=10
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10000
 	MaxReplicas int32 `json:"maxReplicas,omitempty"`
 
 	// +kubebuilder:default=80
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=100
 	TargetCPUUtilizationPercentage int32 `json:"targetCPUUtilizationPercentage,omitempty"`
 }
 
@@ -180,11 +184,14 @@ type LoggingSpec struct {
 	Stdout bool `json:"stdout,omitempty"`
 
 	// Logs is the list of Curity log files to stream when stdout is enabled.
-	// Common values: audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts.
+	// Allowed values: audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts.
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts
 	Logs []string `json:"logs,omitempty"`
 
 	// Image for the sidecar log tailing containers.
 	// Defaults to busybox:latest.
+	// +kubebuilder:validation:MaxLength=512
 	Image string `json:"image,omitempty"`
 
 	// Resources for the sidecar log tailing containers.

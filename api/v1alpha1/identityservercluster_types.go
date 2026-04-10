@@ -12,12 +12,15 @@ type IdentityServerClusterSpec struct {
 	// Version of the Curity Identity Server to deploy.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
 	Version string `json:"version"`
 
 	// Image overrides the default container image (e.g., for private mirrors).
+	// +kubebuilder:validation:MaxLength=512
 	Image string `json:"image,omitempty"`
 
 	// ImagePullSecret is the name of a Kubernetes Secret for pulling the container image.
+	// +kubebuilder:validation:MaxLength=253
 	ImagePullSecret string `json:"imagePullSecret,omitempty"`
 
 	// AdminCredentials references a Secret containing ADMIN_PASSWORD,
@@ -51,12 +54,15 @@ type IdentityServerClusterSpec struct {
 	PodDisruptionBudget *PDBSpec `json:"podDisruptionBudget,omitempty"`
 
 	// NodeSelector constrains pods to nodes with matching labels.
+	// +kubebuilder:validation:MaxProperties=100
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
 	// Tolerations allow pods to schedule onto nodes with matching taints.
+	// +kubebuilder:validation:MaxItems=100
 	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
 
 	// TopologySpreadConstraints describe how pods should be spread across topology domains.
+	// +kubebuilder:validation:MaxItems=32
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 
 	// Affinity defines scheduling constraints for pods.

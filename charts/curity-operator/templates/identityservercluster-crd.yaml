@@ -1024,6 +1024,8 @@ spec:
                   maxReplicas:
                     default: 10
                     format: int32
+                    maximum: 10000
+                    minimum: 1
                     type: integer
                   minReplicas:
                     default: 2
@@ -1033,15 +1035,19 @@ spec:
                   targetCPUUtilizationPercentage:
                     default: 80
                     format: int32
+                    maximum: 100
+                    minimum: 1
                     type: integer
                 type: object
               image:
                 description: Image overrides the default container image (e.g., for
                   private mirrors).
+                maxLength: 512
                 type: string
               imagePullSecret:
                 description: ImagePullSecret is the name of a Kubernetes Secret for
                   pulling the container image.
+                maxLength: 253
                 type: string
               logging:
                 description: Logging configures logging behavior.
@@ -1050,6 +1056,7 @@ spec:
                     description: |-
                       Image for the sidecar log tailing containers.
                       Defaults to busybox:latest.
+                    maxLength: 512
                     type: string
                   level:
                     description: |-
@@ -1070,7 +1077,15 @@ spec:
                       Logs is the list of Curity log files to stream when stdout is enabled.
                       Common values: audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts.
                     items:
+                      enum:
+                      - audit
+                      - request
+                      - cluster
+                      - confsvc
+                      - confsvc-internal
+                      - post-commit-scripts
                       type: string
+                    maxItems: 32
                     type: array
                   resources:
                     description: |-
@@ -1145,6 +1160,7 @@ spec:
                 additionalProperties:
                   type: string
                 description: NodeSelector constrains pods to nodes with matching labels.
+                maxProperties: 100
                 type: object
               podAnnotations:
                 additionalProperties:
@@ -1324,6 +1340,7 @@ spec:
                         If the operator is Exists, the value should be empty, otherwise just a regular string.
                       type: string
                   type: object
+                maxItems: 100
                 type: array
               topologySpreadConstraints:
                 description: TopologySpreadConstraints describe how pods should be spread
@@ -1499,9 +1516,11 @@ spec:
                   - topologyKey
                   - whenUnsatisfiable
                   type: object
+                maxItems: 32
                 type: array
               version:
                 description: Version of the Curity Identity Server to deploy.
+                maxLength: 128
                 minLength: 1
                 type: string
             required:

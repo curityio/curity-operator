@@ -183,6 +183,58 @@ func testSimulateValidation(ns, clusterName, configHash string) {
 	}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
 }
 
+// testSimulateClusterConfigReady populates the cluster-config secret with real
+// cluster.xml data, simulating the result of a genclust Job completion (by
+// writing directly to the Secret, bypassing the actual Job). If the cluster
+// reconciler already created a placeholder secret, this updates it; otherwise
+// it creates a new one. The cluster reconciler then detects the ready secret on
+// its next reconcile and sets ClusterConfigReady=True naturally — this helper
+// waits for that condition before returning.
+//
+// Call this AFTER creating the admin node so the ISC reconciler can find the
+// admin name and complete the ensureClusterConfig flow.
+func testSimulateClusterConfigReady(ns, clusterName string) {
+	secretName := clusterName + "-cluster-config"
+	realData := map[string][]byte{
+		"cluster.xml": []byte("<config xmlns=\"http://tail-f.com/ns/config/1.0\"><test/></config>"),
+	}
+
+	// Create or update the secret with real data.
+	Eventually(func() error {
+		var existing corev1.Secret
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: ns}, &existing); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return err
+			}
+			// Secret doesn't exist yet — create it.
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: secretName, Namespace: ns,
+					Labels: map[string]string{
+						"app.kubernetes.io/managed-by": "curity-operator",
+						"curity.io/cluster":            clusterName,
+						"curity.io/component":          "cluster-config",
+					},
+				},
+				Data: realData,
+			}
+			return k8sClient.Create(ctx, secret)
+		}
+		// Secret exists (ISC created placeholder) — update with real data.
+		existing.Data = realData
+		return k8sClient.Update(ctx, &existing)
+	}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
+
+	// Wait for the ISC reconciler to detect the ready secret and set the condition.
+	Eventually(func() bool {
+		cluster := &v1alpha1.IdentityServerCluster{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: ns}, cluster); err != nil {
+			return false
+		}
+		return hasCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady, metav1.ConditionTrue)
+	}, 30*time.Second, 250*time.Millisecond).Should(BeTrue())
+}
+
 // testCreateManagedConfigMap creates a ConfigMap with the curity.io/managed=true label.
 func testCreateManagedConfigMap(ns, name string, data map[string]string, annotations map[string]string) {
 	cm := &corev1.ConfigMap{
@@ -270,6 +322,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 		It("should create Deployment and Service for admin node", func() {
 			testCreateCluster(ns, "cluster-1")
 			testCreateNode(ns, "admin-node", v1alpha1.NodeTypeAdmin, "cluster-1")
+			testSimulateClusterConfigReady(ns, "cluster-1")
 
 			deploy := &appsv1.Deployment{}
 			eventuallyGetResource(ns, "admin-node", deploy)
@@ -286,6 +339,148 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			}, timeout, interval).Should(Equal("admin-node"))
 
 			Expect(node.Status.ServiceName).To(Equal("admin-node"))
+		})
+	})
+
+	Context("Deployment creation gate — ClusterConfigReady", func() {
+		It("should defer Deployment until ClusterConfigReady when admin exists", func() {
+			testCreateCluster(ns, "gate-cluster")
+			testCreateNode(ns, "gate-admin", v1alpha1.NodeTypeAdmin, "gate-cluster")
+			testCreateNode(ns, "gate-runtime", v1alpha1.NodeTypeRuntime, "gate-cluster")
+
+			// Both nodes should be gated — no Deployment yet
+			node := &v1alpha1.IdentityServerNode{}
+			Eventually(func() string {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "gate-admin", Namespace: ns}, node); err != nil {
+					return ""
+				}
+				return conditionReason(node.Status.Conditions, v1alpha1.ConditionReady)
+			}, timeout, interval).Should(Equal("WaitingForClusterConfig"))
+
+			Expect(node.Status.ServiceName).To(Equal("gate-admin"))
+
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+				types.NamespacedName{Name: "gate-admin", Namespace: ns}, &appsv1.Deployment{}))).To(BeTrue())
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx,
+				types.NamespacedName{Name: "gate-runtime", Namespace: ns}, &appsv1.Deployment{}))).To(BeTrue())
+
+			// Services must exist while Deployment is gated — the genclust Job
+			// needs DNS resolution of the admin hostname.
+			eventuallyGetResource(ns, "gate-admin", &corev1.Service{})
+			eventuallyGetResource(ns, "gate-runtime", &corev1.Service{})
+
+			// Unblock by setting ClusterConfigReady=True
+			testSimulateClusterConfigReady(ns, "gate-cluster")
+
+			// Both Deployments should now appear
+			eventuallyGetResource(ns, "gate-admin", &appsv1.Deployment{})
+			eventuallyGetResource(ns, "gate-runtime", &appsv1.Deployment{})
+		})
+
+		It("should create Deployment immediately for runtime-only cluster", func() {
+			testCreateCluster(ns, "nonadmin-cluster")
+			testCreateNode(ns, "nonadmin-runtime", v1alpha1.NodeTypeRuntime, "nonadmin-cluster")
+
+			// No admin exists — Deployment should be created without waiting
+			eventuallyGetResource(ns, "nonadmin-runtime", &appsv1.Deployment{})
+
+			// Should NOT have WaitingForClusterConfig
+			node := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "nonadmin-runtime", Namespace: ns}, node)).To(Succeed())
+			Expect(conditionReason(node.Status.Conditions, v1alpha1.ConditionReady)).NotTo(Equal("WaitingForClusterConfig"))
+		})
+
+		It("should not disrupt existing Deployment when admin is added to runtime-only cluster", func() {
+			testCreateCluster(ns, "evolve-cluster")
+			testCreateNode(ns, "evolve-runtime", v1alpha1.NodeTypeRuntime, "evolve-cluster")
+
+			// Runtime Deployment should exist immediately (no admin)
+			deploy := &appsv1.Deployment{}
+			eventuallyGetResource(ns, "evolve-runtime", deploy)
+
+			// Now add admin — ClusterConfigReady is NOT True
+			testCreateNode(ns, "evolve-admin", v1alpha1.NodeTypeAdmin, "evolve-cluster")
+
+			// Existing runtime Deployment should remain (gate bypassed for existing)
+			Consistently(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "evolve-runtime", Namespace: ns}, deploy)
+			}, 5*time.Second, 250*time.Millisecond).Should(Succeed())
+
+			// Admin Deployment should be gated (no Deployment yet)
+			Eventually(func() string {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "evolve-admin", Namespace: ns}, node); err != nil {
+					return ""
+				}
+				return conditionReason(node.Status.Conditions, v1alpha1.ConditionReady)
+			}, timeout, interval).Should(Equal("WaitingForClusterConfig"))
+
+			// Unblock — admin Deployment should appear
+			testSimulateClusterConfigReady(ns, "evolve-cluster")
+			eventuallyGetResource(ns, "evolve-admin", &appsv1.Deployment{})
+		})
+
+		It("should preserve cluster-config-hash during config regeneration", func() {
+			testCreateCluster(ns, "hash-cluster")
+			testCreateNode(ns, "hash-runtime", v1alpha1.NodeTypeRuntime, "hash-cluster")
+			testCreateNode(ns, "hash-admin", v1alpha1.NodeTypeAdmin, "hash-cluster")
+			testSimulateClusterConfigReady(ns, "hash-cluster")
+
+			// Wait for Deployment and capture the hash annotation.
+			deploy := &appsv1.Deployment{}
+			var originalHash string
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "hash-runtime", Namespace: ns}, deploy)).To(Succeed())
+				originalHash = deploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
+				g.Expect(originalHash).NotTo(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate config regeneration: reset secret to placeholder, as
+			// the cluster reconciler does during encryption key rotation.
+			secretName := "hash-cluster-cluster-config"
+			Eventually(func() error {
+				var secret corev1.Secret
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: ns}, &secret); err != nil {
+					return err
+				}
+				secret.Data = map[string][]byte{"cluster.xml": []byte("placeholder")}
+				return k8sClient.Update(ctx, &secret)
+			}, timeout, interval).Should(Succeed())
+
+			// Wait for the cluster reconciler to detect the placeholder and
+			// set ClusterConfigReady != True. Without this, the ISN reconciler
+			// could race ahead, see stale True, and hash "placeholder".
+			Eventually(func() bool {
+				cluster := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hash-cluster", Namespace: ns}, cluster); err != nil {
+					return false
+				}
+				return !hasCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady, metav1.ConditionTrue)
+			}, timeout, interval).Should(BeTrue())
+
+			// Force a reconcile by touching the node spec.
+			Eventually(func() error {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hash-runtime", Namespace: ns}, node); err != nil {
+					return err
+				}
+				node.Spec.Replicas = ptr.To(int32(2))
+				return k8sClient.Update(ctx, node)
+			}, timeout, interval).Should(Succeed())
+
+			// Confirm the ISN reconciler processed the update (replicas changed).
+			Eventually(func(g Gomega) int32 {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "hash-runtime", Namespace: ns}, deploy)).To(Succeed())
+				return *deploy.Spec.Replicas
+			}, timeout, interval).Should(Equal(int32(2)))
+
+			// The hash annotation should be preserved — not removed or changed.
+			// Without the preservation logic, deploy.Spec = desiredDeploy.Spec
+			// would strip the annotation and trigger an unnecessary rollout.
+			Consistently(func(g Gomega) string {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "hash-runtime", Namespace: ns}, deploy)).To(Succeed())
+				return deploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
+			}, 5*time.Second, interval).Should(Equal(originalHash))
 		})
 	})
 
@@ -307,10 +502,12 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 
 			// Admin for cluster-x
 			testCreateNode(ns, "admin-x", v1alpha1.NodeTypeAdmin, "cluster-x")
+			testSimulateClusterConfigReady(ns, "cluster-x")
 			eventuallyGetResource(ns, "admin-x", &appsv1.Deployment{})
 
 			// Admin for cluster-y — different cluster, should NOT be blocked
 			testCreateNode(ns, "admin-y", v1alpha1.NodeTypeAdmin, "cluster-y")
+			testSimulateClusterConfigReady(ns, "cluster-y")
 			eventuallyGetResource(ns, "admin-y", &appsv1.Deployment{})
 		})
 	})
@@ -343,6 +540,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 		It("should block second admin node for same cluster", func() {
 			testCreateCluster(ns, "cluster-1")
 			testCreateNode(ns, "admin-1", v1alpha1.NodeTypeAdmin, "cluster-1")
+			testSimulateClusterConfigReady(ns, "cluster-1")
 
 			eventuallyGetResource(ns, "admin-1", &appsv1.Deployment{})
 
@@ -534,6 +732,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 		It("should route configs only to admin when admin exists", func() {
 			testCreateCluster(ns, "cfg-cluster")
 			testCreateNode(ns, "cfg-admin", v1alpha1.NodeTypeAdmin, "cfg-cluster")
+			testSimulateClusterConfigReady(ns, "cfg-cluster")
 			testCreateNode(ns, "cfg-runtime", v1alpha1.NodeTypeRuntime, "cfg-cluster")
 
 			adminDeploy := &appsv1.Deployment{}
@@ -914,6 +1113,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
+			testSimulateClusterConfigReady(ns, "cluster-default-env")
 
 			deploy := &appsv1.Deployment{}
 			eventuallyGetResource(ns, "admin-default-env", deploy)
@@ -2696,6 +2896,7 @@ var _ = Describe("Deployment scheduling", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		testSimulateClusterConfigReady(ns, "hpa-adm-cluster")
 
 		// Wait for Deployment to confirm reconciliation happened
 		deploy := &appsv1.Deployment{}

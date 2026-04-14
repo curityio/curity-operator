@@ -259,6 +259,63 @@ func TestClusterPredicate_UpdateValidatedConfigHashUnchanged(t *testing.T) {
 	}
 }
 
+func TestClusterPredicate_UpdateClusterConfigReadyAbsentToPresent(t *testing.T) {
+	p := clusterSpecOrNodeCountChangedPredicate{}
+	old := cluster(1, 2)
+	// Old has no condition; new has ConditionFalse ("" != "False" → should pass).
+	new := cluster(1, 2)
+	new.Status.Conditions = []metav1.Condition{
+		{Type: v1alpha1.ConditionClusterConfigReady, Status: metav1.ConditionFalse, Reason: "JobCreated"},
+	}
+	e := event.UpdateEvent{ObjectOld: old, ObjectNew: new}
+	if !p.Update(e) {
+		t.Error("expected pass when ClusterConfigReady appears for the first time")
+	}
+}
+
+func TestClusterPredicate_UpdateClusterConfigReadyBothAbsent(t *testing.T) {
+	p := clusterSpecOrNodeCountChangedPredicate{}
+	old := cluster(1, 2)
+	new := cluster(1, 2)
+	// Neither cluster has the ClusterConfigReady condition — should block.
+	e := event.UpdateEvent{ObjectOld: old, ObjectNew: new}
+	if p.Update(e) {
+		t.Error("expected block when ClusterConfigReady absent on both old and new")
+	}
+}
+
+func TestClusterPredicate_UpdateClusterConfigReadyChanged(t *testing.T) {
+	p := clusterSpecOrNodeCountChangedPredicate{}
+	old := cluster(1, 2)
+	old.Status.Conditions = []metav1.Condition{
+		{Type: v1alpha1.ConditionClusterConfigReady, Status: metav1.ConditionFalse, Reason: "JobRunning"},
+	}
+	new := cluster(1, 2)
+	new.Status.Conditions = []metav1.Condition{
+		{Type: v1alpha1.ConditionClusterConfigReady, Status: metav1.ConditionTrue, Reason: "SecretReady"},
+	}
+	e := event.UpdateEvent{ObjectOld: old, ObjectNew: new}
+	if !p.Update(e) {
+		t.Error("expected pass when ClusterConfigReady status changed")
+	}
+}
+
+func TestClusterPredicate_UpdateClusterConfigReadyUnchanged(t *testing.T) {
+	p := clusterSpecOrNodeCountChangedPredicate{}
+	old := cluster(1, 2)
+	old.Status.Conditions = []metav1.Condition{
+		{Type: v1alpha1.ConditionClusterConfigReady, Status: metav1.ConditionFalse, Reason: "JobRunning"},
+	}
+	new := cluster(1, 2)
+	new.Status.Conditions = []metav1.Condition{
+		{Type: v1alpha1.ConditionClusterConfigReady, Status: metav1.ConditionFalse, Reason: "JobCreated"},
+	}
+	e := event.UpdateEvent{ObjectOld: old, ObjectNew: new}
+	if p.Update(e) {
+		t.Error("expected block when ClusterConfigReady status unchanged (only reason changed)")
+	}
+}
+
 func TestClusterPredicate_UpdateStatusOnlyNoNodeCountChange(t *testing.T) {
 	p := clusterSpecOrNodeCountChangedPredicate{}
 	old := cluster(1, 2)

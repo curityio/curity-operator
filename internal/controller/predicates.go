@@ -83,8 +83,19 @@ func (p clusterSpecOrNodeCountChangedPredicate) Update(e event.UpdateEvent) bool
 	// Check if the validated config hash annotation changed. This annotation
 	// is set by the cluster reconciler when config validation succeeds, and
 	// nodes need to re-reconcile to mount the newly validated configs.
-	return e.ObjectOld.GetAnnotations()[annotationValidatedConfigHash] !=
-		e.ObjectNew.GetAnnotations()[annotationValidatedConfigHash]
+	if e.ObjectOld.GetAnnotations()[annotationValidatedConfigHash] !=
+		e.ObjectNew.GetAnnotations()[annotationValidatedConfigHash] {
+		return true
+	}
+
+	// Check if ClusterConfigReady condition changed. Nodes gate Deployment
+	// creation on this condition and need to reconcile when it transitions.
+	if clusterConditionStatus(oldCluster, v1alpha1.ConditionClusterConfigReady) !=
+		clusterConditionStatus(newCluster, v1alpha1.ConditionClusterConfigReady) {
+		return true
+	}
+
+	return false
 }
 
 // managedConfigPredicate passes events for ConfigMaps/Secrets that have (or had)
@@ -112,6 +123,18 @@ func hasManagedLabel(obj client.Object) bool {
 		return false
 	}
 	return obj.GetLabels()[LabelManagedConfig] == "true"
+}
+
+// clusterConditionStatus returns the Status field of the named condition, or
+// "" if the condition is not present. Used by the cluster predicate to detect
+// ClusterConfigReady transitions.
+func clusterConditionStatus(c *v1alpha1.IdentityServerCluster, condType string) metav1.ConditionStatus {
+	for _, cond := range c.Status.Conditions {
+		if cond.Type == condType {
+			return cond.Status
+		}
+	}
+	return ""
 }
 
 // conditionsEqual returns true if two condition slices are semantically equal.

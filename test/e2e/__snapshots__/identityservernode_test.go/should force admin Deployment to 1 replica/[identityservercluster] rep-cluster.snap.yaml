@@ -41,5 +41,6 @@ status:
       message: ""
   observedGeneration: <Any value>
   version: "11.0"
+  clusterConfigSecretName: rep-cluster-cluster-config
 
 ---

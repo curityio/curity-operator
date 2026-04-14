@@ -13,6 +13,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -221,23 +222,86 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		node.Status.AppliedConfigs = nil
 	}
 
+	// 5.6. Create Service before the Deployment gate below. For admin nodes, this
+	// ensures the genclust Job can resolve the admin hostname via DNS even before
+	// the Deployment exists.
+	desiredSvc := buildService(&cluster, &node)
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: desiredSvc.Name, Namespace: desiredSvc.Namespace}}
+
+	svcResult, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		svc.Labels = desiredSvc.Labels
+		svc.Spec.Type = desiredSvc.Spec.Type
+		svc.Spec.Selector = desiredSvc.Spec.Selector
+		svc.Spec.Ports = desiredSvc.Spec.Ports
+		return controllerutil.SetControllerReference(&node, svc, r.Scheme)
+	})
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile Service: %w", err)
+	}
+	if svcResult != controllerutil.OperationResultNone {
+		log.Info("Service reconciled", "operation", svcResult, "name", svc.Name)
+		r.Recorder.Eventf(&node, corev1.EventTypeNormal, "ServiceReconciled",
+			"Service %q %s", svc.Name, svcResult)
+	}
+
+	// 5.7. Gate: defer Deployment creation until cluster config is ready.
+	// When an admin node exists, the cluster reconciler generates cluster.xml
+	// via a genclust Job. Deferring prevents a double rollout caused by hashing
+	// the placeholder first and the real data second.
+	// Runtime-only clusters (no admin) skip — no genclust Job runs.
+	if adminExists {
+		configReady := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+		if configReady == nil || configReady.Status != metav1.ConditionTrue {
+			var existingDeploy appsv1.Deployment
+			err := r.Get(ctx, client.ObjectKey{Name: node.Name, Namespace: node.Namespace}, &existingDeploy)
+			if err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("checking existing deployment for config gate: %w", err)
+			}
+			if err == nil {
+				log.V(1).Info("config gate bypassed — Deployment already exists", "cluster", cluster.Name, "deployment", node.Name)
+			}
+			if apierrors.IsNotFound(err) {
+				log.Info("waiting for ClusterConfigReady before creating Deployment", "cluster", cluster.Name)
+				setCondition(&node.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
+					"WaitingForClusterConfig", "Waiting for cluster configuration to be generated", node.Generation)
+				node.Status.ObservedGeneration = node.Generation
+				node.Status.ServiceName = svc.Name
+				if statusErr := r.Status().Update(ctx, &node); statusErr != nil {
+					if apierrors.IsConflict(statusErr) {
+						return ctrl.Result{Requeue: true}, nil
+					}
+					return ctrl.Result{}, fmt.Errorf("failed to update status: %w", statusErr)
+				}
+				r.Recorder.Eventf(&node, corev1.EventTypeNormal, "WaitingForClusterConfig",
+					"Deferring Deployment creation until cluster %q ClusterConfigReady=True", cluster.Name)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+		}
+	}
+
 	// 6. Build and reconcile the Deployment
 	as := resolveAutoscaling(&cluster, &node)
 	desiredDeploy := buildDeployment(&cluster, &node, validatedConfigs)
 
-	// Inject cluster config hash annotation for rolling restart when Secret changes
-	configSecretName := cluster.Name + "-cluster-config"
-	var configSecret corev1.Secret
-	if err := r.Get(ctx, client.ObjectKey{Name: configSecretName, Namespace: node.Namespace}, &configSecret); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("getting cluster-config secret %q: %w", configSecretName, err)
+	// Inject cluster config hash annotation for rolling restart when Secret changes.
+	// Only inject when config is ready or no admin exists — avoids hashing
+	// placeholder data during config generation, which would cause a double rollout.
+	configReadyCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+	clusterConfigIsReady := !adminExists || (configReadyCond != nil && configReadyCond.Status == metav1.ConditionTrue)
+	if clusterConfigIsReady {
+		configSecretName := cluster.Name + "-cluster-config"
+		var configSecret corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Name: configSecretName, Namespace: node.Namespace}, &configSecret); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("getting cluster-config secret %q: %w", configSecretName, err)
+			}
+		} else if data, ok := configSecret.Data["cluster.xml"]; ok && len(data) > 0 {
+			h := sha256.Sum256(data)
+			if desiredDeploy.Spec.Template.Annotations == nil {
+				desiredDeploy.Spec.Template.Annotations = make(map[string]string)
+			}
+			desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = hex.EncodeToString(h[:])
 		}
-	} else if data, ok := configSecret.Data["cluster.xml"]; ok && len(data) > 0 {
-		h := sha256.Sum256(data)
-		if desiredDeploy.Spec.Template.Annotations == nil {
-			desiredDeploy.Spec.Template.Annotations = make(map[string]string)
-		}
-		desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = hex.EncodeToString(h[:])
 	}
 
 	// Inject discovered config hash annotation for rolling restart on config changes.
@@ -252,8 +316,24 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		currentReplicas := deploy.Spec.Replicas
+		existingConfigHash := deploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
+
 		deploy.Labels = desiredDeploy.Labels
 		deploy.Spec = desiredDeploy.Spec
+
+		// Preserve cluster-config-hash if the desired Deployment doesn't set one.
+		// This avoids unnecessary rollouts during config regeneration (e.g.,
+		// encryption key rotation) where the clusterConfigIsReady gate above
+		// skips injection.
+		if _, hasDesired := desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]; !hasDesired && existingConfigHash != "" {
+			log.Info("preserving existing cluster-config-hash while config is regenerating",
+				"hash", existingConfigHash, "cluster", cluster.Name)
+			if deploy.Spec.Template.Annotations == nil {
+				deploy.Spec.Template.Annotations = make(map[string]string)
+			}
+			deploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = existingConfigHash
+		}
+
 		// Preserve HPA-managed replicas on update to avoid replica flapping.
 		if as != nil && as.Enabled &&
 			node.Spec.Type != v1alpha1.NodeTypeAdmin &&
@@ -271,27 +351,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			"Deployment %q %s", deploy.Name, result)
 	}
 
-	// 7. Build and reconcile the Service
-	desiredSvc := buildService(&cluster, &node)
-	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: desiredSvc.Name, Namespace: desiredSvc.Namespace}}
-
-	result, err = controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		svc.Labels = desiredSvc.Labels
-		svc.Spec.Type = desiredSvc.Spec.Type
-		svc.Spec.Selector = desiredSvc.Spec.Selector
-		svc.Spec.Ports = desiredSvc.Spec.Ports
-		return controllerutil.SetControllerReference(&node, svc, r.Scheme)
-	})
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile Service: %w", err)
-	}
-	if result != controllerutil.OperationResultNone {
-		log.Info("Service reconciled", "operation", result, "name", svc.Name)
-		r.Recorder.Eventf(&node, corev1.EventTypeNormal, "ServiceReconciled",
-			"Service %q %s", svc.Name, result)
-	}
-
-	// 8. Reconcile HorizontalPodAutoscaler
+	// 7. Reconcile HorizontalPodAutoscaler
 	if node.Spec.Type != v1alpha1.NodeTypeAdmin && as != nil && as.Enabled {
 		desiredHPA := buildHPA(&cluster, &node, as)
 		hpa := &autoscalingv2.HorizontalPodAutoscaler{

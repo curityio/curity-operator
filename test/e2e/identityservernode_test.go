@@ -166,6 +166,7 @@ var _ = Describe("IdentityServerNode", func() {
 				By("deploying admin node and verifying resources")
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
 					map[string]interface{}{"name": "deploy-admin", "namespace": ns, "clusterName": "deploy-cluster"})
+				utils.SimulateClusterConfigReady(ns, "deploy-cluster", e2eTimeout, e2eInterval)
 
 				adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "deploy-admin", Namespace: ns}}
 				utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
@@ -497,6 +498,7 @@ var _ = Describe("IdentityServerNode", func() {
 					map[string]interface{}{"name": "dup-cluster", "namespace": ns})
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
 					map[string]interface{}{"name": "admin-1", "namespace": ns, "clusterName": "dup-cluster"})
+				utils.SimulateClusterConfigReady(ns, "dup-cluster", e2eTimeout, e2eInterval)
 
 				deploy1 := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "admin-1", Namespace: ns}}
 				utils.WaitForResource(deploy1, e2eTimeout, e2eInterval)
@@ -755,6 +757,7 @@ var _ = Describe("IdentityServerNode", func() {
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
+				utils.SimulateClusterConfigReady(ns, "rep-cluster", e2eTimeout, e2eInterval)
 
 				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "admin-5", Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
@@ -954,6 +957,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin-ui.yaml", ns,
 					map[string]interface{}{"name": "default-admin", "namespace": ns,
 						"clusterName": "default-creds", "uiEnabled": true, "uiSecure": false})
+				utils.SimulateClusterConfigReady(ns, "default-creds", e2eTimeout, e2eInterval)
 
 				deploy := &appsv1.Deployment{}
 				Eventually(func() error {
@@ -1360,6 +1364,7 @@ var _ = Describe("IdentityServerNode", func() {
 						map[string]interface{}{"name": "cfg-ar-cluster", "namespace": ns})
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
 						map[string]interface{}{"name": "cfg-ar-admin", "namespace": ns, "clusterName": "cfg-ar-cluster"})
+					utils.SimulateClusterConfigReady(ns, "cfg-ar-cluster", e2eTimeout, e2eInterval)
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 						map[string]interface{}{"name": "cfg-ar-runtime", "namespace": ns, "clusterName": "cfg-ar-cluster"})
 
@@ -1463,6 +1468,7 @@ var _ = Describe("IdentityServerNode", func() {
 						map[string]interface{}{"name": "cfg-lic-cluster", "namespace": ns})
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
 						map[string]interface{}{"name": "cfg-lic-admin", "namespace": ns, "clusterName": "cfg-lic-cluster"})
+					utils.SimulateClusterConfigReady(ns, "cfg-lic-cluster", e2eTimeout, e2eInterval)
 
 					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-lic-admin", Namespace: ns}}
 					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
@@ -1505,6 +1511,7 @@ var _ = Describe("IdentityServerNode", func() {
 						map[string]interface{}{"name": "cfg-multi-cluster", "namespace": ns})
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
 						map[string]interface{}{"name": "cfg-multi-admin", "namespace": ns, "clusterName": "cfg-multi-cluster"})
+					utils.SimulateClusterConfigReady(ns, "cfg-multi-cluster", e2eTimeout, e2eInterval)
 
 					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-multi-admin", Namespace: ns}}
 					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
@@ -1649,6 +1656,7 @@ var _ = Describe("IdentityServerNode", func() {
 						map[string]interface{}{"name": "cfg-pend-cluster", "namespace": ns})
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
 						map[string]interface{}{"name": "cfg-pend-admin", "namespace": ns, "clusterName": "cfg-pend-cluster"})
+					utils.SimulateClusterConfigReady(ns, "cfg-pend-cluster", e2eTimeout, e2eInterval)
 
 					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-pend-admin", Namespace: ns}}
 					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
@@ -1855,6 +1863,7 @@ var _ = Describe("IdentityServerNode", func() {
 					By("adding admin node")
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
 						map[string]interface{}{"name": "cfg-aa-admin", "namespace": ns, "clusterName": "cfg-aa-cluster"})
+					utils.SimulateClusterConfigReady(ns, "cfg-aa-cluster", e2eTimeout, e2eInterval)
 
 					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-aa-admin", Namespace: ns}}
 					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
@@ -1891,6 +1900,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin-ui.yaml", ns,
 					map[string]interface{}{"name": "ui-admin", "namespace": ns, "clusterName": "ui-cluster",
 						"uiEnabled": true, "uiSecure": false})
+				utils.SimulateClusterConfigReady(ns, "ui-cluster", e2eTimeout, e2eInterval)
 
 				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "ui-admin", Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
@@ -1978,6 +1988,7 @@ var _ = Describe("IdentityServerNode", func() {
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
+				utils.SimulateClusterConfigReady(ns, "args-cluster", e2eTimeout, e2eInterval)
 
 				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "args-admin", Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
@@ -2381,6 +2392,7 @@ spec:
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
+				utils.SimulateClusterConfigReady(ns, "hpa-adm-cluster", e2eTimeout, e2eInterval)
 
 				By("verifying Deployment exists")
 				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "hpa-admin", Namespace: ns}}

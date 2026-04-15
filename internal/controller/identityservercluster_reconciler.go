@@ -50,7 +50,7 @@ type IdentityServerClusterReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;update
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
 
 // Reconcile handles a single reconciliation loop for an IdentityServerCluster.
@@ -127,6 +127,18 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 	// 5. Ensure cluster config (cluster.xml via genclust Job)
 	if err := r.ensureClusterConfig(ctx, &cluster, childNodes); err != nil {
 		return ctrl.Result{}, err
+	}
+	// If logs aren't readable yet, requeue with backoff instead of relying
+	// on the implicit status-update loop which creates a hot polling cycle.
+	if configCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady); configCond != nil && configCond.Reason == "LogsUnavailable" {
+		// Still update status below, then return with delay.
+		if err := r.Status().Update(ctx, &cluster); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("failed to update cluster status: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	// 6. Ensure config validation (validate discovered managed configs via Job)
@@ -405,6 +417,16 @@ func buildClusterConfigSecret(cluster *v1alpha1.IdentityServerCluster, clusterXM
 	}
 }
 
+// jobCompletionTime returns the time the Job completed, or nil if not yet complete.
+func jobCompletionTime(job *batchv1.Job) *metav1.Time {
+	for _, cond := range job.Status.Conditions {
+		if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
+			return &cond.LastTransitionTime
+		}
+	}
+	return nil
+}
+
 // buildClusterConfigJob creates the Job that runs genclust to generate cluster.xml.
 func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeName string) *batchv1.Job {
 	backoff := jobBackoffLimit
@@ -586,15 +608,35 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 			if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
 				// Job completed — read logs and populate Secret
 				clusterXML, err := r.readJobPodLogs(ctx, &job)
-				if err != nil || len(clusterXML) == 0 {
-					// Scenario 9: logs unavailable — delete Job and retry
-					log.Info("failed to read Job logs, will retry", "error", err)
-					if delErr := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
-						return fmt.Errorf("failed to delete Job after log read failure: %w", delErr)
+				if err != nil {
+					// Transient: cache lag, API error — retry in place.
+					// If the pod is genuinely gone (>30s since completion), fall back
+					// to deleting the Job so a new one gets created.
+					if ct := jobCompletionTime(&job); ct != nil && time.Since(ct.Time) > 30*time.Second {
+						log.Error(err, "pod logs unavailable after 30s, deleting Job to force recreation")
+						if delErr := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
+							return fmt.Errorf("failed to delete stale Job: %w", delErr)
+						}
+					} else {
+						log.Error(err, "Job completed but pod logs not yet available, will retry")
 					}
 					setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
 						metav1.ConditionFalse, "LogsUnavailable",
 						"Job completed but logs could not be read, retrying", cluster.Generation)
+					return nil
+				}
+				if len(clusterXML) == 0 {
+					// Potentially permanent: genclust produced no output.
+					// Delete the Job so a new one runs on the next reconcile.
+					log.Error(fmt.Errorf("genclust produced empty output"), "empty cluster.xml from Job logs, deleting Job to retry")
+					r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "EmptyClusterConfig",
+						"genclust Job %q produced empty output, recreating", jobName)
+					if delErr := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
+						return fmt.Errorf("failed to delete empty-output Job: %w", delErr)
+					}
+					setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
+						metav1.ConditionFalse, "EmptyOutput",
+						"genclust Job produced empty cluster.xml, retrying", cluster.Generation)
 					return nil
 				}
 

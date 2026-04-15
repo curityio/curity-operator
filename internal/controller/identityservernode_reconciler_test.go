@@ -2142,24 +2142,74 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			eventuallyGetResource(ns, "logs-cluster-cluster-config-job", job)
 			origUID := job.UID
 
-			// Mark Job as Complete (but no pod exists with Succeeded phase → logs unavailable)
+			// Mark Job as Complete (but no pod exists with Succeeded phase → logs unavailable).
+			// Set LastTransitionTime to now so the 30s fallback timeout doesn't trigger.
 			job.Status.Conditions = []batchv1.JobCondition{
 				{
-					Type:   batchv1.JobComplete,
-					Status: corev1.ConditionTrue,
+					Type:               batchv1.JobComplete,
+					Status:             corev1.ConditionTrue,
+					LastTransitionTime: metav1.Now(),
 				},
 			}
 			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
 
-			// Operator should detect logs unavailable, delete Job, and create a new one
+			// Condition should become LogsUnavailable
+			Eventually(func() string {
+				cluster := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "logs-cluster", Namespace: ns}, cluster); err != nil {
+					return ""
+				}
+				return conditionReason(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+			}, timeout, interval).Should(Equal("LogsUnavailable"))
+
+			// Job must survive — not deleted and recreated
+			Consistently(func() types.UID {
+				j := &batchv1.Job{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "logs-cluster-cluster-config-job", Namespace: ns}, j); err != nil {
+					return ""
+				}
+				return j.UID
+			}, 5*time.Second, interval).Should(Equal(origUID))
+
+			// Recovery: populate the Secret with real data (simulating the log
+			// read eventually succeeding). The ISC reconciler should detect the
+			// ready Secret and transition from LogsUnavailable → SecretReady.
+			testSimulateClusterConfigReady(ns, "logs-cluster")
+
+			cluster := &v1alpha1.IdentityServerCluster{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "logs-cluster", Namespace: ns}, cluster)).To(Succeed())
+			Expect(conditionReason(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)).To(Equal("SecretReady"))
+		})
+
+		It("should delete Job after 30s timeout when pod logs are permanently unavailable", func() {
+			testCreateCluster(ns, "stale-cluster")
+			testCreateNode(ns, "stale-admin", v1alpha1.NodeTypeAdmin, "stale-cluster")
+
+			job := &batchv1.Job{}
+			eventuallyGetResource(ns, "stale-cluster-cluster-config-job", job)
+			origUID := job.UID
+
+			// Mark Job as Complete with a timestamp >30s in the past,
+			// simulating a pod that was garbage-collected long ago.
+			job.Status.Conditions = []batchv1.JobCondition{
+				{
+					Type:               batchv1.JobComplete,
+					Status:             corev1.ConditionTrue,
+					LastTransitionTime: metav1.NewTime(time.Now().Add(-60 * time.Second)),
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			// Job should be deleted and recreated with a new UID
 			Eventually(func() bool {
 				newJob := &batchv1.Job{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "logs-cluster-cluster-config-job", Namespace: ns}, newJob); err != nil {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "stale-cluster-cluster-config-job", Namespace: ns}, newJob); err != nil {
 					return false
 				}
 				return newJob.UID != origUID
 			}, timeout, interval).Should(BeTrue())
 		})
+
 	})
 
 	Context("Cluster config workflows", func() {

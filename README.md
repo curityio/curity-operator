@@ -171,7 +171,7 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `resources` | object | Default CPU/memory requests/limits |
 | `probes` | object | Default liveness/readiness probe config |
 | `autoscaling` | object | HPA defaults (minReplicas, maxReplicas, targetCPU) |
-| `podDisruptionBudget` | object | PDB configuration |
+| `podDisruptionBudget` | object | PodDisruptionBudget default. `minAvailable` accepts integer (`2`) or percentage (`"50%"`). Runtime nodes only; ignored on admin nodes with a Warning event |
 | `podAnnotations` | map | Applied to all managed pods |
 | `podLabels` | map | Applied to all managed pods |
 | `nodeSelector` | map | Pod scheduling constraints |
@@ -194,7 +194,7 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `probes` | object | Overrides cluster-level probes |
 | `logging` | object | Overrides cluster-level logging |
 | `autoscaling` | object | HPA configuration |
-| `podDisruptionBudget` | object | PDB configuration |
+| `podDisruptionBudget` | object | PodDisruptionBudget; node overrides cluster. `minAvailable` accepts integer or percentage string. Ignored on admin nodes (Warning event `PDBIgnored`) |
 | `podAnnotations` | map | Merges with cluster-level annotations |
 | `podLabels` | map | Merges with cluster-level labels |
 | `nodeSelector` | map | Overrides cluster-level nodeSelector |

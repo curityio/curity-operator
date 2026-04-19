@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -421,6 +422,16 @@ func resolveAutoscaling(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.
 	return cluster.Spec.Autoscaling
 }
 
+// resolvePDB returns the effective PodDisruptionBudget spec. Node-level spec
+// replaces cluster-level entirely — no field-level merge — so users who set
+// PDBSpec on a node own its full configuration for that node.
+func resolvePDB(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *v1alpha1.PDBSpec {
+	if node.Spec.PodDisruptionBudget != nil {
+		return node.Spec.PodDisruptionBudget
+	}
+	return cluster.Spec.PodDisruptionBudget
+}
+
 // resolveResources returns the resource requirements, preferring node over cluster.
 func resolveResources(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *corev1.ResourceRequirements {
 	if node.Spec.Resources != nil {
@@ -645,6 +656,26 @@ func buildHPA(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentitySe
 			MinReplicas: ptr.To(as.MinReplicas),
 			MaxReplicas: as.MaxReplicas,
 			Metrics:     metrics,
+		},
+	}
+}
+
+// buildPDB constructs the desired PodDisruptionBudget for a runtime node.
+// Caller must verify that resolvePDB(cluster, node) is non-nil and its
+// MinAvailable field is non-nil before invoking this function.
+func buildPDB(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *policyv1.PodDisruptionBudget {
+	pdb := resolvePDB(cluster, node)
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      node.Name,
+			Namespace: node.Namespace,
+			Labels:    buildLabels(cluster, node),
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MinAvailable: pdb.MinAvailable,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: buildSelectorLabels(node),
+			},
 		},
 	}
 }

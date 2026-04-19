@@ -4,6 +4,7 @@ package v1alpha1
 import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // NodeType defines whether a node is an admin or runtime node.
@@ -143,10 +144,16 @@ type AutoscalingSpec struct {
 	CustomMetrics []autoscalingv2.MetricSpec `json:"customMetrics,omitempty"`
 }
 
-// PDBSpec configures a PodDisruptionBudget.
+// PDBSpec configures a PodDisruptionBudget for runtime pods.
+// Admin nodes do not participate in PDB reconciliation; if set there, the
+// field is ignored and a Warning event is emitted (see the node reconciler).
 type PDBSpec struct {
-	// +kubebuilder:validation:Minimum=0
-	MinAvailable *int32 `json:"minAvailable,omitempty"`
+	// MinAvailable is the minimum number of pods that must remain available
+	// during voluntary disruption. Accepts an integer (e.g., 2) or a
+	// percentage string (e.g., "50%"). Matches upstream
+	// policy/v1.PodDisruptionBudgetSpec.MinAvailable.
+	// +kubebuilder:validation:XIntOrString
+	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
 }
 
 // Validation status values for AppliedConfigStatus.

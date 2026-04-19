@@ -15,9 +15,11 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -2795,6 +2797,234 @@ spec:
 					}
 					return *deploy.Spec.Replicas
 				}, 5*time.Second, e2eInterval).Should(Equal(int32(5)))
+			})
+		})
+	})
+
+	// =================================================================
+	// podDisruptionBudget
+	// =================================================================
+	Context("podDisruptionBudget", func() {
+
+		Describe("PDB created for runtime with integer minAvailable", Label("smoke"), Ordered, func() {
+			const ns = "e2e-pdb"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should create PDB for runtime node with minAvailable", func() {
+				ctx := context.Background()
+
+				By("creating cluster")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "pdb-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "pdb-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				By("creating runtime node with minAvailable=2")
+				min := intstr.FromInt32(2)
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "pdb-runtime", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-cluster"},
+						Replicas:                 ptr.To(int32(3)),
+						PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("verifying PDB is created")
+				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "pdb-runtime", Namespace: ns}}
+				utils.WaitForResource(pdb, e2eTimeout, e2eInterval)
+
+				Expect(pdb.Spec.MinAvailable).NotTo(BeNil())
+				Expect(pdb.Spec.MinAvailable.IntValue()).To(Equal(2))
+				Expect(pdb.Spec.MaxUnavailable).To(BeNil())
+				Expect(pdb.Spec.Selector).NotTo(BeNil())
+				Expect(pdb.Spec.Selector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/instance", "pdb-runtime"))
+
+				By("verifying PDB owner reference")
+				Expect(pdb.OwnerReferences).To(HaveLen(1))
+				Expect(pdb.OwnerReferences[0].Kind).To(Equal("IdentityServerNode"))
+				Expect(pdb.OwnerReferences[0].Name).To(Equal("pdb-runtime"))
+
+				utils.MatchYAMLResource(pdb, "pdb-runtime-min-int")
+			})
+		})
+
+		Describe("PDB with percentage minAvailable", Label("smoke"), Ordered, func() {
+			const ns = "e2e-pdb-pct"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should create PDB with percentage minAvailable", func() {
+				ctx := context.Background()
+
+				By("creating cluster")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "pdb-pct-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "pdb-pct-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				By("creating runtime node with minAvailable=\"50%\"")
+				min := intstr.FromString("50%")
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "pdb-pct-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-pct-cluster"},
+						Replicas:                 ptr.To(int32(4)),
+						PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("verifying PDB is created with percentage value")
+				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "pdb-pct-node", Namespace: ns}}
+				utils.WaitForResource(pdb, e2eTimeout, e2eInterval)
+
+				Expect(pdb.Spec.MinAvailable).NotTo(BeNil())
+				Expect(pdb.Spec.MinAvailable.Type).To(Equal(intstr.String))
+				Expect(pdb.Spec.MinAvailable.StrVal).To(Equal("50%"))
+
+				utils.MatchYAMLResource(pdb, "pdb-runtime-min-pct")
+			})
+		})
+
+		Describe("PDB deleted when field removed", Label("smoke"), Ordered, func() {
+			const ns = "e2e-pdb-del"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should delete PDB when podDisruptionBudget is removed from spec", func() {
+				ctx := context.Background()
+
+				By("creating cluster and runtime node with PDB")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "pdb-del-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "pdb-del-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				min := intstr.FromInt32(1)
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "pdb-del-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-del-cluster"},
+						Replicas:                 ptr.To(int32(2)),
+						PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("waiting for PDB to be created")
+				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "pdb-del-node", Namespace: ns}}
+				utils.WaitForResource(pdb, e2eTimeout, e2eInterval)
+
+				By("removing PDB from node spec")
+				Eventually(func() error {
+					var fresh v1alpha1.IdentityServerNode
+					if err := k().Get(ctx, client.ObjectKey{Name: "pdb-del-node", Namespace: ns}, &fresh); err != nil {
+						return err
+					}
+					fresh.Spec.PodDisruptionBudget = nil
+					return k().Update(ctx, &fresh)
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+
+				By("verifying PDB is deleted")
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k().Get(ctx,
+						client.ObjectKey{Name: "pdb-del-node", Namespace: ns},
+						&policyv1.PodDisruptionBudget{}))
+				}, e2eTimeout, e2eInterval).Should(BeTrue())
+			})
+		})
+
+		Describe("PDB not created for admin node", Label("smoke"), Ordered, func() {
+			const ns = "e2e-pdb-admin"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should ignore PDB spec on admin node", func() {
+				ctx := context.Background()
+
+				By("creating cluster")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "pdb-adm-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "pdb-adm-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				By("creating admin node with PDB spec set")
+				min := intstr.FromInt32(1)
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "pdb-admin", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-adm-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+				utils.SimulateClusterConfigReady(ns, "pdb-adm-cluster", e2eTimeout, e2eInterval)
+
+				By("verifying Deployment exists")
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "pdb-admin", Namespace: ns}}
+				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+				By("verifying PDB never created for admin")
+				Consistently(func() bool {
+					return apierrors.IsNotFound(k().Get(ctx,
+						client.ObjectKey{Name: "pdb-admin", Namespace: ns},
+						&policyv1.PodDisruptionBudget{}))
+				}, 5*time.Second, e2eInterval).Should(BeTrue())
+			})
+		})
+
+		Describe("PDB coexists with HPA on the same node", Label("smoke"), Ordered, func() {
+			const ns = "e2e-pdb-hpa"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should create both HPA and PDB for a runtime node that sets both", func() {
+				ctx := context.Background()
+
+				By("creating cluster")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "pdb-hpa-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "pdb-hpa-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				By("creating runtime node with both HPA and PDB")
+				min := intstr.FromInt32(1)
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "pdb-hpa-node", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-hpa-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						Autoscaling: &v1alpha1.AutoscalingSpec{
+							Enabled:                        true,
+							MinReplicas:                    2,
+							MaxReplicas:                    5,
+							TargetCPUUtilizationPercentage: 80,
+						},
+						PodDisruptionBudget: &v1alpha1.PDBSpec{MinAvailable: &min},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("verifying both HPA and PDB are created and owned by the node")
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "pdb-hpa-node", Namespace: ns}}
+				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
+				Expect(hpa.OwnerReferences).To(HaveLen(1))
+				Expect(hpa.OwnerReferences[0].Kind).To(Equal("IdentityServerNode"))
+
+				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "pdb-hpa-node", Namespace: ns}}
+				utils.WaitForResource(pdb, e2eTimeout, e2eInterval)
+				Expect(pdb.OwnerReferences).To(HaveLen(1))
+				Expect(pdb.OwnerReferences[0].Kind).To(Equal("IdentityServerNode"))
+				Expect(pdb.Spec.MinAvailable.IntValue()).To(Equal(1))
 			})
 		})
 	})

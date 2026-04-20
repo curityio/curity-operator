@@ -13,6 +13,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -56,6 +57,7 @@ var excludeCRDFields = []string{
 var excludeFieldMap = map[string][]string{
 	"job":                     excludeJobFields,
 	"horizontalpodautoscaler": excludeFields,
+	"poddisruptionbudget":     excludeFields,
 	"identityservercluster":   excludeCRDFields,
 	"identityservernode":      excludeCRDFields,
 }
@@ -154,6 +156,11 @@ func sanitizeVolatileFields(resource interface{}) interface{} {
 		j := r.DeepCopy()
 		j.Status = batchv1.JobStatus{}
 		return j
+	case *policyv1.PodDisruptionBudget:
+		p := r.DeepCopy()
+		p.Annotations = nil
+		p.Status = policyv1.PodDisruptionBudgetStatus{}
+		return p
 	default:
 		return resource
 	}

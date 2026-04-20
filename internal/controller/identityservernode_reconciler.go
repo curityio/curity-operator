@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,6 +45,7 @@ type IdentityServerNodeReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile handles a single reconciliation loop for an IdentityServerNode.
 func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -404,9 +406,105 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
+	// 8. Reconcile PodDisruptionBudget (runtime nodes only, when minAvailable is set).
+	pdbSpec := resolvePDB(&cluster, &node)
+	pdbRequested := pdbSpec != nil && pdbSpec.MinAvailable != nil
+	isAdmin := node.Spec.Type == v1alpha1.NodeTypeAdmin
+
+	// Admin guard: log + event whenever PDB is requested on an admin node, regardless
+	// of whether a stale PDB exists. K8s Event server-side dedup absorbs repeats.
+	if isAdmin && pdbRequested {
+		log.Info("ignoring PDB spec on admin node", "node", node.Name, "minAvailable", pdbSpec.MinAvailable)
+		r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PDBIgnored",
+			"PodDisruptionBudget spec is set but ignored: PDB is not supported on admin nodes")
+	}
+
+	// pdbCollisionName is non-empty when cleanup found a PDB with our target
+	// name that is not owned by this node. We record it here and apply the
+	// Degraded condition *after* computeNodeConditions, which rebuilds the
+	// conditions slice from scratch.
+	var pdbCollisionName string
+
+	if !isAdmin && pdbRequested {
+		desiredPDB := buildPDB(&cluster, &node)
+		existingPDB := &policyv1.PodDisruptionBudget{
+			ObjectMeta: metav1.ObjectMeta{Name: desiredPDB.Name, Namespace: desiredPDB.Namespace},
+		}
+		result, err = controllerutil.CreateOrUpdate(ctx, r.Client, existingPDB, func() error {
+			existingPDB.Labels = desiredPDB.Labels
+			existingPDB.Spec = desiredPDB.Spec
+			return controllerutil.SetControllerReference(&node, existingPDB, r.Scheme)
+		})
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile PDB: %w", err)
+		}
+		if result != controllerutil.OperationResultNone {
+			log.Info("PDB reconciled", "operation", result, "name", existingPDB.Name)
+			r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PDBReconciled",
+				"PodDisruptionBudget %q %s", existingPDB.Name, result)
+		}
+
+		// Post-write sanity check: if the PDB controller has marked the budget
+		// unsatisfiable (no disruptions allowed AND the desired health is unmet),
+		// emit a Warning so `kubectl drain` doesn't silently hang for the user.
+		//
+		// Gate on ObservedGeneration == Generation. The PDB controller in
+		// kube-controller-manager populates .status asynchronously, so on Create
+		// the status is zero (leading to a false-negative skip), and on spec
+		// updates DesiredHealthy can briefly reflect the previous MinAvailable
+		// (leading to a false-positive warning right after the user edits a
+		// misconfig back into a valid state). When status is stale relative to
+		// spec we defer; the Owns(&PodDisruptionBudget{}) watch will re-enqueue
+		// once the PDB controller catches up.
+		if existingPDB.Status.ObservedGeneration == existingPDB.Generation &&
+			existingPDB.Status.DisruptionsAllowed == 0 &&
+			existingPDB.Status.DesiredHealthy > existingPDB.Status.CurrentHealthy {
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PDBUnsatisfiable",
+				"PodDisruptionBudget %q cannot be satisfied: desiredHealthy=%d, currentHealthy=%d; voluntary disruptions are blocked",
+				existingPDB.Name, existingPDB.Status.DesiredHealthy, existingPDB.Status.CurrentHealthy)
+		}
+	} else {
+		// Delete a stale operator-owned PDB if one exists; refuse to delete one we
+		// don't own (surface it via a Degraded condition so users see the collision).
+		var existingPDB policyv1.PodDisruptionBudget
+		err := r.Get(ctx, client.ObjectKey{Name: node.Name, Namespace: node.Namespace}, &existingPDB)
+		if err == nil {
+			if !metav1.IsControlledBy(&existingPDB, &node) {
+				log.Info("skipping PDB deletion, not owned by this node", "name", existingPDB.Name)
+				r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PDBNotOwned",
+					"PDB %q exists but is not managed by this node; skipping deletion", existingPDB.Name)
+				pdbCollisionName = existingPDB.Name
+			} else if delErr := r.Delete(ctx, &existingPDB); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("failed to delete PDB: %w", delErr)
+			} else {
+				log.Info("PDB deleted", "name", existingPDB.Name)
+				// Admin-case warning was already emitted above; only emit the
+				// Normal cleanup event for the runtime "spec removed" case.
+				if !isAdmin {
+					r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PDBDeleted",
+						"PodDisruptionBudget %q deleted", existingPDB.Name)
+				}
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("failed to get PDB: %w", err)
+		}
+	}
+
 	// 9. Compute status from Deployment
 	conditions, rs := computeNodeConditions(deploy, node.Generation)
 	node.Status.Conditions = conditions
+
+	// Overlay PDB-specific Degraded condition after computeNodeConditions, which
+	// rebuilds conditions from Deployment health. A PDB name collision is
+	// higher-priority than partial-replica degradation — if both apply, the PDB
+	// message is more actionable.
+	if pdbCollisionName != "" {
+		setCondition(&node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
+			"PDBNotOwned",
+			fmt.Sprintf("A PodDisruptionBudget named %q exists but is not owned by this node", pdbCollisionName),
+			node.Generation)
+	}
+
 	node.Status.ObservedGeneration = node.Generation
 	node.Status.Replicas = rs.Replicas
 	node.Status.UpdatedReplicas = rs.UpdatedReplicas
@@ -434,6 +532,7 @@ func (r *IdentityServerNodeReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Watches(
 			&v1alpha1.IdentityServerCluster{},
 			handler.EnqueueRequestsFromMapFunc(r.findNodesForCluster),

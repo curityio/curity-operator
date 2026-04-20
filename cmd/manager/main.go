@@ -9,6 +9,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -33,6 +34,7 @@ func init() {
 	utilruntime.Must(appsv1.AddToScheme(scheme))
 	utilruntime.Must(batchv1.AddToScheme(scheme))
 	utilruntime.Must(autoscalingv2.AddToScheme(scheme))
+	utilruntime.Must(policyv1.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 }
 

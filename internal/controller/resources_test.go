@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
@@ -1946,5 +1947,139 @@ func TestBuildDeployment_HPADisabled_ReplicasFromSpec(t *testing.T) {
 	deploy := buildDeployment(cluster, node, nil)
 	if deploy.Spec.Replicas == nil || *deploy.Spec.Replicas != 3 {
 		t.Errorf("expected replicas=3, got %v", deploy.Spec.Replicas)
+	}
+}
+
+// --- resolvePDB tests ---
+
+func TestResolvePDB_BothNil(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	if got := resolvePDB(cluster, node); got != nil {
+		t.Errorf("expected nil, got %+v", got)
+	}
+}
+
+func TestResolvePDB_ClusterOnly(t *testing.T) {
+	cluster := newTestCluster()
+	min := intstr.FromInt32(2)
+	cluster.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &min}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	got := resolvePDB(cluster, node)
+	if got != cluster.Spec.PodDisruptionBudget {
+		t.Errorf("expected cluster's PDB pointer, got %p want %p", got, cluster.Spec.PodDisruptionBudget)
+	}
+}
+
+func TestResolvePDB_NodeOnly(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	min := intstr.FromString("50%")
+	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &min}
+	got := resolvePDB(cluster, node)
+	if got != node.Spec.PodDisruptionBudget {
+		t.Errorf("expected node's PDB pointer, got %p want %p", got, node.Spec.PodDisruptionBudget)
+	}
+}
+
+func TestResolvePDB_NodeOverridesCluster(t *testing.T) {
+	cluster := newTestCluster()
+	clusterMin := intstr.FromInt32(1)
+	cluster.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &clusterMin}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	nodeMin := intstr.FromInt32(5)
+	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &nodeMin}
+	got := resolvePDB(cluster, node)
+	if got != node.Spec.PodDisruptionBudget {
+		t.Errorf("expected node's PDB to win, got %p want %p", got, node.Spec.PodDisruptionBudget)
+	}
+}
+
+// --- buildPDB tests ---
+
+func TestBuildPDB_MinAvailable_Integer(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	min := intstr.FromInt32(2)
+	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &min}
+
+	pdb := buildPDB(cluster, node)
+	if pdb.Spec.MinAvailable == nil {
+		t.Fatal("expected non-nil MinAvailable")
+	}
+	if pdb.Spec.MinAvailable.Type != intstr.Int {
+		t.Errorf("expected MinAvailable type=Int, got %v", pdb.Spec.MinAvailable.Type)
+	}
+	if pdb.Spec.MinAvailable.IntValue() != 2 {
+		t.Errorf("expected MinAvailable=2, got %d", pdb.Spec.MinAvailable.IntValue())
+	}
+	if pdb.Spec.MaxUnavailable != nil {
+		t.Errorf("expected nil MaxUnavailable, got %+v", pdb.Spec.MaxUnavailable)
+	}
+}
+
+func TestBuildPDB_MinAvailable_Percentage(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	min := intstr.FromString("50%")
+	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &min}
+
+	pdb := buildPDB(cluster, node)
+	if pdb.Spec.MinAvailable == nil {
+		t.Fatal("expected non-nil MinAvailable")
+	}
+	if pdb.Spec.MinAvailable.Type != intstr.String {
+		t.Errorf("expected MinAvailable type=String, got %v", pdb.Spec.MinAvailable.Type)
+	}
+	if pdb.Spec.MinAvailable.StrVal != "50%" {
+		t.Errorf("expected MinAvailable=\"50%%\", got %q", pdb.Spec.MinAvailable.StrVal)
+	}
+}
+
+func TestBuildPDB_Labels(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	min := intstr.FromInt32(1)
+	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &min}
+
+	pdb := buildPDB(cluster, node)
+	want := buildLabels(cluster, node)
+	for k, v := range want {
+		if pdb.Labels[k] != v {
+			t.Errorf("label %q: want %q, got %q", k, v, pdb.Labels[k])
+		}
+	}
+}
+
+func TestBuildPDB_Name(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	min := intstr.FromInt32(1)
+	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &min}
+
+	pdb := buildPDB(cluster, node)
+	if pdb.Name != node.Name {
+		t.Errorf("expected name %q, got %q", node.Name, pdb.Name)
+	}
+	if pdb.Namespace != node.Namespace {
+		t.Errorf("expected namespace %q, got %q", node.Namespace, pdb.Namespace)
+	}
+}
+
+func TestBuildPDB_Selector(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	min := intstr.FromInt32(1)
+	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &min}
+
+	pdb := buildPDB(cluster, node)
+	if pdb.Spec.Selector == nil {
+		t.Fatal("expected non-nil Selector")
+	}
+	want := buildSelectorLabels(node)
+	for k, v := range want {
+		if pdb.Spec.Selector.MatchLabels[k] != v {
+			t.Errorf("selector label %q: want %q, got %q", k, v, pdb.Spec.Selector.MatchLabels[k])
+		}
 	}
 }

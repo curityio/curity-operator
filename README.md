@@ -233,8 +233,10 @@ Set the `curity.io/config-type` annotation to control where configs are mounted.
 
 | Type | Annotation Value | Mount Path |
 |---|---|---|
-| Base config | `base` (default) | `/opt/idsvr/etc/init/{filename}` |
-| License | `license` | `/opt/idsvr/etc/init/license/{filename}` |
+| Base config | `base` (default) | `/opt/idsvr/etc/init/{kind}_{resource-name}_{filename}` |
+| License | `license` | `/opt/idsvr/etc/init/license/{kind}_{resource-name}_{filename}` |
+
+Mount filenames are prefixed with the resource kind and name to prevent collisions when multiple ConfigMaps/Secrets contain the same data key. The `{kind}` prefix is `cm` for ConfigMaps and `secret` for Secrets (e.g. `cm_my-config_base-config.xml`).
 
 ### Validation
 

@@ -81,7 +81,7 @@ spec:
               subPath: cluster.xml
             - name: cfg-cm-runtime-cfg
               readOnly: true
-              mountPath: /opt/idsvr/etc/init/app.xml
+              mountPath: /opt/idsvr/etc/init/cm_runtime-cfg_app.xml
               subPath: app.xml
           livenessProbe:
             httpGet:

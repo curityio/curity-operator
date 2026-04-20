@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
@@ -545,5 +546,175 @@ func TestBuildAppliedConfigStatus_EmptyConfigs(t *testing.T) {
 	status := buildAppliedConfigStatus(nil, v1alpha1.ValidationStatusValidated)
 	if status != nil {
 		t.Errorf("expected nil for empty configs, got %v", status)
+	}
+}
+
+// --- mountFilename ---
+
+func TestMountFilename_ConfigMap(t *testing.T) {
+	got := mountFilename(false, "my-cm", "config.xml")
+	want := "cm_my-cm_config.xml"
+	if got != want {
+		t.Errorf("mountFilename(false, \"my-cm\", \"config.xml\") = %q, want %q", got, want)
+	}
+}
+
+func TestMountFilename_Secret(t *testing.T) {
+	got := mountFilename(true, "my-secret", "license.json")
+	want := "secret_my-secret_license.json"
+	if got != want {
+		t.Errorf("mountFilename(true, \"my-secret\", \"license.json\") = %q, want %q", got, want)
+	}
+}
+
+func TestMountFilename_UnambiguousSeparator(t *testing.T) {
+	// "cm_foo_bar-baz.xml" can only mean ConfigMap "foo", key "bar-baz.xml"
+	// because K8s resource names cannot contain underscores.
+	a := mountFilename(false, "foo", "bar-baz.xml")
+	b := mountFilename(false, "foo-bar", "baz.xml")
+	if a == b {
+		t.Errorf("expected different filenames for different (name, key) pairs, both got %q", a)
+	}
+}
+
+func TestMountFilename_EmptyInputs(t *testing.T) {
+	// Empty resource name and key should not panic.
+	got := mountFilename(false, "", "")
+	if got != "cm__" {
+		t.Errorf("mountFilename(false, \"\", \"\") = %q, want %q", got, "cm__")
+	}
+}
+
+func TestMountFilename_KeyWithUnderscore(t *testing.T) {
+	// Underscores in the data key are valid. The "unambiguous" guarantee is
+	// about the resource name boundary (names can't contain _), not about
+	// parsing the key portion. cm_foo_my_config.xml is always ConfigMap "foo"
+	// with key "my_config.xml" because "foo" can't contain underscores.
+	got := mountFilename(false, "foo", "my_config.xml")
+	if got != "cm_foo_my_config.xml" {
+		t.Errorf("got %q, want %q", got, "cm_foo_my_config.xml")
+	}
+}
+
+func TestMountFilename_KeyWithPathSeparator(t *testing.T) {
+	// Data keys with path separators are technically valid in ConfigMaps.
+	// mountFilename passes them through — Kubernetes creates nested
+	// directories for SubPath values containing slashes.
+	got := mountFilename(false, "foo", "sub/dir/config.xml")
+	if got != "cm_foo_sub/dir/config.xml" {
+		t.Errorf("got %q, want %q", got, "cm_foo_sub/dir/config.xml")
+	}
+}
+
+// --- detectDuplicateKeys ---
+
+func TestDetectDuplicateKeys_NoConfigs(t *testing.T) {
+	warnings := detectDuplicateKeys(nil)
+	if len(warnings) != 0 {
+		t.Errorf("expected nil warnings for nil configs, got %v", warnings)
+	}
+}
+
+func TestDetectDuplicateKeys_DistinctKeys(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
+		{Name: "cm-b", ConfigType: ConfigTypeBase, Data: map[string][]byte{"b.xml": []byte("<b/>")}},
+	}
+	warnings := detectDuplicateKeys(configs)
+	if len(warnings) != 0 {
+		t.Errorf("expected no warnings for distinct keys, got %v", warnings)
+	}
+}
+
+func TestDetectDuplicateKeys_SameKeyDifferentConfigType(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"foo.xml": []byte("<a/>")}},
+		{Name: "cm-b", ConfigType: ConfigTypeLicense, Data: map[string][]byte{"foo.xml": []byte("<b/>")}},
+	}
+	warnings := detectDuplicateKeys(configs)
+	if len(warnings) != 0 {
+		t.Errorf("expected no warnings for same key different config type, got %v", warnings)
+	}
+}
+
+func TestDetectDuplicateKeys_SameKeySameType(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<a/>")}},
+		{Name: "cm-b", ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<b/>")}},
+	}
+	warnings := detectDuplicateKeys(configs)
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "base-config.xml") || !strings.Contains(warnings[0], "ConfigMap/cm-a") || !strings.Contains(warnings[0], "ConfigMap/cm-b") {
+		t.Errorf("warning should mention filename and both resources with kind, got: %s", warnings[0])
+	}
+}
+
+func TestDetectDuplicateKeys_ConfigMapAndSecret(t *testing.T) {
+	// Even though mountFilename() produces distinct paths (cm_* vs secret_*),
+	// having the same data key in both a ConfigMap and Secret of the same
+	// config type is likely a user mistake — it may produce unexpected merged
+	// configuration. The warning is about user intent, not mount path collisions.
+	configs := []DiscoveredConfigResource{
+		{Name: "cm-a", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"config.xml": []byte("<a/>")}},
+		{Name: "sec-a", IsSecret: true, ConfigType: ConfigTypeBase, Data: map[string][]byte{"config.xml": []byte("<b/>")}},
+	}
+	warnings := detectDuplicateKeys(configs)
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning for CM+Secret same key, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "ConfigMap/cm-a") || !strings.Contains(warnings[0], "Secret/sec-a") {
+		t.Errorf("warning should mention both resources with kind, got: %s", warnings[0])
+	}
+}
+
+func TestDetectDuplicateKeys_SingleResourceMultipleKeys(t *testing.T) {
+	// A single resource with multiple distinct keys should produce 0 warnings.
+	configs := []DiscoveredConfigResource{
+		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{
+			"a.xml": []byte("<a/>"),
+			"b.xml": []byte("<b/>"),
+			"c.xml": []byte("<c/>"),
+		}},
+	}
+	warnings := detectDuplicateKeys(configs)
+	if len(warnings) != 0 {
+		t.Errorf("expected 0 warnings for single resource with multiple keys, got %v", warnings)
+	}
+}
+
+func TestDetectDuplicateKeys_ThreeResourcesSameKey(t *testing.T) {
+	// Three resources sharing the same key should produce 1 warning listing all three.
+	configs := []DiscoveredConfigResource{
+		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"shared.xml": []byte("<a/>")}},
+		{Name: "cm-b", ConfigType: ConfigTypeBase, Data: map[string][]byte{"shared.xml": []byte("<b/>")}},
+		{Name: "cm-c", ConfigType: ConfigTypeBase, Data: map[string][]byte{"shared.xml": []byte("<c/>")}},
+	}
+	warnings := detectDuplicateKeys(configs)
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.Contains(warnings[0], "ConfigMap/cm-a") || !strings.Contains(warnings[0], "ConfigMap/cm-b") || !strings.Contains(warnings[0], "ConfigMap/cm-c") {
+		t.Errorf("warning should list all three resources with kind, got: %s", warnings[0])
+	}
+}
+
+func TestDetectDuplicateKeys_MultipleDistinctDuplicates(t *testing.T) {
+	// Two different keys are each duplicated — should produce 2 sorted warnings.
+	configs := []DiscoveredConfigResource{
+		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"x.xml": []byte("<a/>"), "y.xml": []byte("<a/>")}},
+		{Name: "cm-b", ConfigType: ConfigTypeBase, Data: map[string][]byte{"x.xml": []byte("<b/>"), "y.xml": []byte("<b/>")}},
+	}
+	warnings := detectDuplicateKeys(configs)
+	if len(warnings) != 2 {
+		t.Fatalf("expected 2 warnings for two distinct duplicated keys, got %d: %v", len(warnings), warnings)
+	}
+	// Warnings are sorted — "x.xml" before "y.xml".
+	if !strings.Contains(warnings[0], "x.xml") {
+		t.Errorf("first warning should be about x.xml, got: %s", warnings[0])
+	}
+	if !strings.Contains(warnings[1], "y.xml") {
+		t.Errorf("second warning should be about y.xml, got: %s", warnings[1])
 	}
 }

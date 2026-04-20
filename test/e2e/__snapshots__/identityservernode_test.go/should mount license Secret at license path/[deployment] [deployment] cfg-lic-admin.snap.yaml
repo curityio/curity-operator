@@ -91,7 +91,7 @@ spec:
               subPath: cluster.xml
             - name: cfg-secret-my-license
               readOnly: true
-              mountPath: /opt/idsvr/etc/init/license/license.json
+              mountPath: /opt/idsvr/etc/init/license/secret_my-license_license.json
               subPath: license.json
           livenessProbe:
             httpGet:

@@ -1495,13 +1495,14 @@ func TestBuildVolumes_BaseConfigMap(t *testing.T) {
 		t.Errorf("expected ConfigMap volume for base-cm, got %v", vol)
 	}
 	found := false
+	wantPath := MountPathBase + mountFilename(false, "base-cm", "config.xml")
 	for _, m := range mounts {
-		if m.SubPath == "config.xml" && m.MountPath == MountPathBase+"config.xml" {
+		if m.SubPath == "config.xml" && m.MountPath == wantPath {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected mount at /opt/idsvr/etc/init/config.xml")
+		t.Errorf("expected mount at %s", wantPath)
 	}
 }
 
@@ -1518,13 +1519,14 @@ func TestBuildVolumes_LicenseSecret(t *testing.T) {
 		t.Errorf("expected Secret volume for lic, got %v", vol)
 	}
 	found := false
+	wantPath := MountPathLicense + mountFilename(true, "lic", "license.json")
 	for _, m := range mounts {
-		if m.SubPath == "license.json" && m.MountPath == MountPathLicense+"license.json" {
+		if m.SubPath == "license.json" && m.MountPath == wantPath {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected mount at /opt/idsvr/etc/init/license/license.json")
+		t.Errorf("expected mount at %s", wantPath)
 	}
 }
 
@@ -1586,6 +1588,38 @@ func TestBuildVolumes_DeterministicMountOrder(t *testing.T) {
 	}
 }
 
+func TestBuildVolumes_DuplicateKeysDifferentResources(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "cm-a", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<a/>")}},
+		{Name: "cm-b", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<b/>")}},
+	}
+	_, mounts := buildVolumes("cluster-1", configs)
+	// cluster-config + 2 config mounts = 3
+	if len(mounts) != 3 {
+		t.Fatalf("expected 3 mounts, got %d", len(mounts))
+	}
+	// The two config mounts must have different MountPaths.
+	if mounts[1].MountPath == mounts[2].MountPath {
+		t.Errorf("expected different mount paths for duplicate keys, both got %q", mounts[1].MountPath)
+	}
+}
+
+func TestBuildVolumes_ClusterConfigUnchanged(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "my-cm", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"cluster.xml": []byte("<c/>")}},
+	}
+	_, mounts := buildVolumes("cluster-1", configs)
+	// First mount is the operator's internal cluster.xml — must NOT be prefixed.
+	if mounts[0].MountPath != "/opt/idsvr/etc/init/cluster.xml" {
+		t.Errorf("operator cluster.xml mount changed: got %q", mounts[0].MountPath)
+	}
+	// Second mount is the user's config — must be prefixed, not colliding.
+	wantPath := MountPathBase + mountFilename(false, "my-cm", "cluster.xml")
+	if mounts[1].MountPath != wantPath {
+		t.Errorf("user cluster.xml mount: got %q, want %q", mounts[1].MountPath, wantPath)
+	}
+}
+
 func TestBuildDeployment_WithDiscoveredConfigs(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
@@ -1595,13 +1629,14 @@ func TestBuildDeployment_WithDiscoveredConfigs(t *testing.T) {
 	deploy := buildDeployment(cluster, node, configs)
 	container := deploy.Spec.Template.Spec.Containers[0]
 	found := false
+	wantPath := MountPathBase + mountFilename(false, "base-config", "cfg.xml")
 	for _, m := range container.VolumeMounts {
-		if m.SubPath == "cfg.xml" && m.MountPath == MountPathBase+"cfg.xml" {
+		if m.SubPath == "cfg.xml" && m.MountPath == wantPath {
 			found = true
 		}
 	}
 	if !found {
-		t.Error("expected discovered config mount in deployment container")
+		t.Errorf("expected discovered config mount at %s", wantPath)
 	}
 }
 

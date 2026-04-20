@@ -695,7 +695,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cfg-node", Namespace: ns}, deploy)).To(Succeed())
 				g.Expect(hasVolumeName(deploy, "cfg-cm-my-config")).To(BeTrue(), "should have cfg-cm-my-config volume")
-				g.Expect(hasVolumeMount(deploy, "cfg-cm-my-config", "/opt/idsvr/etc/init/init.xml")).To(BeTrue(), "should mount at init path")
+				g.Expect(hasVolumeMount(deploy, "cfg-cm-my-config", "/opt/idsvr/etc/init/cm_my-config_init.xml")).To(BeTrue(), "should mount at init path")
 			}, timeout, interval).Should(Succeed())
 
 			// Verify config-hash annotation on pod template
@@ -782,7 +782,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cfg-runtime", Namespace: ns}, deploy)).To(Succeed())
 				g.Expect(hasVolumeName(deploy, "cfg-cm-runtime-config")).To(BeTrue())
-				g.Expect(hasVolumeMount(deploy, "cfg-cm-runtime-config", "/opt/idsvr/etc/init/app.xml")).To(BeTrue())
+				g.Expect(hasVolumeMount(deploy, "cfg-cm-runtime-config", "/opt/idsvr/etc/init/cm_runtime-config_app.xml")).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -806,7 +806,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cfg-node", Namespace: ns}, deploy)).To(Succeed())
 				g.Expect(hasVolumeName(deploy, "cfg-secret-my-license")).To(BeTrue())
-				g.Expect(hasVolumeMount(deploy, "cfg-secret-my-license", "/opt/idsvr/etc/init/license/license.json")).To(BeTrue())
+				g.Expect(hasVolumeMount(deploy, "cfg-secret-my-license", "/opt/idsvr/etc/init/license/secret_my-license_license.json")).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -3119,6 +3119,36 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				}
 				return cm.Annotations["curity.io/config-type"]
 			}, timeout, interval).Should(Equal("base"))
+		})
+
+		It("should emit DuplicateConfigKey warning when two ConfigMaps share a data key", func() {
+			testCreateCluster(ns, "dup-cluster")
+
+			// Create two ConfigMaps with the same data key
+			testCreateManagedConfigMap(ns, "dup-cm-a", map[string]string{"shared.xml": "<a/>"}, nil)
+			testCreateManagedConfigMap(ns, "dup-cm-b", map[string]string{"shared.xml": "<b/>"}, nil)
+
+			// Wait for the cluster reconciler to process and emit the event.
+			// The warning fires when the config hash changes (not yet validated).
+			findDuplicateEvent := func() *corev1.Event {
+				var events corev1.EventList
+				if err := k8sClient.List(ctx, &events, client.InNamespace(ns)); err != nil {
+					return nil
+				}
+				for i := range events.Items {
+					if events.Items[i].Reason == "DuplicateConfigKey" && events.Items[i].InvolvedObject.Name == "dup-cluster" {
+						return &events.Items[i]
+					}
+				}
+				return nil
+			}
+			Eventually(func() *corev1.Event { return findDuplicateEvent() }, timeout, interval).ShouldNot(BeNil(),
+				"expected DuplicateConfigKey warning event on the cluster")
+
+			evt := findDuplicateEvent()
+			Expect(evt.Message).To(ContainSubstring("shared.xml"), "event message should mention the duplicated key")
+			Expect(evt.Message).To(ContainSubstring("dup-cm-a"), "event message should mention first resource")
+			Expect(evt.Message).To(ContainSubstring("dup-cm-b"), "event message should mention second resource")
 		})
 	})
 

@@ -288,12 +288,13 @@ func TestBuildValidationVolumes_ConfigMapVolume(t *testing.T) {
 	}
 
 	// Find the mount for the config key.
+	wantPath := MountPathBase + mountFilename(false, "base-cm", "config.xml")
 	found := false
 	for _, m := range mounts {
 		if m.Name == vol.Name && m.SubPath == "config.xml" {
 			found = true
-			if m.MountPath != MountPathBase+"config.xml" {
-				t.Errorf("expected mount path %q, got %q", MountPathBase+"config.xml", m.MountPath)
+			if m.MountPath != wantPath {
+				t.Errorf("expected mount path %q, got %q", wantPath, m.MountPath)
 			}
 		}
 	}
@@ -318,12 +319,13 @@ func TestBuildValidationVolumes_SecretVolume(t *testing.T) {
 		t.Errorf("expected Secret name %q, got %q", "lic", vol.Secret.SecretName)
 	}
 
+	wantPath := MountPathLicense + mountFilename(true, "lic", "license.json")
 	found := false
 	for _, m := range mounts {
 		if m.Name == vol.Name && m.SubPath == "license.json" {
 			found = true
-			if m.MountPath != MountPathLicense+"license.json" {
-				t.Errorf("expected mount path %q, got %q", MountPathLicense+"license.json", m.MountPath)
+			if m.MountPath != wantPath {
+				t.Errorf("expected mount path %q, got %q", wantPath, m.MountPath)
 			}
 		}
 	}
@@ -340,5 +342,19 @@ func TestBuildValidationVolumes_MixedConfigs(t *testing.T) {
 	volumes, _ := buildValidationVolumes(configs)
 	if len(volumes) != 2 {
 		t.Fatalf("expected 2 volumes, got %d", len(volumes))
+	}
+}
+
+func TestBuildValidationVolumes_DuplicateKeysDifferentResources(t *testing.T) {
+	configs := []DiscoveredConfigResource{
+		{Name: "cm-a", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<a/>")}},
+		{Name: "cm-b", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<b/>")}},
+	}
+	_, mounts := buildValidationVolumes(configs)
+	if len(mounts) != 2 {
+		t.Fatalf("expected 2 mounts, got %d", len(mounts))
+	}
+	if mounts[0].MountPath == mounts[1].MountPath {
+		t.Errorf("expected different mount paths for duplicate keys, both got %q", mounts[0].MountPath)
 	}
 }

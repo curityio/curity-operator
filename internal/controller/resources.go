@@ -366,7 +366,7 @@ func buildVolumes(clusterName string, configs []DiscoveredConfigResource) ([]cor
 		for _, key := range keys {
 			mounts = append(mounts, corev1.VolumeMount{
 				Name:      volName,
-				MountPath: mountBase + key,
+				MountPath: mountBase + mountFilename(cfg.IsSecret, cfg.Name, key),
 				SubPath:   key,
 				ReadOnly:  true,
 			})

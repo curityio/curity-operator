@@ -878,7 +878,16 @@ func (r *IdentityServerClusterReconciler) ensureConfigValidation(ctx context.Con
 		return true, nil
 	}
 
-	// No Job exists — create one.
+	// No Job exists — create one. Warn about duplicate data keys once here,
+	// right before Job creation, so the warning fires exactly once per new
+	// config set (not on every reconcile loop while validation is running).
+	if warnings := detectDuplicateKeys(configs); len(warnings) > 0 {
+		for _, w := range warnings {
+			log.Info("duplicate config data key detected", "warning", w)
+			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "DuplicateConfigKey", "%s", w)
+		}
+	}
+
 	newJob, err := buildConfigValidationJob(cluster, configs, configHash, r.Scheme)
 	if err != nil {
 		return false, fmt.Errorf("building validation Job: %w", err)

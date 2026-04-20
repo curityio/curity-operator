@@ -53,7 +53,7 @@ spec:
           volumeMounts:
             - name: cfg-cm-vj-config
               readOnly: true
-              mountPath: /opt/idsvr/etc/init/test.xml
+              mountPath: /opt/idsvr/etc/init/cm_vj-config_test.xml
               subPath: test.xml
             - name: tmp
               mountPath: /tmp

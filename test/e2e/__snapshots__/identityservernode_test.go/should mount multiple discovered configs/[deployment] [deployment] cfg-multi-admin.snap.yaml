@@ -99,15 +99,15 @@ spec:
               subPath: cluster.xml
             - name: cfg-cm-base-config-a
               readOnly: true
-              mountPath: /opt/idsvr/etc/init/a.xml
+              mountPath: /opt/idsvr/etc/init/cm_base-config-a_a.xml
               subPath: a.xml
             - name: cfg-cm-base-config-b
               readOnly: true
-              mountPath: /opt/idsvr/etc/init/b.xml
+              mountPath: /opt/idsvr/etc/init/cm_base-config-b_b.xml
               subPath: b.xml
             - name: cfg-secret-secret-config
               readOnly: true
-              mountPath: /opt/idsvr/etc/init/s.xml
+              mountPath: /opt/idsvr/etc/init/secret_secret-config_s.xml
               subPath: s.xml
           livenessProbe:
             httpGet:

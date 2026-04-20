@@ -246,6 +246,64 @@ func configVolumeName(isSecret bool, name string) string {
 	return fullName[:truncLen] + "-" + suffix
 }
 
+// mountFilename returns a unique filename for mounting a config data key.
+// It prefixes the key with the resource kind and name to prevent mount path
+// collisions when multiple resources contain the same data key.
+// Uses "_" as separator because Kubernetes resource names cannot contain
+// underscores (DNS subdomain rules), making the boundary unambiguous.
+// Volume names use "-" (cfg-cm-{name}) because K8s requires DNS labels there;
+// mount filenames use "_" (cm_{name}_{key}) because they're filesystem paths.
+// ConfigMaps produce "cm_{name}_{key}", Secrets produce "secret_{name}_{key}".
+// Note: no length truncation — assumes resource names and data keys are short
+// enough that the result stays under Linux NAME_MAX (255). In practice K8s
+// resource names are ≤253 chars (DNS subdomain) and data keys are short filenames.
+func mountFilename(isSecret bool, resourceName, key string) string {
+	prefix := "cm_"
+	if isSecret {
+		prefix = "secret_"
+	}
+	return prefix + resourceName + "_" + key
+}
+
+// detectDuplicateKeys checks whether any two discovered config resources of the
+// same config type share a data key. Returns a list of human-readable warnings
+// (one per duplicated key). Returns nil if no duplicates exist.
+//
+// This intentionally groups by (configType, filename) without distinguishing
+// ConfigMap vs Secret. Even though mountFilename() guarantees distinct mount
+// paths (cm_* vs secret_*), having the same data key in both a ConfigMap and
+// a Secret of the same config type is still likely a user mistake — it may
+// produce unexpected merged configuration.
+func detectDuplicateKeys(configs []DiscoveredConfigResource) []string {
+	type mountKey struct {
+		configType string
+		filename   string
+	}
+	seen := make(map[mountKey][]string)
+	for _, cfg := range configs {
+		kind := "ConfigMap"
+		if cfg.IsSecret {
+			kind = "Secret"
+		}
+		for key := range cfg.Data {
+			mk := mountKey{configType: cfg.ConfigType, filename: key}
+			seen[mk] = append(seen[mk], kind+"/"+cfg.Name)
+		}
+	}
+	var warnings []string
+	for mk, owners := range seen {
+		if len(owners) > 1 {
+			sort.Strings(owners)
+			warnings = append(warnings, fmt.Sprintf(
+				"data key %q (config type %q) exists in multiple resources: %v — all will be mounted at distinct paths (prefixed by resource name), verify this is intentional",
+				mk.filename, mk.configType, owners,
+			))
+		}
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
 // buildAppliedConfigStatus creates the status slice for discovered configs.
 func buildAppliedConfigStatus(configs []DiscoveredConfigResource, validationStatus string) []v1alpha1.AppliedConfigStatus {
 	if len(configs) == 0 {

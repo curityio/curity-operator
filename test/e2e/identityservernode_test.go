@@ -1396,7 +1396,7 @@ var _ = Describe("IdentityServerNode", func() {
 					Eventually(func(g Gomega) {
 						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-ar-admin", Namespace: ns}, adminDeploy)).To(Succeed())
 						g.Expect(e2eHasCfgVolume(adminDeploy, "cfg-cm-routing-config")).To(BeTrue())
-						g.Expect(e2eHasVolumeMount(adminDeploy, "cfg-cm-routing-config", "/opt/idsvr/etc/init/settings.xml")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(adminDeploy, "cfg-cm-routing-config", "/opt/idsvr/etc/init/cm_routing-config_settings.xml")).To(BeTrue())
 					}, e2eTimeout, e2eInterval).Should(Succeed())
 
 					By("verifying runtime does NOT get config volume")
@@ -1451,7 +1451,7 @@ var _ = Describe("IdentityServerNode", func() {
 					Eventually(func(g Gomega) {
 						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-na-runtime", Namespace: ns}, deploy)).To(Succeed())
 						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-runtime-cfg")).To(BeTrue())
-						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-runtime-cfg", "/opt/idsvr/etc/init/app.xml")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-runtime-cfg", "/opt/idsvr/etc/init/cm_runtime-cfg_app.xml")).To(BeTrue())
 					}, e2eTimeout, e2eInterval).Should(Succeed())
 
 					utils.MatchYAMLResource(deploy, "[deployment] cfg-na-runtime")
@@ -1494,7 +1494,7 @@ var _ = Describe("IdentityServerNode", func() {
 					Eventually(func(g Gomega) {
 						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-lic-admin", Namespace: ns}, deploy)).To(Succeed())
 						g.Expect(e2eHasCfgVolume(deploy, "cfg-secret-my-license")).To(BeTrue())
-						g.Expect(e2eHasVolumeMount(deploy, "cfg-secret-my-license", "/opt/idsvr/etc/init/license/license.json")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-secret-my-license", "/opt/idsvr/etc/init/license/secret_my-license_license.json")).To(BeTrue())
 					}, e2eTimeout, e2eInterval).Should(Succeed())
 
 					utils.MatchYAMLResource(deploy, "[deployment] cfg-lic-admin")

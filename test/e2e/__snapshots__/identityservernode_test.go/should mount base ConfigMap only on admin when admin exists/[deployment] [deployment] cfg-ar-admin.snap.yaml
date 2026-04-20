@@ -91,7 +91,7 @@ spec:
               subPath: cluster.xml
             - name: cfg-cm-routing-config
               readOnly: true
-              mountPath: /opt/idsvr/etc/init/settings.xml
+              mountPath: /opt/idsvr/etc/init/cm_routing-config_settings.xml
               subPath: settings.xml
           livenessProbe:
             httpGet:

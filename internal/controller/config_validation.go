@@ -212,7 +212,7 @@ func buildValidationVolumes(configs []DiscoveredConfigResource) ([]corev1.Volume
 		for _, key := range keys {
 			mounts = append(mounts, corev1.VolumeMount{
 				Name:      volName,
-				MountPath: mountBase + key,
+				MountPath: mountBase + mountFilename(cfg.IsSecret, cfg.Name, key),
 				SubPath:   key,
 				ReadOnly:  true,
 			})

@@ -91,7 +91,7 @@ spec:
               subPath: cluster.xml
             - name: cfg-cm-coexist-config
               readOnly: true
-              mountPath: /opt/idsvr/etc/init/extra.xml
+              mountPath: /opt/idsvr/etc/init/cm_coexist-config_extra.xml
               subPath: extra.xml
           livenessProbe:
             httpGet:

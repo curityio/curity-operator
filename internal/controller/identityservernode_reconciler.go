@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"errors"
-
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -18,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -111,20 +110,41 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if err := r.Get(ctx, client.ObjectKey{Name: clusterRef.Name, Namespace: clusterNS}, &cluster); err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("referenced cluster not found", "cluster", clusterRef.Name)
+			setCondition(&node.Status.Conditions, v1alpha1.ConditionClusterReady, metav1.ConditionFalse,
+				v1alpha1.ReasonClusterNotFound, fmt.Sprintf("Referenced cluster %q not found", clusterRef.Name), node.Generation)
 			setCondition(&node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
-				"ClusterNotFound", fmt.Sprintf("Referenced cluster %q not found", clusterRef.Name), node.Generation)
+				v1alpha1.ReasonClusterNotFound, fmt.Sprintf("Referenced cluster %q not found", clusterRef.Name), node.Generation)
 			setCondition(&node.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
-				"ClusterNotFound", "Referenced cluster not found", node.Generation)
+				v1alpha1.ReasonClusterNotFound, "Referenced cluster not found", node.Generation)
 			node.Status.ObservedGeneration = node.Generation
 			if statusErr := r.Status().Update(ctx, &node); statusErr != nil {
+				if apierrors.IsConflict(statusErr) {
+					return ctrl.Result{Requeue: true}, nil
+				}
 				return ctrl.Result{}, fmt.Errorf("failed to update status: %w", statusErr)
 			}
-			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "ClusterNotFound",
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, v1alpha1.ReasonClusterNotFound,
 				"Referenced IdentityServerCluster %q not found in namespace %q", clusterRef.Name, clusterNS)
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get IdentityServerCluster: %w", err)
 	}
+
+	// Ensure controller OwnerReference from cluster → node (idempotent).
+	// Provides cascade-delete safety under Foreground propagation; the
+	// cluster-side finalizer is what actually blocks cluster deletion
+	// until all child nodes are gone.
+	if changed := ensureClusterOwnerRef(&node, &cluster); changed {
+		if err := r.Update(ctx, &node); err != nil {
+			if apierrors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("failed to set OwnerReference on node: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+	setCondition(&node.Status.Conditions, v1alpha1.ConditionClusterReady, metav1.ConditionTrue,
+		v1alpha1.ReasonClusterFound, fmt.Sprintf("Referenced cluster %q found", cluster.Name), node.Generation)
 
 	// 5. Validation: check for duplicate admin nodes and duplicate roles.
 	// NOTE: This list-then-check approach has a known TOCTOU race — two admin
@@ -154,6 +174,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 				"DuplicateAdmin", "Another admin node already exists for this cluster", node.Generation)
 			node.Status.ObservedGeneration = node.Generation
 			if statusErr := r.Status().Update(ctx, &node); statusErr != nil {
+				if apierrors.IsConflict(statusErr) {
+					return ctrl.Result{Requeue: true}, nil
+				}
 				return ctrl.Result{}, fmt.Errorf("failed to update status: %w", statusErr)
 			}
 			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "DuplicateAdmin",
@@ -170,12 +193,70 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 				"DuplicateRole", fmt.Sprintf("Role %q must be unique per cluster", node.Spec.Role), node.Generation)
 			node.Status.ObservedGeneration = node.Generation
 			if statusErr := r.Status().Update(ctx, &node); statusErr != nil {
+				if apierrors.IsConflict(statusErr) {
+					return ctrl.Result{Requeue: true}, nil
+				}
 				return ctrl.Result{}, fmt.Errorf("failed to update status: %w", statusErr)
 			}
 			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "DuplicateRole",
 				"Role %q is already used by node %q in cluster %q", node.Spec.Role, other.Name, clusterRef.Name)
 			return ctrl.Result{}, nil
 		}
+	}
+
+	// 5.1. Cross-cluster ownedResourceName collision check.
+	// ownedResourceName joins clusterName and nodeName with "-", which is
+	// ambiguous: ("foo-bar","baz") and ("foo","bar-baz") both yield
+	// "foo-bar-baz". Without this guard, two nodes would fight over one
+	// Deployment/Service/HPA/PDB via CreateOrUpdate. Tie-break: the older
+	// node wins (CreationTimestamp, UID); the newer goes Degraded.
+	// Shares the same TOCTOU caveat as the duplicate-admin/role checks above.
+	candidateOwned := ownedResourceName(clusterRef.Name, node.Name)
+	// Capture whether the previous reconcile saw this node as colliding, so
+	// we can emit a ResolvedOwnedNameCollision Normal event once we fall
+	// through the check cleanly. Without the matched pair, operators see
+	// "it broke" via Warning but never "it unbroke".
+	priorDegraded := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionDegraded)
+	priorWasCollision := priorDegraded != nil &&
+		priorDegraded.Status == metav1.ConditionTrue &&
+		priorDegraded.Reason == v1alpha1.ReasonOwnedNameCollision
+	var allNodes v1alpha1.IdentityServerNodeList
+	if err := r.List(ctx, &allNodes, client.InNamespace(node.Namespace)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to list nodes for name-collision check: %w", err)
+	}
+	for i := range allNodes.Items {
+		other := &allNodes.Items[i]
+		if other.UID == node.UID {
+			continue
+		}
+		if ownedResourceName(other.Spec.IdentityServerClusterRef.Name, other.Name) != candidateOwned {
+			continue
+		}
+		if !nodeIsNewer(&node, other) {
+			continue
+		}
+		msg := fmt.Sprintf(
+			"Child resource name %q collides with IdentityServerNode %q in cluster %q",
+			candidateOwned, other.Name, other.Spec.IdentityServerClusterRef.Name)
+		log.Info("owned resource name collision", "name", candidateOwned, "collidesWith", other.Name)
+		setCondition(&node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
+			v1alpha1.ReasonOwnedNameCollision, msg, node.Generation)
+		setCondition(&node.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
+			v1alpha1.ReasonOwnedNameCollision, msg, node.Generation)
+		node.Status.ObservedGeneration = node.Generation
+		if statusErr := r.Status().Update(ctx, &node); statusErr != nil {
+			if apierrors.IsConflict(statusErr) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("failed to update status: %w", statusErr)
+		}
+		r.Recorder.Eventf(&node, corev1.EventTypeWarning, v1alpha1.ReasonOwnedNameCollision, "%s", msg)
+		return ctrl.Result{}, nil
+	}
+	if priorWasCollision {
+		r.Recorder.Eventf(&node, corev1.EventTypeNormal, "ResolvedOwnedNameCollision",
+			"ownedResourceName %q no longer collides with any peer; previous conflict resolved",
+			candidateOwned)
 	}
 
 	// Default admin credentials when not specified (matches cluster reconciler behavior)
@@ -186,17 +267,19 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// 5.5. Discover managed ConfigMaps/Secrets and check validation status.
 	// The cluster reconciler handles validation via a Job. The node reconciler
 	// only mounts configs that the cluster has already validated.
-	allConfigs, err := discoverConfigResources(ctx, r.Client, node.Namespace)
+	// Resources with invalid curity.io/config-type annotations come back as
+	// `skipped` instead of failing the whole call. Emit one Warning per bad
+	// resource on the node (so `kubectl describe node` shows it) and then
+	// mount the valid subset.
+	allConfigs, skipped, err := discoverConfigResources(ctx, r.Client, node.Namespace, clusterRef.Name)
 	if err != nil {
-		if errors.Is(err, ErrUnknownConfigType) {
-			// Config type error is also surfaced by the cluster reconciler via condition.
-			// Record an event on the node so users see it on kubectl describe.
-			log.Info("skipping config mounting due to unknown config type", "error", err.Error())
-			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "UnknownConfigType", "%s", err)
-			allConfigs = nil
-		} else {
-			return ctrl.Result{}, fmt.Errorf("discovering managed configs: %w", err)
-		}
+		return ctrl.Result{}, fmt.Errorf("discovering managed configs: %w", err)
+	}
+	for _, sk := range skipped {
+		log.Info("skipping managed resource with invalid config-type annotation",
+			"kind", sk.Kind, "name", sk.Name, "reason", sk.Reason)
+		r.Recorder.Eventf(&node, corev1.EventTypeWarning, "UnknownConfigType",
+			"Skipped %s/%s: %s", sk.Kind, sk.Name, sk.Reason)
 	}
 
 	// Determine admin routing.
@@ -255,12 +338,13 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		configReady := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
 		if configReady == nil || configReady.Status != metav1.ConditionTrue {
 			var existingDeploy appsv1.Deployment
-			err := r.Get(ctx, client.ObjectKey{Name: node.Name, Namespace: node.Namespace}, &existingDeploy)
+			deployName := ownedResourceName(cluster.Name, node.Name)
+			err := r.Get(ctx, client.ObjectKey{Name: deployName, Namespace: node.Namespace}, &existingDeploy)
 			if err != nil && !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("checking existing deployment for config gate: %w", err)
 			}
 			if err == nil {
-				log.V(1).Info("config gate bypassed — Deployment already exists", "cluster", cluster.Name, "deployment", node.Name)
+				log.V(1).Info("config gate bypassed — Deployment already exists", "cluster", cluster.Name, "deployment", deployName)
 			}
 			if apierrors.IsNotFound(err) {
 				log.Info("waiting for ClusterConfigReady before creating Deployment", "cluster", cluster.Name)
@@ -379,7 +463,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// HPA not needed (admin node, autoscaling disabled, or nil) — clean up if stale.
 		var existingHPA autoscalingv2.HorizontalPodAutoscaler
 		if err := r.Get(ctx, client.ObjectKey{
-			Name: node.Name, Namespace: node.Namespace,
+			Name: ownedResourceName(cluster.Name, node.Name), Namespace: node.Namespace,
 		}, &existingHPA); err == nil {
 			if !metav1.IsControlledBy(&existingHPA, &node) {
 				log.Info("skipping HPA deletion, not owned by this node", "name", existingHPA.Name)
@@ -467,7 +551,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// Delete a stale operator-owned PDB if one exists; refuse to delete one we
 		// don't own (surface it via a Degraded condition so users see the collision).
 		var existingPDB policyv1.PodDisruptionBudget
-		err := r.Get(ctx, client.ObjectKey{Name: node.Name, Namespace: node.Namespace}, &existingPDB)
+		err := r.Get(ctx, client.ObjectKey{Name: ownedResourceName(cluster.Name, node.Name), Namespace: node.Namespace}, &existingPDB)
 		if err == nil {
 			if !metav1.IsControlledBy(&existingPDB, &node) {
 				log.Info("skipping PDB deletion, not owned by this node", "name", existingPDB.Name)
@@ -493,6 +577,11 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// 9. Compute status from Deployment
 	conditions, rs := computeNodeConditions(deploy, node.Generation)
 	node.Status.Conditions = conditions
+
+	// Re-apply ClusterReady — computeNodeConditions rebuilds the slice from
+	// Deployment health and would otherwise drop it.
+	setCondition(&node.Status.Conditions, v1alpha1.ConditionClusterReady, metav1.ConditionTrue,
+		v1alpha1.ReasonClusterFound, fmt.Sprintf("Referenced cluster %q found", cluster.Name), node.Generation)
 
 	// Overlay PDB-specific Degraded condition after computeNodeConditions, which
 	// rebuilds conditions from Deployment health. A PDB name collision is
@@ -540,15 +629,97 @@ func (r *IdentityServerNodeReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		).
 		Watches(
 			&corev1.ConfigMap{},
-			handler.EnqueueRequestsFromMapFunc(r.findNodesForManagedConfig),
+			newManagedConfigHandler(r.findNodesForManagedConfig),
 			builder.WithPredicates(managedConfigPredicate{}),
 		).
 		Watches(
 			&corev1.Secret{},
-			handler.EnqueueRequestsFromMapFunc(r.findNodesForManagedConfig),
+			newManagedConfigHandler(r.findNodesForManagedConfig),
 			builder.WithPredicates(managedConfigPredicate{}),
 		).
 		Complete(r)
+}
+
+// nodeIsNewer reports whether a sorts after b under (CreationTimestamp, UID)
+// ASC ordering. Both sides of a collision compute the same result, so the
+// Degraded verdict is symmetric: only one of the two nodes marks itself the
+// loser. UID is the tie-break because CreationTimestamp has 1-second
+// resolution and two CRs created in the same reconcile tick can share it.
+func nodeIsNewer(a, b *v1alpha1.IdentityServerNode) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.After(b.CreationTimestamp.Time)
+	}
+	return string(a.UID) > string(b.UID)
+}
+
+// ensureClusterOwnerRef returns true if it mutated node.OwnerReferences.
+// Walks the full slice instead of early-returning on first match so stale
+// duplicates (different UID, missing Controller/BlockOwnerDeletion flags,
+// leftover refs to a deleted cluster) get dropped — exactly one canonical
+// ref of our APIVersion+Kind remains on return.
+func ensureClusterOwnerRef(node *v1alpha1.IdentityServerNode, cluster *v1alpha1.IdentityServerCluster) bool {
+	want := metav1.OwnerReference{
+		APIVersion:         v1alpha1.GroupVersion.String(),
+		Kind:               "IdentityServerCluster",
+		Name:               cluster.Name,
+		UID:                cluster.UID,
+		Controller:         ptr.To(true),
+		BlockOwnerDeletion: ptr.To(true),
+	}
+	filtered := make([]metav1.OwnerReference, 0, len(node.OwnerReferences)+1)
+	kept := false
+	for _, ref := range node.OwnerReferences {
+		if ref.APIVersion == want.APIVersion && ref.Kind == want.Kind {
+			if !kept && ownerRefMatches(ref, want) {
+				filtered = append(filtered, ref)
+				kept = true
+			}
+			continue
+		}
+		filtered = append(filtered, ref)
+	}
+	if !kept {
+		filtered = append(filtered, want)
+	}
+	if ownerRefsEqual(node.OwnerReferences, filtered) {
+		return false
+	}
+	node.OwnerReferences = filtered
+	return true
+}
+
+// ownerRefMatches treats nil Controller / BlockOwnerDeletion pointers as
+// not-a-match: both flags must be true for the finalizer-based deletion
+// ordering to hold.
+func ownerRefMatches(got, want metav1.OwnerReference) bool {
+	return got.UID == want.UID &&
+		got.Name == want.Name &&
+		got.Controller != nil && *got.Controller &&
+		got.BlockOwnerDeletion != nil && *got.BlockOwnerDeletion
+}
+
+func ownerRefsEqual(a, b []metav1.OwnerReference) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].APIVersion != b[i].APIVersion ||
+			a[i].Kind != b[i].Kind ||
+			a[i].Name != b[i].Name ||
+			a[i].UID != b[i].UID ||
+			!boolPtrEqual(a[i].Controller, b[i].Controller) ||
+			!boolPtrEqual(a[i].BlockOwnerDeletion, b[i].BlockOwnerDeletion) {
+			return false
+		}
+	}
+	return true
+}
+
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // findNodesForCluster maps a cluster change to reconcile requests for all
@@ -581,9 +752,21 @@ func (r *IdentityServerNodeReconciler) findNodesForCluster(ctx context.Context, 
 }
 
 // findNodesForManagedConfig maps a managed ConfigMap/Secret change to reconcile
-// requests for all IdentityServerNodes in the same namespace.
+// requests for IdentityServerNodes whose referenced cluster is in scope per the
+// object's curity.io/cluster annotation.
 func (r *IdentityServerNodeReconciler) findNodesForManagedConfig(ctx context.Context, obj client.Object) []ctrl.Request {
 	log := ctrl.LoggerFrom(ctx)
+
+	// Defensive label check. managedConfigPredicate passes Updates through
+	// when EITHER the old or new object is labeled (so label removal still
+	// fires, un-mounting dropped configs), and managedConfigHandler then
+	// invokes this mapper once per side. The object we receive here may
+	// therefore not itself be labeled — e.g. the new side of a label-removal
+	// Update. Without this check, an unlabeled object (whose scope annotation
+	// is also typically missing) would fan out to every node in the namespace.
+	if !hasManagedLabel(obj) {
+		return nil
+	}
 
 	var nodeList v1alpha1.IdentityServerNodeList
 	if err := r.List(ctx, &nodeList, client.InNamespace(obj.GetNamespace())); err != nil {
@@ -593,8 +776,12 @@ func (r *IdentityServerNodeReconciler) findNodesForManagedConfig(ctx context.Con
 
 	requests := make([]ctrl.Request, 0, len(nodeList.Items))
 	for i := range nodeList.Items {
+		n := &nodeList.Items[i]
+		if !appliesToCluster(obj.GetAnnotations(), n.Spec.IdentityServerClusterRef.Name) {
+			continue
+		}
 		requests = append(requests, ctrl.Request{
-			NamespacedName: client.ObjectKeyFromObject(&nodeList.Items[i]),
+			NamespacedName: client.ObjectKeyFromObject(n),
 		})
 	}
 	return requests

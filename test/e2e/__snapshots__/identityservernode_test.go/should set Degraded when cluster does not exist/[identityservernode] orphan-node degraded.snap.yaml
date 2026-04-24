@@ -20,6 +20,11 @@ spec:
   replicas: 1
 status:
   conditions:
+    - type: ClusterReady
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
     - type: Degraded
       status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"

@@ -1,7 +1,7 @@
 
 [IdentityServerNode configuration Label-based config discovery License Secret mount path should mount license Secret at license path - 1]
 metadata:
-  name: cfg-lic-admin
+  name: cfg-lic-cluster-cfg-lic-admin
   namespace: e2e-cfg-license
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: admin
-    app.kubernetes.io/instance: cfg-lic-admin
+    app.kubernetes.io/instance: cfg-lic-cluster-cfg-lic-admin
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

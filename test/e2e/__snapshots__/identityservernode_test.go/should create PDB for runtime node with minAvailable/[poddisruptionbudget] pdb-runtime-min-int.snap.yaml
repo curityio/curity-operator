@@ -1,7 +1,7 @@
 
 [IdentityServerNode podDisruptionBudget PDB created for runtime with integer minAvailable should create PDB for runtime node with minAvailable - 1]
 metadata:
-  name: pdb-runtime
+  name: pdb-cluster-pdb-runtime
   namespace: e2e-pdb
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: pdb-runtime
+    app.kubernetes.io/instance: pdb-cluster-pdb-runtime
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

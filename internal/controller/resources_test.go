@@ -585,8 +585,9 @@ func TestBuildService_SameName(t *testing.T) {
 
 	svc := buildService(cluster, node)
 
-	if svc.Name != node.Name {
-		t.Errorf("expected service name %q, got %q", node.Name, svc.Name)
+	want := ownedResourceName(cluster.Name, node.Name)
+	if svc.Name != want {
+		t.Errorf("expected service name %q, got %q", want, svc.Name)
 	}
 }
 
@@ -1785,8 +1786,9 @@ func TestBuildHPA_BasicCPU(t *testing.T) {
 		TargetCPUUtilizationPercentage: 80,
 	}
 	hpa := buildHPA(cluster, node, resolveAutoscaling(cluster, node))
-	if hpa.Name != "node-1" {
-		t.Errorf("expected name node-1, got %q", hpa.Name)
+	want := ownedResourceName(cluster.Name, node.Name)
+	if hpa.Name != want {
+		t.Errorf("expected name %s, got %q", want, hpa.Name)
 	}
 	if hpa.Namespace != "test-ns" {
 		t.Errorf("expected namespace test-ns, got %q", hpa.Namespace)
@@ -1794,8 +1796,8 @@ func TestBuildHPA_BasicCPU(t *testing.T) {
 	if hpa.Spec.ScaleTargetRef.Kind != "Deployment" {
 		t.Errorf("expected target kind Deployment, got %q", hpa.Spec.ScaleTargetRef.Kind)
 	}
-	if hpa.Spec.ScaleTargetRef.Name != "node-1" {
-		t.Errorf("expected target name node-1, got %q", hpa.Spec.ScaleTargetRef.Name)
+	if hpa.Spec.ScaleTargetRef.Name != want {
+		t.Errorf("expected target name %s, got %q", want, hpa.Spec.ScaleTargetRef.Name)
 	}
 	if hpa.Spec.ScaleTargetRef.APIVersion != "apps/v1" {
 		t.Errorf("expected apiVersion apps/v1, got %q", hpa.Spec.ScaleTargetRef.APIVersion)
@@ -1876,7 +1878,7 @@ func TestBuildHPA_Labels(t *testing.T) {
 	hpa := buildHPA(cluster, node, resolveAutoscaling(cluster, node))
 	expectedLabels := map[string]string{
 		"app.kubernetes.io/name":       "curity-identity-server",
-		"app.kubernetes.io/instance":   "node-1",
+		"app.kubernetes.io/instance":   "cluster-1-node-1",
 		"app.kubernetes.io/managed-by": "curity-operator",
 		"app.kubernetes.io/component":  "runtime",
 		"app.kubernetes.io/version":    "11.0",
@@ -2093,8 +2095,9 @@ func TestBuildPDB_Name(t *testing.T) {
 	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &min}
 
 	pdb := buildPDB(cluster, node)
-	if pdb.Name != node.Name {
-		t.Errorf("expected name %q, got %q", node.Name, pdb.Name)
+	want := ownedResourceName(cluster.Name, node.Name)
+	if pdb.Name != want {
+		t.Errorf("expected name %q, got %q", want, pdb.Name)
 	}
 	if pdb.Namespace != node.Namespace {
 		t.Errorf("expected namespace %q, got %q", node.Namespace, pdb.Namespace)
@@ -2111,7 +2114,7 @@ func TestBuildPDB_Selector(t *testing.T) {
 	if pdb.Spec.Selector == nil {
 		t.Fatal("expected non-nil Selector")
 	}
-	want := buildSelectorLabels(node)
+	want := buildSelectorLabels(cluster, node)
 	for k, v := range want {
 		if pdb.Spec.Selector.MatchLabels[k] != v {
 			t.Errorf("selector label %q: want %q, got %q", k, v, pdb.Spec.Selector.MatchLabels[k])

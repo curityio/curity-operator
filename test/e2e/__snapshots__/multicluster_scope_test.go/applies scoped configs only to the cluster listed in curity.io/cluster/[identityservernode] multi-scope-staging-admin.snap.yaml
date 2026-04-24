@@ -1,0 +1,70 @@
+
+[Multi-cluster config scoping applies scoped configs only to the cluster listed in curity.io/cluster - 1]
+metadata:
+  name: stg-admin
+  namespace: e2e-multi-scope
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: staging
+  ownerReferences: <Any value>
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: admin
+  role: admin-role
+  ui:
+    enabled: true
+    secure: true
+  identityServerClusterRef:
+    name: staging
+  replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: ClusterReady
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  deploymentName: staging-stg-admin
+  serviceName: staging-stg-admin
+  appliedConfigs:
+    - name: base-staging
+      kind: ConfigMap
+      configType: base
+      validationStatus: Validated
+    - name: shared-base
+      kind: ConfigMap
+      configType: base
+      validationStatus: Validated
+    - name: shared-license
+      kind: Secret
+      configType: license
+      validationStatus: Validated
+
+---

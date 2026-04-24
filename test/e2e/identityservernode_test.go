@@ -47,6 +47,12 @@ func deleteNS(name string) {
 
 func k() client.Client { return utils.TestEnvironment.K8sClient }
 
+// ownedName mirrors internal/controller.ownedResourceName — the operator names
+// node-owned Deployments/Services/HPAs/PDBs as {clusterName}-{nodeName}.
+func ownedName(clusterName, nodeName string) string {
+	return clusterName + "-" + nodeName
+}
+
 // e2eConfigEntry mirrors DiscoveredConfigResource for config hash computation.
 type e2eConfigEntry struct {
 	Name       string
@@ -170,11 +176,11 @@ var _ = Describe("IdentityServerNode", func() {
 					map[string]interface{}{"name": "deploy-admin", "namespace": ns, "clusterName": "deploy-cluster"})
 				utils.SimulateClusterConfigReady(ns, "deploy-cluster", e2eTimeout, e2eInterval)
 
-				adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "deploy-admin", Namespace: ns}}
+				adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("deploy-cluster", "deploy-admin"), Namespace: ns}}
 				utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
 				utils.MatchYAMLResource(adminDeploy, "[admin-deployment] deploy-admin")
 
-				adminSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "deploy-admin", Namespace: ns}}
+				adminSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: ownedName("deploy-cluster", "deploy-admin"), Namespace: ns}}
 				utils.WaitForResource(adminSvc, e2eTimeout, e2eInterval)
 				utils.MatchYAMLResource(adminSvc, "[admin-service] deploy-admin")
 
@@ -182,11 +188,11 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "deploy-runtime", "namespace": ns, "clusterName": "deploy-cluster"})
 
-				runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "deploy-runtime", Namespace: ns}}
+				runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("deploy-cluster", "deploy-runtime"), Namespace: ns}}
 				utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
 				utils.MatchYAMLResource(runtimeDeploy, "[runtime-deployment] deploy-runtime")
 
-				runtimeSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "deploy-runtime", Namespace: ns}}
+				runtimeSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: ownedName("deploy-cluster", "deploy-runtime"), Namespace: ns}}
 				utils.WaitForResource(runtimeSvc, e2eTimeout, e2eInterval)
 				utils.MatchYAMLResource(runtimeSvc, "[runtime-service] deploy-runtime")
 
@@ -223,7 +229,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "del-node", "namespace": ns, "clusterName": "del-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "del-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("del-cluster", "del-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 				Expect(deploy.OwnerReferences).To(HaveLen(1))
 				Expect(deploy.OwnerReferences[0].Kind).To(Equal("IdentityServerNode"))
@@ -246,10 +252,10 @@ var _ = Describe("IdentityServerNode", func() {
 					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: "del-node", Namespace: ns}, &v1alpha1.IdentityServerNode{}))
 				}, e2eTimeout, e2eInterval).Should(BeTrue())
 				Eventually(func() bool {
-					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: "del-node", Namespace: ns}, &appsv1.Deployment{}))
+					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: ownedName("del-cluster", "del-node"), Namespace: ns}, &appsv1.Deployment{}))
 				}, e2eTimeout, e2eInterval).Should(BeTrue())
 				Eventually(func() bool {
-					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: "del-node", Namespace: ns}, &corev1.Service{}))
+					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: ownedName("del-cluster", "del-node"), Namespace: ns}, &corev1.Service{}))
 				}, e2eTimeout, e2eInterval).Should(BeTrue())
 			})
 		})
@@ -268,7 +274,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "fin-node", "namespace": ns, "clusterName": "fin-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "fin-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("fin-cluster", "fin-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				By("verifying finalizer is set on cluster")
@@ -320,7 +326,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "upd-node", "namespace": ns, "clusterName": "upd-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "upd-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("upd-cluster", "upd-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 				Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
 
@@ -342,7 +348,7 @@ var _ = Describe("IdentityServerNode", func() {
 				}, e2eTimeout, e2eInterval).Should(Succeed())
 
 				Eventually(func(g Gomega) int32 {
-					g.Expect(k().Get(ctx, client.ObjectKey{Name: "upd-node", Namespace: ns}, deploy)).To(Succeed())
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("upd-cluster", "upd-node"), Namespace: ns}, deploy)).To(Succeed())
 					if deploy.Spec.Replicas == nil {
 						return 0
 					}
@@ -373,7 +379,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "idem-node", "namespace": ns, "clusterName": "idem-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "idem-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("idem-cluster", "idem-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				gen := deploy.Generation
@@ -393,7 +399,7 @@ var _ = Describe("IdentityServerNode", func() {
 
 				By("verifying Deployment generation did not change")
 				Consistently(func(g Gomega) {
-					g.Expect(k().Get(ctx, client.ObjectKey{Name: "idem-node", Namespace: ns}, deploy)).To(Succeed())
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("idem-cluster", "idem-node"), Namespace: ns}, deploy)).To(Succeed())
 					g.Expect(deploy.Generation).To(Equal(gen), "Deployment should not be updated when spec unchanged")
 				}, 3*time.Second, e2eInterval).Should(Succeed())
 
@@ -425,14 +431,14 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "status-node", "namespace": ns, "clusterName": "status-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "status-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("status-cluster", "status-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				node := &v1alpha1.IdentityServerNode{ObjectMeta: metav1.ObjectMeta{Name: "status-node", Namespace: ns}}
 				utils.WaitForConditions(node, e2eTimeout, e2eInterval)
 				Expect(node.Status.ObservedGeneration).To(BeNumerically(">", 0))
-				Expect(node.Status.DeploymentName).To(Equal("status-node"))
-				Expect(node.Status.ServiceName).To(Equal("status-node"))
+				Expect(node.Status.DeploymentName).To(Equal(ownedName("status-cluster", "status-node")))
+				Expect(node.Status.ServiceName).To(Equal(ownedName("status-cluster", "status-node")))
 				Expect(node.Status.Replicas).To(Equal(int32(1)))
 				Expect(node.Status.Conditions).To(ContainElement(
 					Satisfy(func(c metav1.Condition) bool {
@@ -502,7 +508,7 @@ var _ = Describe("IdentityServerNode", func() {
 					map[string]interface{}{"name": "admin-1", "namespace": ns, "clusterName": "dup-cluster"})
 				utils.SimulateClusterConfigReady(ns, "dup-cluster", e2eTimeout, e2eInterval)
 
-				deploy1 := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "admin-1", Namespace: ns}}
+				deploy1 := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("dup-cluster", "admin-1"), Namespace: ns}}
 				utils.WaitForResource(deploy1, e2eTimeout, e2eInterval)
 
 				By("creating second admin node")
@@ -528,7 +534,7 @@ var _ = Describe("IdentityServerNode", func() {
 				}, e2eTimeout, e2eInterval).Should(Equal("DuplicateAdmin"))
 
 				Consistently(func() bool {
-					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: "admin-2", Namespace: ns}, &appsv1.Deployment{}))
+					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: ownedName("dup-cluster", "admin-2"), Namespace: ns}, &appsv1.Deployment{}))
 				}, 5*time.Second, e2eInterval).Should(BeTrue())
 
 				By("verifying first admin also detects the duplicate")
@@ -582,7 +588,7 @@ var _ = Describe("IdentityServerNode", func() {
 				}, e2eTimeout, e2eInterval).Should(Equal("ClusterNotFound"))
 
 				Consistently(func() bool {
-					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: "orphan-node", Namespace: ns}, &appsv1.Deployment{}))
+					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: ownedName("does-not-exist", "orphan-node"), Namespace: ns}, &appsv1.Deployment{}))
 				}, 5*time.Second, e2eInterval).Should(BeTrue())
 
 				Expect(k().Get(ctx, client.ObjectKey{Name: "orphan-node", Namespace: ns}, node)).To(Succeed())
@@ -624,14 +630,14 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.MatchCRDResource(node, "recovery-node degraded")
 
 				Consistently(func() bool {
-					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: "recovery-node", Namespace: ns}, &appsv1.Deployment{}))
+					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: ownedName("recovery-cluster", "recovery-node"), Namespace: ns}, &appsv1.Deployment{}))
 				}, 5*time.Second, e2eInterval).Should(BeTrue())
 
 				By("creating missing cluster to trigger recovery")
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
 					map[string]interface{}{"name": "recovery-cluster", "namespace": ns})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "recovery-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("recovery-cluster", "recovery-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				By("snapshotting recovered state")
@@ -658,7 +664,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "role-node-1", "namespace": ns, "clusterName": "role-cluster"})
 
-				deploy1 := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "role-node-1", Namespace: ns}}
+				deploy1 := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("role-cluster", "role-node-1"), Namespace: ns}}
 				utils.WaitForResource(deploy1, e2eTimeout, e2eInterval)
 
 				By("creating second node with same role")
@@ -683,7 +689,7 @@ var _ = Describe("IdentityServerNode", func() {
 				}, e2eTimeout, e2eInterval).Should(Equal("DuplicateRole"))
 
 				Consistently(func() bool {
-					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: "role-node-2", Namespace: ns}, &appsv1.Deployment{}))
+					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: ownedName("role-cluster", "role-node-2"), Namespace: ns}, &appsv1.Deployment{}))
 				}, 5*time.Second, e2eInterval).Should(BeTrue())
 
 				node1 := &v1alpha1.IdentityServerNode{ObjectMeta: metav1.ObjectMeta{Name: "role-node-1", Namespace: ns}}
@@ -725,9 +731,9 @@ var _ = Describe("IdentityServerNode", func() {
 				}
 				Expect(k().Create(ctx, nodeB)).To(Succeed())
 
-				deployA := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cross-a", Namespace: ns}}
+				deployA := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("role-cluster-a", "cross-a"), Namespace: ns}}
 				utils.WaitForResource(deployA, e2eTimeout, e2eInterval)
-				deployB := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cross-b", Namespace: ns}}
+				deployB := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("role-cluster-b", "cross-b"), Namespace: ns}}
 				utils.WaitForResource(deployB, e2eTimeout, e2eInterval)
 
 				utils.WaitForConditions(nodeA, e2eTimeout, e2eInterval)
@@ -737,6 +743,80 @@ var _ = Describe("IdentityServerNode", func() {
 				Expect(k().Get(ctx, client.ObjectKey{Name: "cross-b", Namespace: ns}, nodeB)).To(Succeed())
 				utils.MatchCRDResource(nodeA, "cross-a")
 				utils.MatchCRDResource(nodeB, "cross-b")
+			})
+		})
+
+		Describe("Owned resource name collision", Ordered, func() {
+			const ns = "e2e-name-collision"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("should block newer node when ownedResourceName collides across clusters", func() {
+				// ownedResourceName = clusterName + "-" + nodeName. Separator
+				// is ambiguous: ("foo-bar","baz") and ("foo","bar-baz") both
+				// yield "foo-bar-baz". Without the guard, two nodes would
+				// fight over one Deployment/Service via CreateOrUpdate.
+				ctx := context.Background()
+
+				By("creating winner cluster and node")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "foo-bar", "namespace": ns})
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "foo", "namespace": ns})
+
+				winner := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "baz", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "winner-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "foo-bar"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, winner)).To(Succeed())
+
+				winnerDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("foo-bar", "baz"), Namespace: ns}}
+				utils.WaitForResource(winnerDeploy, e2eTimeout, e2eInterval)
+
+				// metav1.Time has 1-second resolution; sleep to guarantee
+				// winner and loser get distinct CreationTimestamps so the
+				// older-wins rule fires deterministically (otherwise the
+				// reconciler falls back to UID tie-break).
+				time.Sleep(1100 * time.Millisecond)
+
+				By("creating loser node whose ownedResourceName collides")
+				loser := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "bar-baz", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "loser-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "foo"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, loser)).To(Succeed())
+
+				Eventually(func(g Gomega) string {
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: "bar-baz", Namespace: ns}, loser)).To(Succeed())
+					for _, c := range loser.Status.Conditions {
+						if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
+							return c.Reason
+						}
+					}
+					return ""
+				}, e2eTimeout, e2eInterval).Should(Equal(v1alpha1.ReasonOwnedNameCollision))
+
+				By("verifying winner's Deployment is still owned by the winner")
+				Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("foo-bar", "baz"), Namespace: ns}, winnerDeploy)).To(Succeed())
+				controller := metav1.GetControllerOf(winnerDeploy)
+				Expect(controller).NotTo(BeNil())
+				Expect(controller.Name).To(Equal("baz"))
+
+				By("snapshotting loser status")
+				Expect(k().Get(ctx, client.ObjectKey{Name: "baz", Namespace: ns}, winner)).To(Succeed())
+				utils.WaitForConditions(winner, e2eTimeout, e2eInterval)
+				Expect(k().Get(ctx, client.ObjectKey{Name: "baz", Namespace: ns}, winner)).To(Succeed())
+				Expect(k().Get(ctx, client.ObjectKey{Name: "bar-baz", Namespace: ns}, loser)).To(Succeed())
+				utils.MatchCRDResource(winner, "collision-winner")
+				utils.MatchCRDResource(loser, "collision-loser")
 			})
 		})
 
@@ -761,7 +841,7 @@ var _ = Describe("IdentityServerNode", func() {
 				Expect(k().Create(ctx, node)).To(Succeed())
 				utils.SimulateClusterConfigReady(ns, "rep-cluster", e2eTimeout, e2eInterval)
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "admin-5", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("rep-cluster", "admin-5"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 				Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
 
@@ -801,7 +881,7 @@ var _ = Describe("IdentityServerNode", func() {
 
 				for i := 1; i <= 3; i++ {
 					name := fmt.Sprintf("runtime-%d", i)
-					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("multi-cluster", name), Namespace: ns}}
 					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 				}
 
@@ -963,7 +1043,7 @@ var _ = Describe("IdentityServerNode", func() {
 
 				deploy := &appsv1.Deployment{}
 				Eventually(func() error {
-					return k().Get(ctx, client.ObjectKey{Name: "default-admin", Namespace: ns}, deploy)
+					return k().Get(ctx, client.ObjectKey{Name: ownedName("default-creds", "default-admin"), Namespace: ns}, deploy)
 				}, e2eTimeout, e2eInterval).Should(Succeed())
 
 				envVars := deploy.Spec.Template.Spec.Containers[0].Env
@@ -1034,7 +1114,7 @@ var _ = Describe("IdentityServerNode", func() {
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "log-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("log-cluster", "log-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				containers := deploy.Spec.Template.Spec.Containers
@@ -1094,7 +1174,7 @@ var _ = Describe("IdentityServerNode", func() {
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "off-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("off-cluster", "off-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				Expect(deploy.Spec.Template.Spec.Containers[0].Env).To(ContainElement(
@@ -1135,7 +1215,7 @@ var _ = Describe("IdentityServerNode", func() {
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "off-sidecar-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("off-sidecar-cluster", "off-sidecar-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				Expect(deploy.Spec.Template.Spec.Containers).To(HaveLen(1),
@@ -1166,9 +1246,9 @@ var _ = Describe("IdentityServerNode", func() {
 				}, e2eTimeout, e2eInterval).Should(Succeed())
 
 				By("waiting for sidecars to appear on Deployment")
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "off-sidecar-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("off-sidecar-cluster", "off-sidecar-node"), Namespace: ns}}
 				Eventually(func(g Gomega) int {
-					g.Expect(k().Get(ctx, client.ObjectKey{Name: "off-sidecar-node", Namespace: ns}, deploy)).To(Succeed())
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("off-sidecar-cluster", "off-sidecar-node"), Namespace: ns}, deploy)).To(Succeed())
 					return len(deploy.Spec.Template.Spec.Containers)
 				}, e2eTimeout, e2eInterval).Should(Equal(2), "expected 1 main + 1 sidecar after level change to DEBUG")
 
@@ -1226,9 +1306,9 @@ var _ = Describe("IdentityServerNode", func() {
 					map[string]interface{}{"name": "cc-runtime", "namespace": ns, "clusterName": "cc-cluster"})
 
 				By("verifying cluster-config volume on both Deployments")
-				adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cc-admin", Namespace: ns}}
+				adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cc-cluster", "cc-admin"), Namespace: ns}}
 				utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
-				runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cc-runtime", Namespace: ns}}
+				runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cc-cluster", "cc-runtime"), Namespace: ns}}
 				utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
 
 				for _, d := range []*appsv1.Deployment{adminDeploy, runtimeDeploy} {
@@ -1255,13 +1335,13 @@ var _ = Describe("IdentityServerNode", func() {
 				expectedHashStr := hex.EncodeToString(expectedHash[:])
 
 				adminDeploy := &appsv1.Deployment{}
-				Expect(k().Get(ctx, client.ObjectKey{Name: "cc-admin", Namespace: ns}, adminDeploy)).To(Succeed())
+				Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cc-cluster", "cc-admin"), Namespace: ns}, adminDeploy)).To(Succeed())
 				hash, ok := adminDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
 				Expect(ok).To(BeTrue(), "admin Deployment should have cluster-config-hash annotation")
 				Expect(hash).To(Equal(expectedHashStr))
 
 				runtimeDeploy := &appsv1.Deployment{}
-				Expect(k().Get(ctx, client.ObjectKey{Name: "cc-runtime", Namespace: ns}, runtimeDeploy)).To(Succeed())
+				Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cc-cluster", "cc-runtime"), Namespace: ns}, runtimeDeploy)).To(Succeed())
 				hash, ok = runtimeDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
 				Expect(ok).To(BeTrue(), "runtime Deployment should have cluster-config-hash annotation")
 				Expect(hash).To(Equal(expectedHashStr))
@@ -1370,9 +1450,9 @@ var _ = Describe("IdentityServerNode", func() {
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 						map[string]interface{}{"name": "cfg-ar-runtime", "namespace": ns, "clusterName": "cfg-ar-cluster"})
 
-					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-ar-admin", Namespace: ns}}
+					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-ar-cluster", "cfg-ar-admin"), Namespace: ns}}
 					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
-					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-ar-runtime", Namespace: ns}}
+					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-ar-cluster", "cfg-ar-runtime"), Namespace: ns}}
 					utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
 
 					By("creating labeled ConfigMap")
@@ -1394,13 +1474,13 @@ var _ = Describe("IdentityServerNode", func() {
 
 					By("verifying admin gets config volume")
 					Eventually(func(g Gomega) {
-						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-ar-admin", Namespace: ns}, adminDeploy)).To(Succeed())
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-ar-cluster", "cfg-ar-admin"), Namespace: ns}, adminDeploy)).To(Succeed())
 						g.Expect(e2eHasCfgVolume(adminDeploy, "cfg-cm-routing-config")).To(BeTrue())
 						g.Expect(e2eHasVolumeMount(adminDeploy, "cfg-cm-routing-config", "/opt/idsvr/etc/init/cm_routing-config_settings.xml")).To(BeTrue())
 					}, e2eTimeout, e2eInterval).Should(Succeed())
 
 					By("verifying runtime does NOT get config volume")
-					Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-ar-runtime", Namespace: ns}, runtimeDeploy)).To(Succeed())
+					Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-ar-cluster", "cfg-ar-runtime"), Namespace: ns}, runtimeDeploy)).To(Succeed())
 					Expect(e2eCountCfgVolumes(runtimeDeploy)).To(Equal(0), "runtime should not have config volumes when admin exists")
 
 					By("snapshotting")
@@ -1430,7 +1510,7 @@ var _ = Describe("IdentityServerNode", func() {
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 						map[string]interface{}{"name": "cfg-na-runtime", "namespace": ns, "clusterName": "cfg-na-cluster"})
 
-					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-na-runtime", Namespace: ns}}
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-na-cluster", "cfg-na-runtime"), Namespace: ns}}
 					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 					cm := &corev1.ConfigMap{
@@ -1449,7 +1529,7 @@ var _ = Describe("IdentityServerNode", func() {
 					e2eSimulateValidation(ns, "cfg-na-cluster", hash)
 
 					Eventually(func(g Gomega) {
-						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-na-runtime", Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-na-cluster", "cfg-na-runtime"), Namespace: ns}, deploy)).To(Succeed())
 						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-runtime-cfg")).To(BeTrue())
 						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-runtime-cfg", "/opt/idsvr/etc/init/cm_runtime-cfg_app.xml")).To(BeTrue())
 					}, e2eTimeout, e2eInterval).Should(Succeed())
@@ -1472,7 +1552,7 @@ var _ = Describe("IdentityServerNode", func() {
 						map[string]interface{}{"name": "cfg-lic-admin", "namespace": ns, "clusterName": "cfg-lic-cluster"})
 					utils.SimulateClusterConfigReady(ns, "cfg-lic-cluster", e2eTimeout, e2eInterval)
 
-					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-lic-admin", Namespace: ns}}
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-lic-cluster", "cfg-lic-admin"), Namespace: ns}}
 					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 					secret := &corev1.Secret{
@@ -1492,7 +1572,7 @@ var _ = Describe("IdentityServerNode", func() {
 					e2eSimulateValidation(ns, "cfg-lic-cluster", hash)
 
 					Eventually(func(g Gomega) {
-						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-lic-admin", Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-lic-cluster", "cfg-lic-admin"), Namespace: ns}, deploy)).To(Succeed())
 						g.Expect(e2eHasCfgVolume(deploy, "cfg-secret-my-license")).To(BeTrue())
 						g.Expect(e2eHasVolumeMount(deploy, "cfg-secret-my-license", "/opt/idsvr/etc/init/license/secret_my-license_license.json")).To(BeTrue())
 					}, e2eTimeout, e2eInterval).Should(Succeed())
@@ -1515,7 +1595,7 @@ var _ = Describe("IdentityServerNode", func() {
 						map[string]interface{}{"name": "cfg-multi-admin", "namespace": ns, "clusterName": "cfg-multi-cluster"})
 					utils.SimulateClusterConfigReady(ns, "cfg-multi-cluster", e2eTimeout, e2eInterval)
 
-					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-multi-admin", Namespace: ns}}
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-multi-cluster", "cfg-multi-admin"), Namespace: ns}}
 					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 					By("creating 2 ConfigMaps + 1 Secret")
@@ -1546,7 +1626,7 @@ var _ = Describe("IdentityServerNode", func() {
 					e2eSimulateValidation(ns, "cfg-multi-cluster", hash)
 
 					Eventually(func(g Gomega) {
-						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-multi-admin", Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-multi-cluster", "cfg-multi-admin"), Namespace: ns}, deploy)).To(Succeed())
 						g.Expect(e2eCountCfgVolumes(deploy)).To(Equal(3))
 						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-base-config-a")).To(BeTrue())
 						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-base-config-b")).To(BeTrue())
@@ -1570,7 +1650,7 @@ var _ = Describe("IdentityServerNode", func() {
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 						map[string]interface{}{"name": "cfg-roll-runtime", "namespace": ns, "clusterName": "cfg-roll-cluster"})
 
-					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-roll-runtime", Namespace: ns}}
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-roll-cluster", "cfg-roll-runtime"), Namespace: ns}}
 					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 					cm := &corev1.ConfigMap{
@@ -1589,7 +1669,7 @@ var _ = Describe("IdentityServerNode", func() {
 					By("recording initial config-hash annotation")
 					var initialHash string
 					Eventually(func() string {
-						Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-roll-runtime", Namespace: ns}, deploy)).To(Succeed())
+						Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-roll-cluster", "cfg-roll-runtime"), Namespace: ns}, deploy)).To(Succeed())
 						initialHash = deploy.Spec.Template.Annotations["curity.io/config-hash"]
 						return initialHash
 					}, e2eTimeout, e2eInterval).ShouldNot(BeEmpty())
@@ -1607,7 +1687,7 @@ var _ = Describe("IdentityServerNode", func() {
 
 					By("verifying config-hash annotation changed")
 					Eventually(func() string {
-						Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-roll-runtime", Namespace: ns}, deploy)).To(Succeed())
+						Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-roll-cluster", "cfg-roll-runtime"), Namespace: ns}, deploy)).To(Succeed())
 						return deploy.Spec.Template.Annotations["curity.io/config-hash"]
 					}, e2eTimeout, e2eInterval).ShouldNot(Equal(initialHash))
 				})
@@ -1626,7 +1706,7 @@ var _ = Describe("IdentityServerNode", func() {
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 						map[string]interface{}{"name": "cfg-ul-runtime", "namespace": ns, "clusterName": "cfg-ul-cluster"})
 
-					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-ul-runtime", Namespace: ns}}
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-ul-cluster", "cfg-ul-runtime"), Namespace: ns}}
 					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 					// Create ConfigMap WITHOUT managed label
@@ -1638,7 +1718,7 @@ var _ = Describe("IdentityServerNode", func() {
 
 					// Deployment should not gain any config volumes
 					Consistently(func() int {
-						Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-ul-runtime", Namespace: ns}, deploy)).To(Succeed())
+						Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-ul-cluster", "cfg-ul-runtime"), Namespace: ns}, deploy)).To(Succeed())
 						return e2eCountCfgVolumes(deploy)
 					}, 5*time.Second, e2eInterval).Should(Equal(0), "unlabeled ConfigMap should not be mounted")
 
@@ -1660,7 +1740,7 @@ var _ = Describe("IdentityServerNode", func() {
 						map[string]interface{}{"name": "cfg-pend-admin", "namespace": ns, "clusterName": "cfg-pend-cluster"})
 					utils.SimulateClusterConfigReady(ns, "cfg-pend-cluster", e2eTimeout, e2eInterval)
 
-					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-pend-admin", Namespace: ns}}
+					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-pend-cluster", "cfg-pend-admin"), Namespace: ns}}
 					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
 
 					cm := &corev1.ConfigMap{
@@ -1686,7 +1766,7 @@ var _ = Describe("IdentityServerNode", func() {
 					Expect(node.Status.AppliedConfigs[0].Kind).To(Equal("ConfigMap"))
 
 					By("verifying Deployment has no config volumes")
-					Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-pend-admin", Namespace: ns}, adminDeploy)).To(Succeed())
+					Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-pend-cluster", "cfg-pend-admin"), Namespace: ns}, adminDeploy)).To(Succeed())
 					Expect(e2eCountCfgVolumes(adminDeploy)).To(Equal(0), "no config volumes when validation pending")
 
 					utils.MatchCRDResource(node, "cfg-pend-admin pending")
@@ -1769,7 +1849,7 @@ var _ = Describe("IdentityServerNode", func() {
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
 						map[string]interface{}{"name": "cfg-co-admin", "namespace": ns, "clusterName": "cfg-co-cluster"})
 
-					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-co-admin", Namespace: ns}}
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-co-cluster", "cfg-co-admin"), Namespace: ns}}
 					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 					cm := &corev1.ConfigMap{
@@ -1786,7 +1866,7 @@ var _ = Describe("IdentityServerNode", func() {
 					e2eSimulateValidation(ns, "cfg-co-cluster", hash)
 
 					Eventually(func(g Gomega) {
-						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-co-admin", Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-co-cluster", "cfg-co-admin"), Namespace: ns}, deploy)).To(Succeed())
 						// Both volumes should exist
 						g.Expect(e2eHasCfgVolume(deploy, "cluster-config")).To(BeTrue(), "should have cluster-config volume")
 						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-coexist-config")).To(BeTrue(), "should have discovered config volume")
@@ -1840,7 +1920,7 @@ var _ = Describe("IdentityServerNode", func() {
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 						map[string]interface{}{"name": "cfg-aa-runtime", "namespace": ns, "clusterName": "cfg-aa-cluster"})
 
-					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-aa-runtime", Namespace: ns}}
+					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-aa-cluster", "cfg-aa-runtime"), Namespace: ns}}
 					utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
 
 					cm := &corev1.ConfigMap{
@@ -1858,7 +1938,7 @@ var _ = Describe("IdentityServerNode", func() {
 
 					By("verifying runtime gets config (no admin exists)")
 					Eventually(func(g Gomega) {
-						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-aa-runtime", Namespace: ns}, runtimeDeploy)).To(Succeed())
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-aa-cluster", "cfg-aa-runtime"), Namespace: ns}, runtimeDeploy)).To(Succeed())
 						g.Expect(e2eHasCfgVolume(runtimeDeploy, "cfg-cm-reroute-config")).To(BeTrue())
 					}, e2eTimeout, e2eInterval).Should(Succeed())
 
@@ -1867,17 +1947,17 @@ var _ = Describe("IdentityServerNode", func() {
 						map[string]interface{}{"name": "cfg-aa-admin", "namespace": ns, "clusterName": "cfg-aa-cluster"})
 					utils.SimulateClusterConfigReady(ns, "cfg-aa-cluster", e2eTimeout, e2eInterval)
 
-					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "cfg-aa-admin", Namespace: ns}}
+					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-aa-cluster", "cfg-aa-admin"), Namespace: ns}}
 					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
 
 					By("verifying admin gets config and runtime loses it")
 					Eventually(func(g Gomega) {
-						g.Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-aa-admin", Namespace: ns}, adminDeploy)).To(Succeed())
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-aa-cluster", "cfg-aa-admin"), Namespace: ns}, adminDeploy)).To(Succeed())
 						g.Expect(e2eHasCfgVolume(adminDeploy, "cfg-cm-reroute-config")).To(BeTrue(), "admin should get config")
 					}, e2eTimeout, e2eInterval).Should(Succeed())
 
 					Eventually(func() int {
-						Expect(k().Get(ctx, client.ObjectKey{Name: "cfg-aa-runtime", Namespace: ns}, runtimeDeploy)).To(Succeed())
+						Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-aa-cluster", "cfg-aa-runtime"), Namespace: ns}, runtimeDeploy)).To(Succeed())
 						return e2eCountCfgVolumes(runtimeDeploy)
 					}, e2eTimeout, e2eInterval).Should(Equal(0), "runtime should lose config when admin added")
 				})
@@ -1904,7 +1984,7 @@ var _ = Describe("IdentityServerNode", func() {
 						"uiEnabled": true, "uiSecure": false})
 				utils.SimulateClusterConfigReady(ns, "ui-cluster", e2eTimeout, e2eInterval)
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "ui-admin", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("ui-cluster", "ui-admin"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				Expect(deploy.Spec.Template.Spec.Containers[0].Ports).To(ContainElement(
@@ -1912,7 +1992,7 @@ var _ = Describe("IdentityServerNode", func() {
 				), "admin-ui port 6749 should exist")
 
 				svc := &corev1.Service{}
-				Expect(k().Get(ctx, client.ObjectKey{Name: "ui-admin", Namespace: ns}, svc)).To(Succeed())
+				Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("ui-cluster", "ui-admin"), Namespace: ns}, svc)).To(Succeed())
 				Expect(svc.Spec.Ports).To(ContainElement(
 					Satisfy(func(p corev1.ServicePort) bool { return p.Name == "admin-ui" && p.Port == 6749 }),
 				), "admin-ui port on Service")
@@ -1947,7 +2027,7 @@ var _ = Describe("IdentityServerNode", func() {
 						"servicePort": 9443, "customEnvValue": "hello-e2e",
 					})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "custom-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("custom-cluster", "custom-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 				Expect(*deploy.Spec.Replicas).To(Equal(int32(2)))
 
@@ -1956,7 +2036,7 @@ var _ = Describe("IdentityServerNode", func() {
 				))
 
 				svc := &corev1.Service{}
-				Expect(k().Get(ctx, client.ObjectKey{Name: "custom-node", Namespace: ns}, svc)).To(Succeed())
+				Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("custom-cluster", "custom-node"), Namespace: ns}, svc)).To(Succeed())
 				Expect(svc.Spec.Ports).To(ContainElement(
 					Satisfy(func(p corev1.ServicePort) bool { return p.Name == "http" && p.Port == 9443 }),
 				), "Service should have http port 9443")
@@ -1992,7 +2072,7 @@ var _ = Describe("IdentityServerNode", func() {
 				Expect(k().Create(ctx, node)).To(Succeed())
 				utils.SimulateClusterConfigReady(ns, "args-cluster", e2eTimeout, e2eInterval)
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "args-admin", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("args-cluster", "args-admin"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				args := deploy.Spec.Template.Spec.Containers[0].Args
@@ -2026,7 +2106,7 @@ var _ = Describe("IdentityServerNode", func() {
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "args-runtime", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("rtargs-cluster", "args-runtime"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				args := deploy.Spec.Template.Spec.Containers[0].Args
@@ -2052,7 +2132,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "probe-node", "namespace": ns, "clusterName": "probe-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "probe-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("probe-cluster", "probe-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				lp := deploy.Spec.Template.Spec.Containers[0].LivenessProbe
@@ -2096,7 +2176,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "img-node", "namespace": ns, "clusterName": "img-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "img-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("img-cluster", "img-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 				Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("custom-registry/idsvr:custom"))
 
@@ -2126,7 +2206,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "ver-node", "namespace": ns, "clusterName": "ver-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "ver-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("ver-cluster", "ver-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 				Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("curity.azurecr.io/curity/idsvr:11.0"))
 
@@ -2142,7 +2222,7 @@ var _ = Describe("IdentityServerNode", func() {
 
 				By("verifying Deployment image updated")
 				Eventually(func(g Gomega) string {
-					g.Expect(k().Get(ctx, client.ObjectKey{Name: "ver-node", Namespace: ns}, deploy)).To(Succeed())
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("ver-cluster", "ver-node"), Namespace: ns}, deploy)).To(Succeed())
 					if len(deploy.Spec.Template.Spec.Containers) > 0 {
 						return deploy.Spec.Template.Spec.Containers[0].Image
 					}
@@ -2175,7 +2255,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime-labels.yaml", ns,
 					map[string]interface{}{"name": "lbl-node", "namespace": ns, "clusterName": "lbl-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "lbl-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("lbl-cluster", "lbl-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				podLabels := deploy.Spec.Template.Labels
@@ -2208,7 +2288,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "sec-node", "namespace": ns, "clusterName": "sec-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "sec-node", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("sec-cluster", "sec-node"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				podSC := deploy.Spec.Template.Spec.SecurityContext
@@ -2246,7 +2326,7 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "sched-runtime", "namespace": ns, "clusterName": "sched-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "sched-runtime", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("sched-cluster", "sched-runtime"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 				Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("node-pool", "curity"))
 				utils.MatchYAMLResource(deploy, "[deployment] sched-runtime")
@@ -2288,7 +2368,7 @@ spec:
     disk: ssd`, ns)
 				utils.ApplyRawYAML(nodeYAML, ns)
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "ovr-runtime", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("ovr-cluster", "ovr-runtime"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("node-pool", "gpu"))
@@ -2340,12 +2420,12 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("verifying HPA is created")
-				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-runtime", Namespace: ns}}
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-cluster", "hpa-runtime"), Namespace: ns}}
 				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
 
 				Expect(*hpa.Spec.MinReplicas).To(Equal(int32(2)))
 				Expect(hpa.Spec.MaxReplicas).To(Equal(int32(10)))
-				Expect(hpa.Spec.ScaleTargetRef.Name).To(Equal("hpa-runtime"))
+				Expect(hpa.Spec.ScaleTargetRef.Name).To(Equal(ownedName("hpa-cluster", "hpa-runtime")))
 				Expect(hpa.Spec.ScaleTargetRef.Kind).To(Equal("Deployment"))
 				Expect(hpa.Spec.Metrics).To(HaveLen(1))
 				Expect(*hpa.Spec.Metrics[0].Resource.Target.AverageUtilization).To(Equal(int32(80)))
@@ -2358,7 +2438,7 @@ spec:
 			})
 
 			It("should set Deployment replicas to minReplicas when autoscaling enabled", func() {
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "hpa-runtime", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-cluster", "hpa-runtime"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 				Expect(*deploy.Spec.Replicas).To(Equal(int32(2)))
 			})
@@ -2397,14 +2477,14 @@ spec:
 				utils.SimulateClusterConfigReady(ns, "hpa-adm-cluster", e2eTimeout, e2eInterval)
 
 				By("verifying Deployment exists")
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "hpa-admin", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-adm-cluster", "hpa-admin"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 				Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
 
 				By("verifying HPA never created")
 				Consistently(func() bool {
 					return apierrors.IsNotFound(k().Get(ctx,
-						client.ObjectKey{Name: "hpa-admin", Namespace: ns},
+						client.ObjectKey{Name: ownedName("hpa-adm-cluster", "hpa-admin"), Namespace: ns},
 						&autoscalingv2.HorizontalPodAutoscaler{}))
 				}, 5*time.Second, e2eInterval).Should(BeTrue())
 			})
@@ -2441,7 +2521,7 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("waiting for HPA to be created")
-				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-toggle", Namespace: ns}}
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-tog-cluster", "hpa-toggle"), Namespace: ns}}
 				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
 
 				By("disabling autoscaling")
@@ -2456,7 +2536,7 @@ spec:
 				By("verifying HPA is deleted")
 				Eventually(func() bool {
 					return apierrors.IsNotFound(k().Get(ctx,
-						client.ObjectKey{Name: "hpa-toggle", Namespace: ns},
+						client.ObjectKey{Name: ownedName("hpa-tog-cluster", "hpa-toggle"), Namespace: ns},
 						&autoscalingv2.HorizontalPodAutoscaler{}))
 				}, e2eTimeout, e2eInterval).Should(BeTrue())
 			})
@@ -2493,7 +2573,7 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("verifying initial HPA: maxReplicas=10, 1 metric (CPU)")
-				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-update", Namespace: ns}}
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-upd-cluster", "hpa-update"), Namespace: ns}}
 				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
 				Expect(hpa.Spec.MaxReplicas).To(Equal(int32(10)))
 				Expect(hpa.Spec.Metrics).To(HaveLen(1))
@@ -2521,7 +2601,7 @@ spec:
 
 				By("verifying HPA updated: maxReplicas=20, 2 metrics")
 				Eventually(func(g Gomega) {
-					g.Expect(k().Get(ctx, client.ObjectKey{Name: "hpa-update", Namespace: ns}, hpa)).To(Succeed())
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("hpa-upd-cluster", "hpa-update"), Namespace: ns}, hpa)).To(Succeed())
 					g.Expect(hpa.Spec.MaxReplicas).To(Equal(int32(20)))
 					g.Expect(hpa.Spec.Metrics).To(HaveLen(2))
 				}, e2eTimeout, e2eInterval).Should(Succeed())
@@ -2540,7 +2620,7 @@ spec:
 
 				By("verifying HPA reverted to CPU-only")
 				Eventually(func(g Gomega) int {
-					g.Expect(k().Get(ctx, client.ObjectKey{Name: "hpa-update", Namespace: ns}, hpa)).To(Succeed())
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("hpa-upd-cluster", "hpa-update"), Namespace: ns}, hpa)).To(Succeed())
 					return len(hpa.Spec.Metrics)
 				}, e2eTimeout, e2eInterval).Should(Equal(1))
 			})
@@ -2582,7 +2662,7 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("verifying HPA is created with cluster defaults")
-				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-inherit", Namespace: ns}}
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-cl-cluster", "hpa-inherit"), Namespace: ns}}
 				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
 
 				Expect(*hpa.Spec.MinReplicas).To(Equal(int32(3)))
@@ -2639,7 +2719,7 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("verifying HPA has CPU + cluster-level custom metric")
-				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-clcm-node", Namespace: ns}}
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-clcm-cluster", "hpa-clcm-node"), Namespace: ns}}
 				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
 
 				Expect(hpa.Spec.Metrics).To(HaveLen(2))
@@ -2693,7 +2773,7 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("verifying HPA has CPU + custom metrics")
-				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-custom", Namespace: ns}}
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-cust-cluster", "hpa-custom"), Namespace: ns}}
 				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
 
 				Expect(hpa.Spec.Metrics).To(HaveLen(2))
@@ -2720,13 +2800,13 @@ spec:
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
 					map[string]interface{}{"name": "hpa-nil-runtime", "namespace": ns, "clusterName": "hpa-nil-cluster"})
 
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "hpa-nil-runtime", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-nil-cluster", "hpa-nil-runtime"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				By("verifying no HPA created")
 				Consistently(func() bool {
 					return apierrors.IsNotFound(k().Get(ctx,
-						client.ObjectKey{Name: "hpa-nil-runtime", Namespace: ns},
+						client.ObjectKey{Name: ownedName("hpa-nil-cluster", "hpa-nil-runtime"), Namespace: ns},
 						&autoscalingv2.HorizontalPodAutoscaler{}))
 				}, 5*time.Second, e2eInterval).Should(BeTrue())
 			})
@@ -2763,14 +2843,14 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("waiting for Deployment and HPA")
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "hpa-noreset", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-nr-cluster", "hpa-noreset"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
-				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "hpa-noreset", Namespace: ns}}
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-nr-cluster", "hpa-noreset"), Namespace: ns}}
 				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
 
 				By("simulating HPA scaling: patch Deployment replicas to 5")
 				Eventually(func() error {
-					if err := k().Get(ctx, client.ObjectKey{Name: "hpa-noreset", Namespace: ns}, deploy); err != nil {
+					if err := k().Get(ctx, client.ObjectKey{Name: ownedName("hpa-nr-cluster", "hpa-noreset"), Namespace: ns}, deploy); err != nil {
 						return err
 					}
 					deploy.Spec.Replicas = ptr.To(int32(5))
@@ -2791,7 +2871,7 @@ spec:
 
 				By("verifying replicas preserved at 5 (not reset to minReplicas=2)")
 				Consistently(func(g Gomega) int32 {
-					g.Expect(k().Get(ctx, client.ObjectKey{Name: "hpa-noreset", Namespace: ns}, deploy)).To(Succeed())
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("hpa-nr-cluster", "hpa-noreset"), Namespace: ns}, deploy)).To(Succeed())
 					if deploy.Spec.Replicas == nil {
 						return 0
 					}
@@ -2834,14 +2914,14 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("verifying PDB is created")
-				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "pdb-runtime", Namespace: ns}}
+				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pdb-cluster", "pdb-runtime"), Namespace: ns}}
 				utils.WaitForResource(pdb, e2eTimeout, e2eInterval)
 
 				Expect(pdb.Spec.MinAvailable).NotTo(BeNil())
 				Expect(pdb.Spec.MinAvailable.IntValue()).To(Equal(2))
 				Expect(pdb.Spec.MaxUnavailable).To(BeNil())
 				Expect(pdb.Spec.Selector).NotTo(BeNil())
-				Expect(pdb.Spec.Selector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/instance", "pdb-runtime"))
+				Expect(pdb.Spec.Selector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/instance", ownedName("pdb-cluster", "pdb-runtime")))
 
 				By("verifying PDB owner reference")
 				Expect(pdb.OwnerReferences).To(HaveLen(1))
@@ -2880,7 +2960,7 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("verifying PDB is created with percentage value")
-				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "pdb-pct-node", Namespace: ns}}
+				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pdb-pct-cluster", "pdb-pct-node"), Namespace: ns}}
 				utils.WaitForResource(pdb, e2eTimeout, e2eInterval)
 
 				Expect(pdb.Spec.MinAvailable).NotTo(BeNil())
@@ -2918,7 +2998,7 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("waiting for PDB to be created")
-				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "pdb-del-node", Namespace: ns}}
+				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pdb-del-cluster", "pdb-del-node"), Namespace: ns}}
 				utils.WaitForResource(pdb, e2eTimeout, e2eInterval)
 
 				By("removing PDB from node spec")
@@ -2934,7 +3014,7 @@ spec:
 				By("verifying PDB is deleted")
 				Eventually(func() bool {
 					return apierrors.IsNotFound(k().Get(ctx,
-						client.ObjectKey{Name: "pdb-del-node", Namespace: ns},
+						client.ObjectKey{Name: ownedName("pdb-del-cluster", "pdb-del-node"), Namespace: ns},
 						&policyv1.PodDisruptionBudget{}))
 				}, e2eTimeout, e2eInterval).Should(BeTrue())
 			})
@@ -2969,13 +3049,13 @@ spec:
 				utils.SimulateClusterConfigReady(ns, "pdb-adm-cluster", e2eTimeout, e2eInterval)
 
 				By("verifying Deployment exists")
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "pdb-admin", Namespace: ns}}
+				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pdb-adm-cluster", "pdb-admin"), Namespace: ns}}
 				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
 
 				By("verifying PDB never created for admin")
 				Consistently(func() bool {
 					return apierrors.IsNotFound(k().Get(ctx,
-						client.ObjectKey{Name: "pdb-admin", Namespace: ns},
+						client.ObjectKey{Name: ownedName("pdb-adm-cluster", "pdb-admin"), Namespace: ns},
 						&policyv1.PodDisruptionBudget{}))
 				}, 5*time.Second, e2eInterval).Should(BeTrue())
 			})
@@ -3015,12 +3095,12 @@ spec:
 				Expect(k().Create(ctx, node)).To(Succeed())
 
 				By("verifying both HPA and PDB are created and owned by the node")
-				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: "pdb-hpa-node", Namespace: ns}}
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pdb-hpa-cluster", "pdb-hpa-node"), Namespace: ns}}
 				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
 				Expect(hpa.OwnerReferences).To(HaveLen(1))
 				Expect(hpa.OwnerReferences[0].Kind).To(Equal("IdentityServerNode"))
 
-				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "pdb-hpa-node", Namespace: ns}}
+				pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pdb-hpa-cluster", "pdb-hpa-node"), Namespace: ns}}
 				utils.WaitForResource(pdb, e2eTimeout, e2eInterval)
 				Expect(pdb.OwnerReferences).To(HaveLen(1))
 				Expect(pdb.OwnerReferences[0].Kind).To(Equal("IdentityServerNode"))

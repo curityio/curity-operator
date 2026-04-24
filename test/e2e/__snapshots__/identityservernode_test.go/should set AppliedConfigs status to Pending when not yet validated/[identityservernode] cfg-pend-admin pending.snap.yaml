@@ -9,6 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     curity.io/cluster: cfg-pend-cluster
+  ownerReferences: <Any value>
   finalizers:
     - curity.io/node-protection
   managedFields: <Any value>
@@ -43,10 +44,15 @@ status:
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
+    - type: ClusterReady
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: cfg-pend-admin
-  serviceName: cfg-pend-admin
+  deploymentName: cfg-pend-cluster-cfg-pend-admin
+  serviceName: cfg-pend-cluster-cfg-pend-admin
   appliedConfigs:
     - name: pending-config
       kind: ConfigMap

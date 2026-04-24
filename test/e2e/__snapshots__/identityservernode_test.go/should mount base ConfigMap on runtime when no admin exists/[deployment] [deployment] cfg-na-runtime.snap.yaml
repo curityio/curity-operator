@@ -1,7 +1,7 @@
 
 [IdentityServerNode configuration Label-based config discovery No admin — config mounts on runtime should mount base ConfigMap on runtime when no admin exists - 1]
 metadata:
-  name: cfg-na-runtime
+  name: cfg-na-cluster-cfg-na-runtime
   namespace: e2e-cfg-no-admin
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: cfg-na-runtime
+    app.kubernetes.io/instance: cfg-na-cluster-cfg-na-runtime
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

@@ -1,7 +1,7 @@
 
 [IdentityServerNode configuration Label-based config discovery Multiple discovered configs should mount multiple discovered configs - 1]
 metadata:
-  name: cfg-multi-admin
+  name: cfg-multi-cluster-cfg-multi-admin
   namespace: e2e-cfg-multi
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: admin
-    app.kubernetes.io/instance: cfg-multi-admin
+    app.kubernetes.io/instance: cfg-multi-cluster-cfg-multi-admin
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

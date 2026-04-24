@@ -1,14 +1,14 @@
 
 [IdentityServerNode autoscaling HPA with custom metrics should support custom metrics in HPA - 1]
 metadata:
-  name: hpa-custom
+  name: hpa-cust-cluster-hpa-custom
   namespace: e2e-hpa-custom
   uid: <Any value>
   resourceVersion: <Any value>
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: hpa-custom
+    app.kubernetes.io/instance: hpa-cust-cluster-hpa-custom
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"
@@ -19,7 +19,7 @@ metadata:
 spec:
   scaleTargetRef:
     kind: Deployment
-    name: hpa-custom
+    name: hpa-cust-cluster-hpa-custom
     apiVersion: apps/v1
   minReplicas: 2
   maxReplicas: 10

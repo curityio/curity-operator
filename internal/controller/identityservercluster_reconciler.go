@@ -66,15 +66,17 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, fmt.Errorf("failed to get IdentityServerCluster: %w", err)
 	}
 
-	// 2. Handle finalizer
+	// 2. Handle finalizer. The finalizer blocks cluster deletion while any
+	// child IdentityServerNode still exists, so `kubectl delete cluster`
+	// waits for nodes to be removed first. OwnerReferences on children give
+	// additional cascade safety under Foreground propagation, but are not
+	// what enforces the blocking ordering — the finalizer is.
 	if cluster.DeletionTimestamp != nil {
 		if controllerutil.ContainsFinalizer(&cluster, v1alpha1.ClusterFinalizer) {
-			// Check for child nodes — block deletion if any exist
 			childNodes, err := r.listChildNodes(ctx, &cluster)
 			if err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to list child nodes: %w", err)
 			}
-
 			if len(childNodes) > 0 {
 				names := make([]string, 0, len(childNodes))
 				for i := range childNodes {
@@ -85,7 +87,6 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 					"Cannot delete cluster: nodes still exist: %s", strings.Join(names, ", "))
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
-
 			controllerutil.RemoveFinalizer(&cluster, v1alpha1.ClusterFinalizer)
 			if err := r.Update(ctx, &cluster); err != nil {
 				if apierrors.IsConflict(err) {
@@ -98,6 +99,7 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
+	// Ensure the finalizer is present on live clusters (rationale above).
 	if !controllerutil.ContainsFinalizer(&cluster, v1alpha1.ClusterFinalizer) {
 		controllerutil.AddFinalizer(&cluster, v1alpha1.ClusterFinalizer)
 		if err := r.Update(ctx, &cluster); err != nil {
@@ -156,10 +158,12 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	// Preserve conditions set by ensureClusterConfig and ensureConfigValidation
-	// before overwriting with computed node conditions.
+	// Preserve conditions set by ensureClusterConfig, ensureConfigValidation,
+	// and updateConfigScopeIssuesCondition before overwriting with computed
+	// node conditions.
 	configReadyCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
 	validationReadyCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady)
+	scopeIssuesCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionConfigScopeIssues)
 	conditions := computeClusterConditions(childNodes, cluster.Generation)
 	cluster.Status.Conditions = conditions
 	if configReadyCond != nil {
@@ -167,6 +171,9 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 	}
 	if validationReadyCond != nil {
 		apimeta.SetStatusCondition(&cluster.Status.Conditions, *validationReadyCond)
+	}
+	if scopeIssuesCond != nil {
+		apimeta.SetStatusCondition(&cluster.Status.Conditions, *scopeIssuesCond)
 	}
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.NodeCount = int32(len(childNodes))
@@ -304,12 +311,12 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 		).
 		Watches(
 			&corev1.ConfigMap{},
-			handler.EnqueueRequestsFromMapFunc(r.findClustersForManagedConfig),
+			newManagedConfigHandler(r.findClustersForManagedConfig),
 			builder.WithPredicates(managedConfigPredicate{}),
 		).
 		Watches(
 			&corev1.Secret{},
-			handler.EnqueueRequestsFromMapFunc(r.findClustersForManagedConfig),
+			newManagedConfigHandler(r.findClustersForManagedConfig),
 			builder.WithPredicates(managedConfigPredicate{}),
 		).
 		Complete(r)
@@ -766,20 +773,66 @@ func (r *IdentityServerClusterReconciler) ensureConfigValidation(ctx context.Con
 	log := ctrl.LoggerFrom(ctx)
 
 	// Default the config-type annotation on managed resources that lack it.
-	if err := defaultConfigTypeAnnotations(ctx, r.Client, cluster.Namespace); err != nil {
+	// Returning on the first per-resource failure leaves a partial-write
+	// state that self-heals on retry (the loop is idempotent on already-set
+	// annotations), so we log-and-continue here instead of bubbling the
+	// error up. Emit a Warning Event so users without access to operator
+	// logs can still see it via kubectl describe. Message is intentionally
+	// stable (no raw err) to let EventRecorder dedup a retry loop into one
+	// series; full detail stays in log.Error.
+	if err := defaultConfigTypeAnnotations(ctx, r.Client, cluster.Namespace, cluster.Name); err != nil {
 		log.Error(err, "failed to default config-type annotations")
+		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigTypeAnnotationDefault",
+			"Failed to default curity.io/config-type annotation on one or more managed resources; see operator logs for details")
 	}
 
-	// Discover managed configs.
-	configs, err := discoverConfigResources(ctx, r.Client, cluster.Namespace)
-	if err != nil {
-		if errors.Is(err, ErrUnknownConfigType) {
-			setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigValidationReady,
-				metav1.ConditionFalse, "UnknownConfigType", err.Error(), cluster.Generation)
-			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "UnknownConfigType", "%s", err)
-			return false, nil
+	// Surface curity.io/cluster scope issues (empty values, unknown cluster
+	// names) as a persistent condition that survives Event TTL.
+	if err := r.updateConfigScopeIssuesCondition(ctx, cluster); err != nil {
+		// Don't leave a stale False/NoIssues condition in etcd claiming the
+		// namespace is clean when the scan never ran. Flip to Unknown,
+		// emit a Warning, persist, and return so reconcile requeues.
+		log.Error(err, "failed to update ConfigScopeIssues condition")
+		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigScopeIssues,
+			metav1.ConditionUnknown, v1alpha1.ReasonScanFailed,
+			fmt.Sprintf("Config scope scan failed: %v", err), cluster.Generation)
+		// Stable message for EventRecorder dedup: if we interpolate the raw
+		// err here, transient failures with rotating bytes (e.g. "dial tcp
+		// 10.x.x.x:443: i/o timeout" where the IP varies) defeat the
+		// (reason, message) dedup key and spam one Event per reconcile
+		// during an outage. The full error stays in log.Error above and
+		// in the returned error chain below.
+		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, v1alpha1.ReasonScanFailed,
+			"Config scope scan failed; see operator logs for details")
+		if statusErr := r.Status().Update(ctx, cluster); statusErr != nil && !apierrors.IsConflict(statusErr) {
+			// Surface both failures in the returned error — the Event we
+			// emitted above still reaches users either way, but without this
+			// join only the scan error shows up in the controller-runtime
+			// error output and the persist failure is buried in our own
+			// log sink.
+			return false, errors.Join(
+				fmt.Errorf("updating ConfigScopeIssues condition: %w", err),
+				fmt.Errorf("persisting ConfigScopeIssues=Unknown: %w", statusErr),
+			)
 		}
+		return false, fmt.Errorf("updating ConfigScopeIssues condition: %w", err)
+	}
+
+	// Discover managed configs. Resources with invalid curity.io/config-type
+	// annotations come back as `skipped` rather than failing the whole call;
+	// emit one Warning per bad resource so the user knows which to fix, then
+	// proceed to validate the good set. One typo must not cascade into all
+	// managed configs going unvalidated.
+	configs, skipped, err := discoverConfigResources(ctx, r.Client, cluster.Namespace, cluster.Name)
+	if err != nil {
 		return false, fmt.Errorf("discovering managed configs: %w", err)
+	}
+	for _, sk := range skipped {
+		// Message includes resource identity and reason text from
+		// resolveConfigType, which is stable for a given annotation value —
+		// EventRecorder dedups a retry loop into one series per bad resource.
+		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "UnknownConfigType",
+			"Skipped %s/%s: %s", sk.Kind, sk.Name, sk.Reason)
 	}
 
 	if len(configs) == 0 {
@@ -907,10 +960,22 @@ func (r *IdentityServerClusterReconciler) ensureConfigValidation(ctx context.Con
 	return true, nil
 }
 
-// findClustersForManagedConfig maps a managed ConfigMap/Secret change to reconcile
-// requests for all IdentityServerClusters in the same namespace.
+// findClustersForManagedConfig maps a managed ConfigMap/Secret change to
+// reconcile requests for IdentityServerClusters in the same namespace that the
+// curity.io/cluster annotation puts in scope.
 func (r *IdentityServerClusterReconciler) findClustersForManagedConfig(ctx context.Context, obj client.Object) []ctrl.Request {
 	log := ctrl.LoggerFrom(ctx)
+
+	// Defensive label check. managedConfigPredicate passes Updates through
+	// when EITHER the old or new object is labeled (so label removal still
+	// fires), and managedConfigHandler then invokes this mapper once per
+	// side. The object we receive here may therefore not itself be labeled —
+	// e.g. the new side of a label-removal Update. Without this check, an
+	// unlabeled object (whose scope annotation is also typically missing)
+	// would fan out to every cluster in the namespace.
+	if !hasManagedLabel(obj) {
+		return nil
+	}
 
 	var clusterList v1alpha1.IdentityServerClusterList
 	if err := r.List(ctx, &clusterList, client.InNamespace(obj.GetNamespace())); err != nil {
@@ -918,11 +983,30 @@ func (r *IdentityServerClusterReconciler) findClustersForManagedConfig(ctx conte
 		return nil
 	}
 
+	annotations := obj.GetAnnotations()
 	requests := make([]ctrl.Request, 0, len(clusterList.Items))
 	for i := range clusterList.Items {
+		cl := &clusterList.Items[i]
+		if !appliesToCluster(annotations, cl.Name) {
+			continue
+		}
 		requests = append(requests, ctrl.Request{
-			NamespacedName: client.ObjectKeyFromObject(&clusterList.Items[i]),
+			NamespacedName: client.ObjectKeyFromObject(cl),
 		})
+	}
+
+	// If the scope annotation is present but matched no cluster (empty value
+	// or only unknown cluster names), no cluster would be enqueued and the
+	// ConfigScopeIssues scan would never run on this change — the user would
+	// see no EmptyClusterScope/UnknownClusterInScope event and no condition
+	// update until some unrelated reconcile happened to fire. Fan out to all
+	// clusters so at least one surfaces the issue promptly.
+	if _, scoped := annotations[AnnotationClusterScope]; scoped && len(requests) == 0 {
+		for i := range clusterList.Items {
+			requests = append(requests, ctrl.Request{
+				NamespacedName: client.ObjectKeyFromObject(&clusterList.Items[i]),
+			})
+		}
 	}
 	return requests
 }
@@ -957,6 +1041,74 @@ func (r *IdentityServerClusterReconciler) findClusterForSecret(ctx context.Conte
 	return []ctrl.Request{
 		{NamespacedName: client.ObjectKey{Name: clusterName, Namespace: secret.Namespace}},
 	}
+}
+
+// updateConfigScopeIssuesCondition scans the namespace for managed
+// ConfigMaps/Secrets whose curity.io/cluster annotation is empty or names
+// non-existent clusters, and updates the cluster's ConfigScopeIssues
+// condition. Events are also emitted (K8s EventRecorder dedups stable
+// messages into a single row via the count field).
+func (r *IdentityServerClusterReconciler) updateConfigScopeIssuesCondition(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) error {
+	var clusterList v1alpha1.IdentityServerClusterList
+	if err := r.List(ctx, &clusterList, client.InNamespace(cluster.Namespace)); err != nil {
+		return fmt.Errorf("listing clusters for scope scan: %w", err)
+	}
+	existing := make(map[string]struct{}, len(clusterList.Items))
+	for i := range clusterList.Items {
+		existing[clusterList.Items[i].Name] = struct{}{}
+	}
+
+	issues, err := scanConfigScopeIssues(ctx, r.Client, cluster.Namespace, existing)
+	if err != nil {
+		return err
+	}
+
+	if len(issues) == 0 {
+		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigScopeIssues,
+			metav1.ConditionFalse, v1alpha1.ReasonNoIssues,
+			"No scope annotation issues observed", cluster.Generation)
+		return nil
+	}
+
+	// Build the aggregated condition message and emit one event per issue.
+	// EventRecorder collapses repeat emissions with identical (reason, message)
+	// bytes into a single series via the count field — hence the byte-stable
+	// formatters in config_discovery.go.
+	var empties, unknowns []string
+	hasUnknown := false
+	hasEmpty := false
+	for _, is := range issues {
+		ref := is.Kind + "/" + is.Name
+		if is.Empty {
+			hasEmpty = true
+			empties = append(empties, ref)
+			r.Recorder.Eventf(cluster, corev1.EventTypeWarning,
+				EventReasonEmptyClusterScope, "%s on %s", formatEmptyClusterScopeMessage(), ref)
+		}
+		if len(is.Unknown) > 0 {
+			hasUnknown = true
+			unknowns = append(unknowns, ref)
+			r.Recorder.Eventf(cluster, corev1.EventTypeWarning,
+				EventReasonUnknownClusterInScope, "%s on %s",
+				formatUnknownClusterMessage(is.Unknown, is.Applied), ref)
+		}
+	}
+	var reason string
+	if hasEmpty && !hasUnknown {
+		reason = v1alpha1.ReasonEmptyScope
+	} else {
+		reason = v1alpha1.ReasonUnknownClusters
+	}
+	msg := ""
+	if len(unknowns) > 0 {
+		msg += "Resources with unknown clusters in scope: " + formatNameList(unknowns) + ". "
+	}
+	if len(empties) > 0 {
+		msg += "Resources with empty curity.io/cluster annotation: " + formatNameList(empties) + "."
+	}
+	setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigScopeIssues,
+		metav1.ConditionTrue, reason, msg, cluster.Generation)
+	return nil
 }
 
 // generateRandomAlphanumeric generates a random alphanumeric string of the given length.

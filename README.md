@@ -216,6 +216,9 @@ metadata:
   namespace: demo
   labels:
     curity.io/managed: "true"
+  annotations:
+    curity.io/config-type: "base"       # optional; defaults to "base"
+    curity.io/cluster: "my-cluster"     # optional; scopes to listed clusters
 data:
   base-config.xml: |
     <config xmlns="http://tail-f.com/ns/config/1.0">
@@ -237,6 +240,8 @@ Set the `curity.io/config-type` annotation to control where configs are mounted.
 | License | `license` | `/opt/idsvr/etc/init/license/{kind}_{resource-name}_{filename}` |
 
 Mount filenames are prefixed with the resource kind and name to prevent collisions when multiple ConfigMaps/Secrets contain the same data key. The `{kind}` prefix is `cm` for ConfigMaps and `secret` for Secrets (e.g. `cm_my-config_base-config.xml`).
+
+A resource with an unknown `curity.io/config-type` value is skipped (not mounted) and the operator emits an `UnknownConfigType` Warning event on each cluster and node that has the resource in scope. Other managed resources in the namespace are unaffected.
 
 ### Validation
 

@@ -1,7 +1,7 @@
 
 [IdentityServerNode configuration Label-based config discovery Coexistence with cluster-config should coexist with cluster-config volume - 1]
 metadata:
-  name: cfg-co-admin
+  name: cfg-co-cluster-cfg-co-admin
   namespace: e2e-cfg-coexist
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: admin
-    app.kubernetes.io/instance: cfg-co-admin
+    app.kubernetes.io/instance: cfg-co-cluster-cfg-co-admin
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

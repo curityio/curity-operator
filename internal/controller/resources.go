@@ -36,6 +36,14 @@ const (
 	defaultProbeSuccess      = int32(3)
 )
 
+// ownedResourceName returns the child-resource name for Deployments, Services,
+// HPAs, and PDBs owned by a node. Prefixing with the cluster name prevents
+// collisions when two IdentityServerNode CRs in the same namespace share a
+// node name but reference different clusters.
+func ownedResourceName(clusterName, nodeName string) string {
+	return clusterName + "-" + nodeName
+}
+
 // buildDeployment constructs the desired Deployment for an IdentityServerNode.
 // configs contains the validated discovered ConfigMaps/Secrets to mount (may be nil).
 func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode, configs []DiscoveredConfigResource) *appsv1.Deployment {
@@ -104,14 +112,14 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      node.Name,
+			Name:      ownedResourceName(cluster.Name, node.Name),
 			Namespace: node.Namespace,
 			Labels:    labels,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: replicas,
 			Selector: &metav1.LabelSelector{
-				MatchLabels: buildSelectorLabels(node),
+				MatchLabels: buildSelectorLabels(cluster, node),
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -148,13 +156,13 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 func buildService(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      node.Name,
+			Name:      ownedResourceName(cluster.Name, node.Name),
 			Namespace: node.Namespace,
 			Labels:    buildLabels(cluster, node),
 		},
 		Spec: corev1.ServiceSpec{
 			Type:     resolveServiceType(node),
-			Selector: buildSelectorLabels(node),
+			Selector: buildSelectorLabels(cluster, node),
 			Ports:    buildServicePorts(node),
 		},
 	}
@@ -377,10 +385,12 @@ func buildVolumes(clusterName string, configs []DiscoveredConfigResource) ([]cor
 }
 
 // buildLabels returns the standard Kubernetes labels for the resource.
+// app.kubernetes.io/instance is {clusterName}-{nodeName} to keep selectors
+// disjoint across clusters sharing a node name in the same namespace.
 func buildLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "curity-identity-server",
-		"app.kubernetes.io/instance":   node.Name,
+		"app.kubernetes.io/instance":   ownedResourceName(cluster.Name, node.Name),
 		"app.kubernetes.io/managed-by": "curity-operator",
 		"app.kubernetes.io/component":  string(node.Spec.Type),
 		"app.kubernetes.io/version":    cluster.Spec.Version,
@@ -390,10 +400,10 @@ func buildLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identit
 }
 
 // buildSelectorLabels returns the minimal labels used for pod selection.
-func buildSelectorLabels(node *v1alpha1.IdentityServerNode) map[string]string {
+func buildSelectorLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":     "curity-identity-server",
-		"app.kubernetes.io/instance": node.Name,
+		"app.kubernetes.io/instance": ownedResourceName(cluster.Name, node.Name),
 	}
 }
 
@@ -641,9 +651,10 @@ func buildHPA(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentitySe
 
 	metrics = append(metrics, as.CustomMetrics...)
 
+	owned := ownedResourceName(cluster.Name, node.Name)
 	return &autoscalingv2.HorizontalPodAutoscaler{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      node.Name,
+			Name:      owned,
 			Namespace: node.Namespace,
 			Labels:    buildLabels(cluster, node),
 		},
@@ -651,7 +662,7 @@ func buildHPA(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentitySe
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
 				APIVersion: "apps/v1",
 				Kind:       "Deployment",
-				Name:       node.Name,
+				Name:       owned,
 			},
 			MinReplicas: ptr.To(as.MinReplicas),
 			MaxReplicas: as.MaxReplicas,
@@ -667,14 +678,14 @@ func buildPDB(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentitySe
 	pdb := resolvePDB(cluster, node)
 	return &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      node.Name,
+			Name:      ownedResourceName(cluster.Name, node.Name),
 			Namespace: node.Namespace,
 			Labels:    buildLabels(cluster, node),
 		},
 		Spec: policyv1.PodDisruptionBudgetSpec{
 			MinAvailable: pdb.MinAvailable,
 			Selector: &metav1.LabelSelector{
-				MatchLabels: buildSelectorLabels(node),
+				MatchLabels: buildSelectorLabels(cluster, node),
 			},
 		},
 	}

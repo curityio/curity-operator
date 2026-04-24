@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -46,7 +45,7 @@ func TestDiscoverConfigResources_ReturnsOnlyLabeledResources(t *testing.T) {
 		},
 	).Build()
 
-	configs, err := discoverConfigResources(ctx, c, "ns")
+	configs, _, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,7 +82,7 @@ func TestDiscoverConfigResources_ExcludesClusterConfigSecret(t *testing.T) {
 		},
 	).Build()
 
-	configs, err := discoverConfigResources(ctx, c, "ns")
+	configs, _, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -112,7 +111,7 @@ func TestDiscoverConfigResources_DefaultsConfigTypeToBase(t *testing.T) {
 		},
 	).Build()
 
-	configs, err := discoverConfigResources(ctx, c, "ns")
+	configs, _, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -141,7 +140,7 @@ func TestDiscoverConfigResources_LicenseConfigType(t *testing.T) {
 		},
 	).Build()
 
-	configs, err := discoverConfigResources(ctx, c, "ns")
+	configs, _, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -153,7 +152,11 @@ func TestDiscoverConfigResources_LicenseConfigType(t *testing.T) {
 	}
 }
 
-func TestDiscoverConfigResources_UnknownConfigTypeReturnsError(t *testing.T) {
+func TestDiscoverConfigResources_UnknownConfigType_SkipsOffenderNotNeighbors(t *testing.T) {
+	// One bad neighbor must NOT cascade: the bad CM goes into `skipped`
+	// with a stable reason (used for EventRecorder dedup downstream), the
+	// good neighbor still comes back in `configs`, and the overall call
+	// succeeds (no hard error).
 	ctx := context.Background()
 	s := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(
@@ -168,14 +171,40 @@ func TestDiscoverConfigResources_UnknownConfigTypeReturnsError(t *testing.T) {
 			},
 			Data: map[string]string{"config.xml": "<config/>"},
 		},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "good-neighbor",
+				Namespace: "ns",
+				Labels:    map[string]string{LabelManagedConfig: "true"},
+				Annotations: map[string]string{
+					AnnotationConfigType: ConfigTypeBase,
+				},
+			},
+			Data: map[string]string{"init.xml": "<config/>"},
+		},
 	).Build()
 
-	_, err := discoverConfigResources(ctx, c, "ns")
-	if err == nil {
-		t.Fatal("expected error for unknown config type")
+	configs, skipped, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
+	if err != nil {
+		t.Fatalf("expected no hard error; skipping-the-offender must not cascade: %v", err)
 	}
-	if !errors.Is(err, ErrUnknownConfigType) {
-		t.Errorf("expected ErrUnknownConfigType, got: %v", err)
+	if len(configs) != 1 {
+		t.Fatalf("want 1 valid config (good-neighbor), got %d: %v", len(configs), configs)
+	}
+	if configs[0].Name != "good-neighbor" {
+		t.Errorf("want good-neighbor in results, got %q", configs[0].Name)
+	}
+	if len(skipped) != 1 {
+		t.Fatalf("want 1 skipped (bad-type), got %d: %v", len(skipped), skipped)
+	}
+	if skipped[0].Name != "bad-type" || skipped[0].Kind != "ConfigMap" {
+		t.Errorf("unexpected skipped: %+v", skipped[0])
+	}
+	// Reason must be stable (contains the invalid value verbatim, not the
+	// rotating bytes of a network error) so EventRecorder dedups retries
+	// into one series per bad resource.
+	if !strings.Contains(skipped[0].Reason, "bsae") {
+		t.Errorf("skipped reason should identify the bad value, got: %q", skipped[0].Reason)
 	}
 }
 
@@ -206,7 +235,7 @@ func TestDiscoverConfigResources_SortedByName(t *testing.T) {
 		},
 	).Build()
 
-	configs, err := discoverConfigResources(ctx, c, "ns")
+	configs, _, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -224,7 +253,7 @@ func TestDiscoverConfigResources_EmptyNamespace(t *testing.T) {
 	s := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	configs, err := discoverConfigResources(ctx, c, "empty-ns")
+	configs, _, err := discoverConfigResources(ctx, c, "empty-ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -248,7 +277,7 @@ func TestDefaultConfigTypeAnnotations_SetsMissingAnnotation(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "ns"); err != nil {
+	if err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -276,7 +305,7 @@ func TestDefaultConfigTypeAnnotations_SkipsExistingAnnotation(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "ns"); err != nil {
+	if err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -304,7 +333,7 @@ func TestDefaultConfigTypeAnnotations_SkipsClusterConfigSecret(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(sec).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "ns"); err != nil {
+	if err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -330,7 +359,7 @@ func TestDefaultConfigTypeAnnotations_NilAnnotationsMap(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(sec).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "ns"); err != nil {
+	if err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -349,8 +378,91 @@ func TestDefaultConfigTypeAnnotations_EmptyNamespace(t *testing.T) {
 	s := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "empty-ns"); err != nil {
+	if err := defaultConfigTypeAnnotations(ctx, c, "empty-ns", "test-cluster"); err != nil {
 		t.Fatalf("unexpected error for empty namespace: %v", err)
+	}
+}
+
+func TestDefaultConfigTypeAnnotations_OnlyAnnotatesOwnCluster(t *testing.T) {
+	// Race prevention: two clusters in the same namespace must not
+	// default-annotate each other's resources. Cluster A's reconcile should
+	// only set config-type on resources that apply to A (either annotated
+	// for A or without any scope annotation).
+	ctx := context.Background()
+	s := newScheme(t)
+
+	cmForA := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cm-for-a", Namespace: "ns",
+			Labels:      map[string]string{LabelManagedConfig: "true"},
+			Annotations: map[string]string{AnnotationClusterScope: "cluster-a"},
+		},
+	}
+	cmForB := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cm-for-b", Namespace: "ns",
+			Labels:      map[string]string{LabelManagedConfig: "true"},
+			Annotations: map[string]string{AnnotationClusterScope: "cluster-b"},
+		},
+	}
+	cmForAll := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cm-for-all", Namespace: "ns",
+			Labels: map[string]string{LabelManagedConfig: "true"},
+			// No scope annotation — applies to every cluster.
+		},
+	}
+	secForB := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "sec-for-b", Namespace: "ns",
+			Labels:      map[string]string{LabelManagedConfig: "true"},
+			Annotations: map[string]string{AnnotationClusterScope: "cluster-b"},
+		},
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cmForA, cmForB, cmForAll, secForB).Build()
+
+	if err := defaultConfigTypeAnnotations(ctx, c, "ns", "cluster-a"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// cm-for-a: must be annotated (in scope for cluster-a).
+	var updatedA corev1.ConfigMap
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cmForA), &updatedA); err != nil {
+		t.Fatalf("getting cm-for-a: %v", err)
+	}
+	if updatedA.Annotations[AnnotationConfigType] != ConfigTypeBase {
+		t.Errorf("cm-for-a: expected annotation %q=%q, got %q",
+			AnnotationConfigType, ConfigTypeBase, updatedA.Annotations[AnnotationConfigType])
+	}
+
+	// cm-for-all: must be annotated (applies to all clusters).
+	var updatedAll corev1.ConfigMap
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cmForAll), &updatedAll); err != nil {
+		t.Fatalf("getting cm-for-all: %v", err)
+	}
+	if updatedAll.Annotations[AnnotationConfigType] != ConfigTypeBase {
+		t.Errorf("cm-for-all: expected annotation %q=%q, got %q",
+			AnnotationConfigType, ConfigTypeBase, updatedAll.Annotations[AnnotationConfigType])
+	}
+
+	// cm-for-b: must NOT be annotated (out of scope for cluster-a — race prevention).
+	var updatedB corev1.ConfigMap
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cmForB), &updatedB); err != nil {
+		t.Fatalf("getting cm-for-b: %v", err)
+	}
+	if updatedB.Annotations[AnnotationConfigType] != "" {
+		t.Errorf("cm-for-b must not be annotated by cluster-a, got %q",
+			updatedB.Annotations[AnnotationConfigType])
+	}
+
+	// sec-for-b: same — Secret branch must honor scope too.
+	var updatedSecB corev1.Secret
+	if err := c.Get(ctx, client.ObjectKeyFromObject(secForB), &updatedSecB); err != nil {
+		t.Fatalf("getting sec-for-b: %v", err)
+	}
+	if updatedSecB.Annotations[AnnotationConfigType] != "" {
+		t.Errorf("sec-for-b must not be annotated by cluster-a, got %q",
+			updatedSecB.Annotations[AnnotationConfigType])
 	}
 }
 

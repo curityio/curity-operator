@@ -1,7 +1,7 @@
 
 [IdentityServerNode scheduling Node scheduling overrides cluster should merge node nodeSelector over cluster defaults - 1]
 metadata:
-  name: ovr-runtime
+  name: ovr-cluster-ovr-runtime
   namespace: e2e-sched-override
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: ovr-runtime
+    app.kubernetes.io/instance: ovr-cluster-ovr-runtime
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

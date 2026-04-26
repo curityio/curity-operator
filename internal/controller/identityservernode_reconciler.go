@@ -26,6 +26,13 @@ import (
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
 
+// annotationManagedConfigsHash is stamped on the Deployment pod template and
+// changes when the discovered managed-config set changes, forcing a rolling
+// restart so idsvr re-reads its config files. SubPath mounts do not
+// auto-refresh, so without this, edits to managed CMs/Secrets would never
+// reach the running idsvr process.
+const annotationManagedConfigsHash = "curity.io/managed-configs-hash"
+
 // IdentityServerNodeReconciler reconciles an IdentityServerNode object.
 // It creates and manages a Deployment and Service for each node.
 type IdentityServerNodeReconciler struct {
@@ -289,20 +296,12 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		applicableConfigs = allConfigs
 	}
 
-	// Check if the cluster has validated the current config set.
-	var validatedConfigs []DiscoveredConfigResource
+	// Hash drives the pod-template config-hash annotation, which triggers
+	// rolling restart on config-content change.
 	configHash := computeConfigHash(applicableConfigs)
 
 	if len(applicableConfigs) > 0 {
-		validatedHash := cluster.Annotations[annotationValidatedConfigHash]
-		if validatedHash == configHash {
-			validatedConfigs = applicableConfigs
-			node.Status.AppliedConfigs = buildAppliedConfigStatus(applicableConfigs, v1alpha1.ValidationStatusValidated)
-		} else {
-			// Configs not yet validated — don't mount. The cluster reconciler
-			// will create the validation Job and update the annotation.
-			node.Status.AppliedConfigs = buildAppliedConfigStatus(applicableConfigs, v1alpha1.ValidationStatusPending)
-		}
+		node.Status.AppliedConfigs = buildAppliedConfigStatus(applicableConfigs)
 	} else {
 		node.Status.AppliedConfigs = nil
 	}
@@ -367,7 +366,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 6. Build and reconcile the Deployment
 	as := resolveAutoscaling(&cluster, &node)
-	desiredDeploy := buildDeployment(&cluster, &node, validatedConfigs)
+	desiredDeploy := buildDeployment(&cluster, &node, applicableConfigs)
 
 	// Inject cluster config hash annotation for rolling restart when Secret changes.
 	// Only inject when config is ready or no admin exists — avoids hashing
@@ -390,12 +389,12 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	// Inject discovered config hash annotation for rolling restart on config changes.
+	// Inject managed-configs-hash annotation for rolling restart on config changes.
 	if configHash != "" {
 		if desiredDeploy.Spec.Template.Annotations == nil {
 			desiredDeploy.Spec.Template.Annotations = make(map[string]string)
 		}
-		desiredDeploy.Spec.Template.Annotations[annotationConfigHash] = configHash
+		desiredDeploy.Spec.Template.Annotations[annotationManagedConfigsHash] = configHash
 	}
 
 	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}}

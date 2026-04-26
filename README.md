@@ -243,29 +243,6 @@ Mount filenames are prefixed with the resource kind and name to prevent collisio
 
 A resource with an unknown `curity.io/config-type` value is skipped (not mounted) and the operator emits an `UnknownConfigType` Warning event on each cluster and node that has the resource in scope. Other managed resources in the namespace are unaffected.
 
-### Validation
-
-When managed configs are created or updated, the operator runs a validation Job that starts an isolated Curity instance to verify the config. The status is visible on the cluster:
-
-```bash
-kubectl get isc my-cluster -o jsonpath='{.status.conditions[?(@.type=="ConfigValidationReady")]}'
-```
-
-And on each node:
-
-```bash
-kubectl get isn admin -o jsonpath='{.status.appliedConfigs}'
-```
-
-**What validation catches:**
-- Malformed XML (not well-formed)
-- Unknown or invalid XML schema elements
-
-**What validation does not catch:**
-- Semantic errors that only surface in full cluster mode (e.g., HTTPS service role without an SSL key configured)
-
-If validation fails, the `ConfigValidationReady` condition on the cluster shows the reason. Configs are **not** mounted until validation passes. Fix the config content to retry automatically, or delete the validation Job manually for transient infrastructure failures.
-
 ### Admin Routing
 
 Config volumes are mounted based on whether an admin node exists:

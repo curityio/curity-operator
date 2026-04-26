@@ -306,9 +306,9 @@ func TestDiscoverConfigResources_FiltersByScope(t *testing.T) {
 	}
 }
 
-func TestEnsureConfigValidation_ScopeScanFailure_SetsUnknownEmitsEventReturnsError(t *testing.T) {
+func TestEnsureManagedConfigDiscovery_ScopeScanFailure_SetsUnknownEmitsEventReturnsError(t *testing.T) {
 	// Regression: when updateConfigScopeIssuesCondition fails (transient List
-	// error), ensureConfigValidation previously just logged and continued —
+	// error), the discovery path previously just logged and continued —
 	// leaving a stale False/NoIssues condition in etcd. It must now flip the
 	// condition to Unknown/ScanFailed, emit a Warning, persist status, and
 	// return the error so reconcile requeues.
@@ -356,15 +356,12 @@ func TestEnsureConfigValidation_ScopeScanFailure_SetsUnknownEmitsEventReturnsErr
 		Recorder: rec,
 	}
 
-	requeue, err := r.ensureConfigValidation(ctx, cluster)
+	err := r.ensureManagedConfigDiscovery(ctx, cluster)
 	if err == nil {
 		t.Fatalf("expected error when scope scan fails; got nil")
 	}
 	if !errors.Is(err, listErr) {
 		t.Errorf("expected wrapped List error, got: %v", err)
-	}
-	if requeue {
-		t.Errorf("requeue=true unexpected on error path (caller handles requeue via err)")
 	}
 
 	// Condition must now be Unknown/ScanFailed (in-memory).
@@ -416,7 +413,7 @@ func TestEnsureConfigValidation_ScopeScanFailure_SetsUnknownEmitsEventReturnsErr
 	}
 }
 
-func TestEnsureConfigValidation_ScopeScanFailure_StatusPersistAlsoFails_JoinsBothErrors(t *testing.T) {
+func TestEnsureManagedConfigDiscovery_ScopeScanFailure_StatusPersistAlsoFails_JoinsBothErrors(t *testing.T) {
 	// When BOTH the scope scan and the subsequent Status().Update fail, the
 	// returned error must carry both — otherwise the persist failure gets
 	// swallowed into log-only output and only the scan error shows up in
@@ -459,7 +456,7 @@ func TestEnsureConfigValidation_ScopeScanFailure_StatusPersistAlsoFails_JoinsBot
 		Recorder: record.NewFakeRecorder(4),
 	}
 
-	_, err := r.ensureConfigValidation(ctx, cluster)
+	err := r.ensureManagedConfigDiscovery(ctx, cluster)
 	if err == nil {
 		t.Fatalf("expected error when both scan and status persist fail")
 	}
@@ -471,7 +468,7 @@ func TestEnsureConfigValidation_ScopeScanFailure_StatusPersistAlsoFails_JoinsBot
 	}
 }
 
-func TestEnsureConfigValidation_DefaultConfigTypeAnnotationsFailure_EmitsWarningEvent(t *testing.T) {
+func TestEnsureManagedConfigDiscovery_DefaultConfigTypeAnnotationsFailure_EmitsWarningEvent(t *testing.T) {
 	// When defaultConfigTypeAnnotations fails (e.g. per-resource RBAC or a
 	// conflict on one CM), the reconciler log-and-continues so reconcile
 	// makes progress — but without a user-visible signal, partial-write
@@ -517,9 +514,9 @@ func TestEnsureConfigValidation_DefaultConfigTypeAnnotationsFailure_EmitsWarning
 		Recorder: rec,
 	}
 
-	// Call via ensureConfigValidation (the production entry point) so we
+	// Call via ensureManagedConfigDiscovery (the production entry point) so we
 	// also exercise the continue-past-default-failure control flow.
-	_, _ = r.ensureConfigValidation(ctx, cluster)
+	_ = r.ensureManagedConfigDiscovery(ctx, cluster)
 
 	close(rec.Events)
 	found := false

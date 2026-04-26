@@ -626,15 +626,12 @@ func TestBuildAppliedConfigStatus_ConfigMap(t *testing.T) {
 	configs := []DiscoveredConfigResource{
 		{Name: "cm-1", IsSecret: false, ConfigType: ConfigTypeBase},
 	}
-	status := buildAppliedConfigStatus(configs, v1alpha1.ValidationStatusValidated)
+	status := buildAppliedConfigStatus(configs)
 	if len(status) != 1 {
 		t.Fatalf("expected 1 status entry, got %d", len(status))
 	}
 	if status[0].Kind != "ConfigMap" {
 		t.Errorf("expected Kind %q, got %q", "ConfigMap", status[0].Kind)
-	}
-	if status[0].ValidationStatus != v1alpha1.ValidationStatusValidated {
-		t.Errorf("expected ValidationStatus %q, got %q", v1alpha1.ValidationStatusValidated, status[0].ValidationStatus)
 	}
 }
 
@@ -642,7 +639,7 @@ func TestBuildAppliedConfigStatus_Secret(t *testing.T) {
 	configs := []DiscoveredConfigResource{
 		{Name: "sec-1", IsSecret: true, ConfigType: ConfigTypeLicense},
 	}
-	status := buildAppliedConfigStatus(configs, v1alpha1.ValidationStatusPending)
+	status := buildAppliedConfigStatus(configs)
 	if len(status) != 1 {
 		t.Fatalf("expected 1 status entry, got %d", len(status))
 	}
@@ -655,7 +652,7 @@ func TestBuildAppliedConfigStatus_Secret(t *testing.T) {
 }
 
 func TestBuildAppliedConfigStatus_EmptyConfigs(t *testing.T) {
-	status := buildAppliedConfigStatus(nil, v1alpha1.ValidationStatusValidated)
+	status := buildAppliedConfigStatus(nil)
 	if status != nil {
 		t.Errorf("expected nil for empty configs, got %v", status)
 	}

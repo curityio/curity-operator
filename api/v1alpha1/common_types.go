@@ -19,12 +19,11 @@ const (
 
 // Condition type constants for status reporting.
 const (
-	ConditionReady                 = "Ready"
-	ConditionAvailable             = "Available"
-	ConditionProgressing           = "Progressing"
-	ConditionDegraded              = "Degraded"
-	ConditionClusterConfigReady    = "ClusterConfigReady"
-	ConditionConfigValidationReady = "ConfigValidationReady"
+	ConditionReady              = "Ready"
+	ConditionAvailable          = "Available"
+	ConditionProgressing        = "Progressing"
+	ConditionDegraded           = "Degraded"
+	ConditionClusterConfigReady = "ClusterConfigReady"
 	// ConditionClusterReady on an IdentityServerNode reports whether its
 	// referenced IdentityServerCluster exists and the node has been adopted
 	// via controller OwnerReferences.
@@ -192,13 +191,6 @@ type PDBSpec struct {
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
 }
 
-// Validation status values for AppliedConfigStatus.
-const (
-	ValidationStatusValidated = "Validated"
-	ValidationStatusPending   = "Pending"
-	ValidationStatusFailed    = "Failed"
-)
-
 // AppliedConfigStatus represents the status of a discovered configuration resource.
 // +kubebuilder:object:generate=true
 type AppliedConfigStatus struct {
@@ -212,10 +204,6 @@ type AppliedConfigStatus struct {
 	// ConfigType is the curity.io/config-type annotation value ("base" or "license").
 	// +kubebuilder:validation:Enum=base;license
 	ConfigType string `json:"configType"`
-
-	// ValidationStatus is "Validated", "Pending", or "Failed".
-	// +kubebuilder:validation:Enum=Validated;Pending;Failed
-	ValidationStatus string `json:"validationStatus"`
 }
 
 // LoggingSpec configures logging behavior.

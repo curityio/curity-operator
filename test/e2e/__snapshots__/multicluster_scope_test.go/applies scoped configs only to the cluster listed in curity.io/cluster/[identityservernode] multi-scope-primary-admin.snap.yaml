@@ -57,14 +57,11 @@ status:
     - name: base-primary
       kind: ConfigMap
       configType: base
-      validationStatus: Validated
     - name: shared-base
       kind: ConfigMap
       configType: base
-      validationStatus: Validated
     - name: shared-license
       kind: Secret
       configType: license
-      validationStatus: Validated
 
 ---

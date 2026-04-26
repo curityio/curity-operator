@@ -2,10 +2,7 @@ package controller_test
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -129,67 +126,6 @@ func newUnstructuredNode(ns, name, role, clusterRef string) *unstructured.Unstru
 			},
 		},
 	}
-}
-
-// configHashEntry mirrors the DiscoveredConfigResource shape for hash computation.
-type configHashEntry struct {
-	Name       string
-	IsSecret   bool
-	ConfigType string
-	Data       map[string][]byte
-}
-
-// testComputeConfigHash mirrors computeConfigHash() from config_discovery.go.
-// See computeConfigHash() in config_discovery.go for the canonical implementation.
-func testComputeConfigHash(entries []configHashEntry) string {
-	if len(entries) == 0 {
-		return ""
-	}
-	sorted := make([]configHashEntry, len(entries))
-	copy(sorted, entries)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
-
-	h := sha256.New()
-	for _, e := range sorted {
-		h.Write([]byte(e.Name))
-		h.Write([]byte{0})
-		if e.IsSecret {
-			h.Write([]byte("Secret"))
-		} else {
-			h.Write([]byte("ConfigMap"))
-		}
-		h.Write([]byte{0})
-		h.Write([]byte(e.ConfigType))
-		h.Write([]byte{0})
-		keys := make([]string, 0, len(e.Data))
-		for k := range e.Data {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			h.Write([]byte(k))
-			h.Write([]byte{0})
-			h.Write(e.Data[k])
-			h.Write([]byte{0})
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// testSimulateValidation sets the validated config hash annotation on the cluster,
-// triggering node re-reconciliation via the clusterSpecOrNodeCountChangedPredicate.
-func testSimulateValidation(ns, clusterName, configHash string) {
-	Eventually(func() error {
-		cluster := &v1alpha1.IdentityServerCluster{}
-		if err := k8sClient.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: ns}, cluster); err != nil {
-			return err
-		}
-		if cluster.Annotations == nil {
-			cluster.Annotations = make(map[string]string)
-		}
-		cluster.Annotations["curity.io/validated-config-hash"] = configHash
-		return k8sClient.Update(ctx, cluster)
-	}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
 }
 
 // testSimulateClusterConfigReady populates the cluster-config secret with real
@@ -897,13 +833,6 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			// Create managed ConfigMap
 			testCreateManagedConfigMap(ns, "my-config", map[string]string{"init.xml": "<config/>"}, nil)
 
-			// Simulate validation
-			hash := testComputeConfigHash([]configHashEntry{{
-				Name: "my-config", IsSecret: false, ConfigType: "base",
-				Data: map[string][]byte{"init.xml": []byte("<config/>")},
-			}})
-			testSimulateValidation(ns, "cfg-cluster", hash)
-
 			// Verify config volume appears on Deployment
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cfg-cluster", "cfg-node"), Namespace: ns}, deploy)).To(Succeed())
@@ -912,37 +841,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			}, timeout, interval).Should(Succeed())
 
 			// Verify config-hash annotation on pod template
-			Expect(deploy.Spec.Template.Annotations).To(HaveKey("curity.io/config-hash"))
-		})
-
-		It("should NOT mount configs when validation hash is missing", func() {
-			testCreateCluster(ns, "cfg-cluster")
-			testCreateNode(ns, "cfg-node", v1alpha1.NodeTypeRuntime, "cfg-cluster")
-
-			deploy := &appsv1.Deployment{}
-			eventuallyGetResource(ns, ownedName("cfg-cluster", "cfg-node"), deploy)
-
-			// Create managed ConfigMap but do NOT simulate validation
-			testCreateManagedConfigMap(ns, "unvalidated-config", map[string]string{"data.xml": "<data/>"}, nil)
-
-			// Wait for reconcile to pick up the ConfigMap (watch triggers it)
-			// The Deployment should NOT gain config volumes
-			Consistently(func() int {
-				_ = k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cfg-cluster", "cfg-node"), Namespace: ns}, deploy)
-				return countCfgVolumes(deploy)
-			}, 5*time.Second, interval).Should(Equal(0), "no cfg volumes when validation hash is missing")
-
-			// Verify node status shows Pending
-			node := &v1alpha1.IdentityServerNode{}
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cfg-node", Namespace: ns}, node); err != nil {
-					return ""
-				}
-				if len(node.Status.AppliedConfigs) == 0 {
-					return ""
-				}
-				return node.Status.AppliedConfigs[0].ValidationStatus
-			}, timeout, interval).Should(Equal("Pending"))
+			Expect(deploy.Spec.Template.Annotations).To(HaveKey("curity.io/managed-configs-hash"))
 		})
 
 		It("should route configs only to admin when admin exists", func() {
@@ -957,12 +856,6 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			eventuallyGetResource(ns, ownedName("cfg-cluster", "cfg-runtime"), runtimeDeploy)
 
 			testCreateManagedConfigMap(ns, "admin-only-config", map[string]string{"settings.xml": "<settings/>"}, nil)
-
-			hash := testComputeConfigHash([]configHashEntry{{
-				Name: "admin-only-config", IsSecret: false, ConfigType: "base",
-				Data: map[string][]byte{"settings.xml": []byte("<settings/>")},
-			}})
-			testSimulateValidation(ns, "cfg-cluster", hash)
 
 			// Admin should get the config
 			Eventually(func(g Gomega) {
@@ -986,12 +879,6 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 
 			testCreateManagedConfigMap(ns, "runtime-config", map[string]string{"app.xml": "<app/>"}, nil)
 
-			hash := testComputeConfigHash([]configHashEntry{{
-				Name: "runtime-config", IsSecret: false, ConfigType: "base",
-				Data: map[string][]byte{"app.xml": []byte("<app/>")},
-			}})
-			testSimulateValidation(ns, "cfg-cluster", hash)
-
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cfg-cluster", "cfg-runtime"), Namespace: ns}, deploy)).To(Succeed())
 				g.Expect(hasVolumeName(deploy, "cfg-cm-runtime-config")).To(BeTrue())
@@ -1009,12 +896,6 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			testCreateManagedSecret(ns, "my-license",
 				map[string][]byte{"license.json": []byte(`{"key":"value"}`)},
 				map[string]string{"curity.io/config-type": "license"})
-
-			hash := testComputeConfigHash([]configHashEntry{{
-				Name: "my-license", IsSecret: true, ConfigType: "license",
-				Data: map[string][]byte{"license.json": []byte(`{"key":"value"}`)},
-			}})
-			testSimulateValidation(ns, "cfg-cluster", hash)
 
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cfg-cluster", "cfg-node"), Namespace: ns}, deploy)).To(Succeed())
@@ -1044,14 +925,6 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			testCreateManagedConfigMap(ns, "good-neighbor",
 				map[string]string{"init.xml": "<config/>"},
 				map[string]string{"curity.io/config-type": "base"})
-
-			// Validate just the good one — discovery's `configs` return
-			// excludes the bad one, so the hash is over [good-neighbor] only.
-			hash := testComputeConfigHash([]configHashEntry{{
-				Name: "good-neighbor", IsSecret: false, ConfigType: "base",
-				Data: map[string][]byte{"init.xml": []byte("<config/>")},
-			}})
-			testSimulateValidation(ns, "cfg-cluster", hash)
 
 			By("expecting the valid neighbor to mount while the bad one is skipped")
 			Eventually(func(g Gomega) {
@@ -1091,17 +964,11 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 
 			testCreateManagedConfigMap(ns, "mutable-config", map[string]string{"data.xml": "<v1/>"}, nil)
 
-			hash1 := testComputeConfigHash([]configHashEntry{{
-				Name: "mutable-config", IsSecret: false, ConfigType: "base",
-				Data: map[string][]byte{"data.xml": []byte("<v1/>")},
-			}})
-			testSimulateValidation(ns, "cfg-cluster", hash1)
-
 			// Wait for initial hash
 			var initialHash string
 			Eventually(func() string {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cfg-cluster", "cfg-node"), Namespace: ns}, deploy)
-				initialHash = deploy.Spec.Template.Annotations["curity.io/config-hash"]
+				initialHash = deploy.Spec.Template.Annotations["curity.io/managed-configs-hash"]
 				return initialHash
 			}, timeout, interval).ShouldNot(BeEmpty())
 
@@ -1111,16 +978,10 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			cm.Data["data.xml"] = "<v2/>"
 			Expect(k8sClient.Update(ctx, cm)).To(Succeed())
 
-			hash2 := testComputeConfigHash([]configHashEntry{{
-				Name: "mutable-config", IsSecret: false, ConfigType: "base",
-				Data: map[string][]byte{"data.xml": []byte("<v2/>")},
-			}})
-			testSimulateValidation(ns, "cfg-cluster", hash2)
-
 			// Verify hash changed
 			Eventually(func() string {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cfg-cluster", "cfg-node"), Namespace: ns}, deploy)
-				return deploy.Spec.Template.Annotations["curity.io/config-hash"]
+				return deploy.Spec.Template.Annotations["curity.io/managed-configs-hash"]
 			}, timeout, interval).ShouldNot(Equal(initialHash))
 		})
 
@@ -1132,12 +993,6 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			eventuallyGetResource(ns, ownedName("cfg-cluster", "cfg-node"), deploy)
 
 			testCreateManagedConfigMap(ns, "removable-config", map[string]string{"init.xml": "<init/>"}, nil)
-
-			hash := testComputeConfigHash([]configHashEntry{{
-				Name: "removable-config", IsSecret: false, ConfigType: "base",
-				Data: map[string][]byte{"init.xml": []byte("<init/>")},
-			}})
-			testSimulateValidation(ns, "cfg-cluster", hash)
 
 			// Wait for volume to appear
 			Eventually(func(g Gomega) {
@@ -1151,16 +1006,6 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			delete(cm.Labels, "curity.io/managed")
 			Expect(k8sClient.Update(ctx, cm)).To(Succeed())
 
-			// Clear validated hash (no managed configs remain)
-			Eventually(func() error {
-				cluster := &v1alpha1.IdentityServerCluster{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cfg-cluster", Namespace: ns}, cluster); err != nil {
-					return err
-				}
-				delete(cluster.Annotations, "curity.io/validated-config-hash")
-				return k8sClient.Update(ctx, cluster)
-			}, timeout, interval).Should(Succeed())
-
 			// Verify volume removed
 			Eventually(func() int {
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cfg-cluster", "cfg-node"), Namespace: ns}, deploy)
@@ -1168,7 +1013,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			}, timeout, interval).Should(Equal(0), "config volume should be removed after label removal")
 		})
 
-		It("should set AppliedConfigs status with correct validation status", func() {
+		It("should populate AppliedConfigs with discovered managed configs", func() {
 			testCreateCluster(ns, "cfg-cluster")
 			testCreateNode(ns, "cfg-node", v1alpha1.NodeTypeRuntime, "cfg-cluster")
 
@@ -1176,39 +1021,14 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 
 			testCreateManagedConfigMap(ns, "status-config", map[string]string{"cfg.xml": "<cfg/>"}, nil)
 
-			// Wait for Pending status
 			node := &v1alpha1.IdentityServerNode{}
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cfg-node", Namespace: ns}, node); err != nil {
-					return ""
-				}
-				if len(node.Status.AppliedConfigs) == 0 {
-					return ""
-				}
-				return node.Status.AppliedConfigs[0].ValidationStatus
-			}, timeout, interval).Should(Equal("Pending"))
-
-			Expect(node.Status.AppliedConfigs[0].Name).To(Equal("status-config"))
-			Expect(node.Status.AppliedConfigs[0].Kind).To(Equal("ConfigMap"))
-			Expect(node.Status.AppliedConfigs[0].ConfigType).To(Equal("base"))
-
-			// Simulate validation
-			hash := testComputeConfigHash([]configHashEntry{{
-				Name: "status-config", IsSecret: false, ConfigType: "base",
-				Data: map[string][]byte{"cfg.xml": []byte("<cfg/>")},
-			}})
-			testSimulateValidation(ns, "cfg-cluster", hash)
-
-			// Wait for Validated status
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cfg-node", Namespace: ns}, node); err != nil {
-					return ""
-				}
-				if len(node.Status.AppliedConfigs) == 0 {
-					return ""
-				}
-				return node.Status.AppliedConfigs[0].ValidationStatus
-			}, timeout, interval).Should(Equal("Validated"))
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cfg-node", Namespace: ns}, node)).To(Succeed())
+				g.Expect(node.Status.AppliedConfigs).To(HaveLen(1))
+				g.Expect(node.Status.AppliedConfigs[0].Name).To(Equal("status-config"))
+				g.Expect(node.Status.AppliedConfigs[0].Kind).To(Equal("ConfigMap"))
+				g.Expect(node.Status.AppliedConfigs[0].ConfigType).To(Equal("base"))
+			}, timeout, interval).Should(Succeed())
 		})
 
 		It("should mount multiple configs in deterministic order", func() {
@@ -1223,13 +1043,6 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			testCreateManagedConfigMap(ns, "aaa-config", map[string]string{"a.xml": "<a/>"}, nil)
 			testCreateManagedSecret(ns, "mmm-secret",
 				map[string][]byte{"m.xml": []byte("<m/>")}, nil)
-
-			hash := testComputeConfigHash([]configHashEntry{
-				{Name: "zzz-config", IsSecret: false, ConfigType: "base", Data: map[string][]byte{"z.xml": []byte("<z/>")}},
-				{Name: "aaa-config", IsSecret: false, ConfigType: "base", Data: map[string][]byte{"a.xml": []byte("<a/>")}},
-				{Name: "mmm-secret", IsSecret: true, ConfigType: "base", Data: map[string][]byte{"m.xml": []byte("<m/>")}},
-			})
-			testSimulateValidation(ns, "cfg-cluster", hash)
 
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cfg-cluster", "cfg-node"), Namespace: ns}, deploy)).To(Succeed())
@@ -1262,19 +1075,6 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 				map[string]string{"curity.io/cluster": "cluster-a"},
 			)
 
-			// computeConfigHash depends only on the config set's bytes (not
-			// cluster name), so both clusters discover the same hash H when
-			// the CM is in their scope. Pre-validating B here is useless —
-			// ensureConfigValidation clears B's hash while its scope is empty
-			// ("no managed configs, clearing stale validation state"). So we
-			// validate A up front and B only after the scope flip, mirroring
-			// what a real validation Job would do.
-			hash := testComputeConfigHash([]configHashEntry{{
-				Name: "rescope-cm", IsSecret: false, ConfigType: "base",
-				Data: map[string][]byte{"init.xml": []byte("<config/>")},
-			}})
-			testSimulateValidation(ns, "cluster-a", hash)
-
 			By("asserting A has the volume and B does not (initial scope)")
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cluster-a", "node-a"), Namespace: ns}, deployA)).To(Succeed())
@@ -1292,12 +1092,6 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 				cm.Annotations["curity.io/cluster"] = "cluster-b"
 				return k8sClient.Update(ctx, &cm)
 			}, timeout, interval).Should(Succeed())
-
-			// Simulate the validation Job completing for B (envtest doesn't
-			// run Jobs). testSimulateValidation retries until it sees B's
-			// current generation, so races with B's own annotation clears
-			// during transient "scope empty" states resolve on retry.
-			testSimulateValidation(ns, "cluster-b", hash)
 
 			By("asserting A loses the volume AND B gains it (both sides converge)")
 			Eventually(func(g Gomega) {
@@ -3291,143 +3085,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 		})
 	})
 
-	Context("Config validation", func() {
-		It("should create validation Job when managed config exists", func() {
-			testCreateCluster(ns, "val-cluster")
-			testCreateManagedConfigMap(ns, "val-config", map[string]string{"init.xml": "<init/>"}, nil)
-
-			// Cluster reconciler should create a validation Job
-			job := &batchv1.Job{}
-			eventuallyGetResource(ns, "val-cluster-config-validation", job)
-			Expect(job.Annotations).To(HaveKey("curity.io/config-hash"))
-			Expect(job.Labels["curity.io/component"]).To(Equal("config-validation"))
-
-			// Cluster condition should show pending
-			cluster := &v1alpha1.IdentityServerCluster{}
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "val-cluster", Namespace: ns}, cluster); err != nil {
-					return ""
-				}
-				return conditionReason(cluster.Status.Conditions, "ConfigValidationReady")
-			}, timeout, interval).Should(Equal("ValidationPending"))
-		})
-
-		It("should set validated hash after Job succeeds", func() {
-			testCreateCluster(ns, "val-cluster")
-			testCreateManagedConfigMap(ns, "val-config", map[string]string{"data.xml": "<data/>"}, nil)
-
-			job := &batchv1.Job{}
-			eventuallyGetResource(ns, "val-cluster-config-validation", job)
-			expectedHash := job.Annotations["curity.io/config-hash"]
-
-			// Mark Job as Complete
-			job.Status.Conditions = []batchv1.JobCondition{{
-				Type:   batchv1.JobComplete,
-				Status: corev1.ConditionTrue,
-			}}
-			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
-
-			// Cluster should get validated hash annotation
-			cluster := &v1alpha1.IdentityServerCluster{}
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "val-cluster", Namespace: ns}, cluster); err != nil {
-					return ""
-				}
-				return cluster.Annotations["curity.io/validated-config-hash"]
-			}, timeout, interval).Should(Equal(expectedHash))
-
-			// Condition should be True
-			Expect(conditionReason(cluster.Status.Conditions, "ConfigValidationReady")).To(Equal("Validated"))
-		})
-
-		It("should handle validation Job failure", func() {
-			testCreateCluster(ns, "val-cluster")
-			testCreateManagedConfigMap(ns, "val-config", map[string]string{"bad.xml": "<bad/>"}, nil)
-
-			job := &batchv1.Job{}
-			eventuallyGetResource(ns, "val-cluster-config-validation", job)
-
-			// Mark Job as Failed
-			job.Status.Conditions = []batchv1.JobCondition{{
-				Type:    batchv1.JobFailed,
-				Status:  corev1.ConditionTrue,
-				Message: "config invalid",
-			}}
-			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
-
-			cluster := &v1alpha1.IdentityServerCluster{}
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "val-cluster", Namespace: ns}, cluster); err != nil {
-					return ""
-				}
-				return conditionReason(cluster.Status.Conditions, "ConfigValidationReady")
-			}, timeout, interval).Should(Equal("ValidationFailed"))
-
-			// No validated hash should be set
-			Expect(cluster.Annotations).NotTo(HaveKey("curity.io/validated-config-hash"))
-		})
-
-		It("should delete stale Job when config hash changes", func() {
-			testCreateCluster(ns, "val-cluster")
-			testCreateManagedConfigMap(ns, "val-config", map[string]string{"v1.xml": "<v1/>"}, nil)
-
-			job := &batchv1.Job{}
-			eventuallyGetResource(ns, "val-cluster-config-validation", job)
-			origHash := job.Annotations["curity.io/config-hash"]
-			origUID := job.UID
-
-			// Update ConfigMap data to change the hash
-			cm := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "val-config", Namespace: ns}, cm)).To(Succeed())
-			cm.Data["v1.xml"] = "<v2/>"
-			Expect(k8sClient.Update(ctx, cm)).To(Succeed())
-
-			// Old Job should be deleted and new one created with different hash
-			Eventually(func(g Gomega) {
-				newJob := &batchv1.Job{}
-				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "val-cluster-config-validation", Namespace: ns}, newJob)).To(Succeed())
-				g.Expect(newJob.UID).NotTo(Equal(origUID))
-				g.Expect(newJob.Annotations["curity.io/config-hash"]).NotTo(Equal(origHash))
-			}, timeout, interval).Should(Succeed())
-		})
-
-		It("should clear validation state when no managed configs exist", func() {
-			testCreateCluster(ns, "val-cluster")
-			testCreateManagedConfigMap(ns, "val-config", map[string]string{"tmp.xml": "<tmp/>"}, nil)
-
-			job := &batchv1.Job{}
-			eventuallyGetResource(ns, "val-cluster-config-validation", job)
-
-			// Complete the Job
-			job.Status.Conditions = []batchv1.JobCondition{{
-				Type:   batchv1.JobComplete,
-				Status: corev1.ConditionTrue,
-			}}
-			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
-
-			// Wait for validated hash
-			cluster := &v1alpha1.IdentityServerCluster{}
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "val-cluster", Namespace: ns}, cluster); err != nil {
-					return ""
-				}
-				return cluster.Annotations["curity.io/validated-config-hash"]
-			}, timeout, interval).ShouldNot(BeEmpty())
-
-			// Delete the managed ConfigMap
-			cm := &corev1.ConfigMap{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "val-config", Namespace: ns}, cm)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, cm)).To(Succeed())
-
-			// Validated hash should be cleared
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "val-cluster", Namespace: ns}, cluster); err != nil {
-					return "error"
-				}
-				return cluster.Annotations["curity.io/validated-config-hash"]
-			}, timeout, interval).Should(BeEmpty())
-		})
-
+	Context("Managed config discovery", func() {
 		It("should default config-type annotation on managed resources", func() {
 			testCreateCluster(ns, "val-cluster")
 			testCreateManagedConfigMap(ns, "no-type-config", map[string]string{"x.xml": "<x/>"}, nil)
@@ -3450,7 +3108,6 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			testCreateManagedConfigMap(ns, "dup-cm-b", map[string]string{"shared.xml": "<b/>"}, nil)
 
 			// Wait for the cluster reconciler to process and emit the event.
-			// The warning fires when the config hash changes (not yet validated).
 			findDuplicateEvent := func() *corev1.Event {
 				var events corev1.EventList
 				if err := k8sClient.List(ctx, &events, client.InNamespace(ns)); err != nil {

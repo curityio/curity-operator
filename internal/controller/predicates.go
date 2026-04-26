@@ -80,14 +80,6 @@ func (p clusterSpecOrNodeCountChangedPredicate) Update(e event.UpdateEvent) bool
 		return true
 	}
 
-	// Check if the validated config hash annotation changed. This annotation
-	// is set by the cluster reconciler when config validation succeeds, and
-	// nodes need to re-reconcile to mount the newly validated configs.
-	if e.ObjectOld.GetAnnotations()[annotationValidatedConfigHash] !=
-		e.ObjectNew.GetAnnotations()[annotationValidatedConfigHash] {
-		return true
-	}
-
 	// Check if ClusterConfigReady condition changed. Nodes gate Deployment
 	// creation on this condition and need to reconcile when it transitions.
 	if clusterConditionStatus(oldCluster, v1alpha1.ConditionClusterConfigReady) !=

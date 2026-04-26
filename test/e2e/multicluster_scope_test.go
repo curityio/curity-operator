@@ -106,22 +106,6 @@ var _ = Describe("Multi-cluster config scoping", Ordered, func() {
 		Expect(k().Create(ctx, sharedCM)).To(Succeed())
 		Expect(k().Create(ctx, sharedSecret)).To(Succeed())
 
-		By("simulating validation for the primary cluster's scoped set")
-		primaryHash := e2eComputeConfigHash([]e2eConfigEntry{
-			{Name: cmScopedPri, IsSecret: false, ConfigType: "base", Data: map[string][]byte{"primary.xml": []byte("<primary/>")}},
-			{Name: cmShared, IsSecret: false, ConfigType: "base", Data: map[string][]byte{"shared.xml": []byte("<shared/>")}},
-			{Name: secretShared, IsSecret: true, ConfigType: "license", Data: map[string][]byte{"license.json": []byte(`{"k":"v"}`)}},
-		})
-		e2eSimulateValidation(ns, primary, primaryHash)
-
-		By("simulating validation for the staging cluster's scoped set")
-		stagingHash := e2eComputeConfigHash([]e2eConfigEntry{
-			{Name: cmScopedStg, IsSecret: false, ConfigType: "base", Data: map[string][]byte{"staging.xml": []byte("<staging/>")}},
-			{Name: cmShared, IsSecret: false, ConfigType: "base", Data: map[string][]byte{"shared.xml": []byte("<shared/>")}},
-			{Name: secretShared, IsSecret: true, ConfigType: "license", Data: map[string][]byte{"license.json": []byte(`{"k":"v"}`)}},
-		})
-		e2eSimulateValidation(ns, staging, stagingHash)
-
 		By("verifying primary admin mounts its scoped CM + shared, NOT the staging one")
 		Eventually(func(g Gomega) {
 			g.Expect(k().Get(ctx, client.ObjectKeyFromObject(primaryDeploy), primaryDeploy)).To(Succeed())

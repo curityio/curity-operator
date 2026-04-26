@@ -236,29 +236,6 @@ func TestClusterPredicate_UpdateNoMaterialChange(t *testing.T) {
 	}
 }
 
-func TestClusterPredicate_UpdateValidatedConfigHashChanged(t *testing.T) {
-	p := clusterSpecOrNodeCountChangedPredicate{}
-	old := cluster(1, 2)
-	new := cluster(1, 2)
-	new.Annotations = map[string]string{annotationValidatedConfigHash: "abc123"}
-	e := event.UpdateEvent{ObjectOld: old, ObjectNew: new}
-	if !p.Update(e) {
-		t.Error("expected pass when validated config hash annotation changed")
-	}
-}
-
-func TestClusterPredicate_UpdateValidatedConfigHashUnchanged(t *testing.T) {
-	p := clusterSpecOrNodeCountChangedPredicate{}
-	old := cluster(1, 2)
-	old.Annotations = map[string]string{annotationValidatedConfigHash: "abc123"}
-	new := cluster(1, 2)
-	new.Annotations = map[string]string{annotationValidatedConfigHash: "abc123"}
-	e := event.UpdateEvent{ObjectOld: old, ObjectNew: new}
-	if p.Update(e) {
-		t.Error("expected block when validated config hash unchanged")
-	}
-}
-
 func TestClusterPredicate_UpdateClusterConfigReadyAbsentToPresent(t *testing.T) {
 	p := clusterSpecOrNodeCountChangedPredicate{}
 	old := cluster(1, 2)

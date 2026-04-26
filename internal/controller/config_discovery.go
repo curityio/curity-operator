@@ -500,7 +500,7 @@ func detectDuplicateKeys(configs []DiscoveredConfigResource) []string {
 }
 
 // buildAppliedConfigStatus creates the status slice for discovered configs.
-func buildAppliedConfigStatus(configs []DiscoveredConfigResource, validationStatus string) []v1alpha1.AppliedConfigStatus {
+func buildAppliedConfigStatus(configs []DiscoveredConfigResource) []v1alpha1.AppliedConfigStatus {
 	if len(configs) == 0 {
 		return nil
 	}
@@ -511,10 +511,9 @@ func buildAppliedConfigStatus(configs []DiscoveredConfigResource, validationStat
 			kind = "Secret"
 		}
 		result = append(result, v1alpha1.AppliedConfigStatus{
-			Name:             cfg.Name,
-			Kind:             kind,
-			ConfigType:       cfg.ConfigType,
-			ValidationStatus: validationStatus,
+			Name:       cfg.Name,
+			Kind:       kind,
+			ConfigType: cfg.ConfigType,
 		})
 	}
 	return result

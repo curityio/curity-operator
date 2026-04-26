@@ -57,6 +57,5 @@ status:
     - name: routing-config
       kind: ConfigMap
       configType: base
-      validationStatus: Validated
 
 ---

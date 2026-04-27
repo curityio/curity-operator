@@ -6,10 +6,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"math/big"
+	"sort"
 	"strings"
 	"time"
 
@@ -133,7 +133,12 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 	// If logs aren't readable yet, requeue with backoff instead of relying
 	// on the implicit status-update loop which creates a hot polling cycle.
 	if configCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady); configCond != nil && configCond.Reason == "LogsUnavailable" {
-		// Still update status below, then return with delay.
+		// Drop the obsolete ConfigScopeIssues condition on the only path
+		// that persists Status without the wholesale rebuild below. Remove
+		// once CRs last reconciled before commit d18a0a0 are re-reconciled.
+		if apimeta.RemoveStatusCondition(&cluster.Status.Conditions, "ConfigScopeIssues") {
+			log.V(1).Info("removed obsolete ConfigScopeIssues condition during LogsUnavailable cleanup")
+		}
 		if err := r.Status().Update(ctx, &cluster); err != nil {
 			if apierrors.IsConflict(err) {
 				return ctrl.Result{Requeue: true}, nil
@@ -157,18 +162,12 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	// Preserve conditions set by ensureClusterConfig and
-	// ensureManagedConfigDiscovery before overwriting with computed node
-	// conditions.
+	// Preserve ClusterConfigReady before computeClusterConditions overwrites.
 	configReadyCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
-	scopeIssuesCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionConfigScopeIssues)
 	conditions := computeClusterConditions(childNodes, cluster.Generation)
 	cluster.Status.Conditions = conditions
 	if configReadyCond != nil {
 		apimeta.SetStatusCondition(&cluster.Status.Conditions, *configReadyCond)
-	}
-	if scopeIssuesCond != nil {
-		apimeta.SetStatusCondition(&cluster.Status.Conditions, *scopeIssuesCond)
 	}
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.NodeCount = int32(len(childNodes))
@@ -758,85 +757,112 @@ func (r *IdentityServerClusterReconciler) readJobPodLogs(ctx context.Context, jo
 
 // --- Managed config discovery (defaulting, scope-issue surfacing, discovery) ---
 
-// ensureManagedConfigDiscovery defaults the curity.io/config-type annotation on
-// managed resources that lack it, surfaces curity.io/cluster scope issues as a
-// persistent condition, discovers in-scope managed configs for this cluster,
-// and warns about duplicate data keys. Validation is no longer performed here.
+// ensureManagedConfigDiscovery emits per-resource Warning Events for managed
+// CM/Secret problems and populates status.managedResourceIssues with the
+// subset that affects this cluster's mount behaviour (UnknownConfigType,
+// DuplicateConfigKey). Scope-only issues (UnknownClusterInScope,
+// EmptyClusterScope) are Events only — they don't change what mounts here.
 func (r *IdentityServerClusterReconciler) ensureManagedConfigDiscovery(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) error {
 	log := ctrl.LoggerFrom(ctx)
 
-	// Default the config-type annotation on managed resources that lack it.
-	// Returning on the first per-resource failure leaves a partial-write
-	// state that self-heals on retry (the loop is idempotent on already-set
-	// annotations), so we log-and-continue here instead of bubbling the
-	// error up. Emit a Warning Event so users without access to operator
-	// logs can still see it via kubectl describe. Message is intentionally
-	// stable (no raw err) to let EventRecorder dedup a retry loop into one
-	// series; full detail stays in log.Error.
-	if err := defaultConfigTypeAnnotations(ctx, r.Client, cluster.Namespace, cluster.Name); err != nil {
-		log.Error(err, "failed to default config-type annotations")
-		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ConfigTypeAnnotationDefault",
-			"Failed to default curity.io/config-type annotation on one or more managed resources; see operator logs for details")
-	}
-
-	// Surface curity.io/cluster scope issues (empty values, unknown cluster
-	// names) as a persistent condition that survives Event TTL.
-	if err := r.updateConfigScopeIssuesCondition(ctx, cluster); err != nil {
-		// Don't leave a stale False/NoIssues condition in etcd claiming the
-		// namespace is clean when the scan never ran. Flip to Unknown,
-		// emit a Warning, persist, and return so reconcile requeues.
-		log.Error(err, "failed to update ConfigScopeIssues condition")
-		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigScopeIssues,
-			metav1.ConditionUnknown, v1alpha1.ReasonScanFailed,
-			fmt.Sprintf("Config scope scan failed: %v", err), cluster.Generation)
-		// Stable message for EventRecorder dedup: if we interpolate the raw
-		// err here, transient failures with rotating bytes (e.g. "dial tcp
-		// 10.x.x.x:443: i/o timeout" where the IP varies) defeat the
-		// (reason, message) dedup key and spam one Event per reconcile
-		// during an outage. The full error stays in log.Error above and
-		// in the returned error chain below.
-		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, v1alpha1.ReasonScanFailed,
-			"Config scope scan failed; see operator logs for details")
-		if statusErr := r.Status().Update(ctx, cluster); statusErr != nil && !apierrors.IsConflict(statusErr) {
-			// Surface both failures in the returned error — the Event we
-			// emitted above still reaches users either way, but without this
-			// join only the scan error shows up in the controller-runtime
-			// error output and the persist failure is buried in our own
-			// log sink.
-			return errors.Join(
-				fmt.Errorf("updating ConfigScopeIssues condition: %w", err),
-				fmt.Errorf("persisting ConfigScopeIssues=Unknown: %w", statusErr),
-			)
+	// One ScanFailed event per reconcile: the three List paths below share a
+	// root cause (RBAC drop, API outage), so a single user-visible signal is
+	// enough.
+	scanFailedEmitted := false
+	emitScanFailed := func() {
+		if scanFailedEmitted {
+			return
 		}
-		return fmt.Errorf("updating ConfigScopeIssues condition: %w", err)
+		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, EventReasonScanFailed,
+			"Failed to scan managed ConfigMaps/Secrets; see operator logs for details")
+		scanFailedEmitted = true
 	}
 
-	// Discover managed configs. Resources with invalid curity.io/config-type
-	// annotations come back as `skipped` rather than failing the whole call;
-	// emit one Warning per bad resource so the user knows which to fix, then
-	// proceed with the good set. One typo must not cascade into all managed
-	// configs being skipped.
-	configs, skipped, err := discoverConfigResources(ctx, r.Client, cluster.Namespace, cluster.Name)
+	failures, err := defaultConfigTypeAnnotations(ctx, r.Client, cluster.Namespace, cluster.Name)
 	if err != nil {
+		log.Error(err, "failed to list managed resources for config-type defaulting")
+		emitScanFailed()
+	}
+	for _, f := range failures {
+		// Conflicts self-heal on the next reconcile (user edited the CM
+		// concurrently); demote to V(1) so monitoring isn't poisoned.
+		if apierrors.IsConflict(f.Err) {
+			log.V(1).Info("config-type defaulting hit a conflict; will retry next reconcile",
+				"kind", f.Kind, "name", f.Name, "err", f.Err.Error())
+		} else {
+			log.Error(f.Err, "failed to default curity.io/config-type annotation",
+				"kind", f.Kind, "name", f.Name)
+		}
+		// Stable message bytes — keeps EventRecorder dedup tight on a
+		// persistent failure (e.g. Forbidden) instead of one event per retry.
+		r.Recorder.Eventf(f.Object, corev1.EventTypeWarning, EventReasonConfigTypeAnnotationDefault,
+			"Failed to default curity.io/config-type annotation; see operator logs for details")
+		// Deliberately NOT mirrored into status: read-time defaulting in
+		// resolveConfigType means the CM still mounts as base, so this
+		// failure doesn't affect mount behaviour.
+	}
+
+	if err := r.emitScopeAnnotationEvents(ctx, cluster); err != nil {
+		emitScanFailed()
+		return fmt.Errorf("emitting managed-config events: %w", err)
+	}
+
+	configs, skipped, err := discoverManagedResources(ctx, r.Client, cluster.Namespace, cluster.Name)
+	if err != nil {
+		emitScanFailed()
 		return fmt.Errorf("discovering managed configs: %w", err)
 	}
+
+	issues := make([]v1alpha1.ManagedResourceIssue, 0)
+
 	for _, sk := range skipped {
-		// Message includes resource identity and reason text from
-		// resolveConfigType, which is stable for a given annotation value —
-		// EventRecorder dedups a retry loop into one series per bad resource.
-		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "UnknownConfigType",
-			"Skipped %s/%s: %s", sk.Kind, sk.Name, sk.Reason)
+		msg := fmt.Sprintf("Skipped %s/%s: %s", sk.Kind, sk.Name, sk.Reason)
+		if sk.Object != nil {
+			r.Recorder.Eventf(sk.Object, corev1.EventTypeWarning, EventReasonUnknownConfigType, "%s", msg)
+		} else {
+			// Producers in config_discovery.go always populate Object —
+			// log loud if a future regression returns nil rather than
+			// silently dropping the user-visible event.
+			log.Error(nil, "BUG: SkippedResource has nil Object; UnknownConfigType event not emitted",
+				"kind", sk.Kind, "name", sk.Name)
+		}
+		issues = append(issues, v1alpha1.ManagedResourceIssue{
+			Kind:    sk.Kind,
+			Name:    sk.Name,
+			Reason:  EventReasonUnknownConfigType,
+			Message: msg,
+		})
 	}
 
-	// Warn about duplicate data keys. Message text is stable per duplicate-key
-	// pair, so EventRecorder dedups reconcile-loop firings into a single
-	// counted row instead of spamming one Event per reconcile.
-	if warnings := detectDuplicateKeys(configs); len(warnings) > 0 {
-		for _, w := range warnings {
-			log.Info("duplicate config data key detected", "warning", w)
-			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "DuplicateConfigKey", "%s", w)
+	for _, w := range detectDuplicateKeys(configs) {
+		log.Info("duplicate config data key detected", "warning", w.Message)
+		for _, owner := range w.Owners {
+			if owner.Object != nil {
+				r.Recorder.Eventf(owner.Object, corev1.EventTypeWarning, EventReasonDuplicateConfigKey, "%s", w.Message)
+			} else {
+				log.Error(nil, "BUG: DuplicateKeyWarning owner has nil Object; DuplicateConfigKey event not emitted",
+					"kind", owner.Kind, "name", owner.Name)
+			}
+			issues = append(issues, v1alpha1.ManagedResourceIssue{
+				Kind:    owner.Kind,
+				Name:    owner.Name,
+				Reason:  EventReasonDuplicateConfigKey,
+				Message: w.Message,
+			})
 		}
 	}
+
+	sort.Slice(issues, func(i, j int) bool {
+		if issues[i].Kind != issues[j].Kind {
+			return issues[i].Kind < issues[j].Kind
+		}
+		if issues[i].Name != issues[j].Name {
+			return issues[i].Name < issues[j].Name
+		}
+		return issues[i].Reason < issues[j].Reason
+	})
+	cluster.Status.ManagedResourceIssues = issues
+	cluster.Status.ManagedResourceIssueCount = len(issues)
 
 	return nil
 }
@@ -876,12 +902,9 @@ func (r *IdentityServerClusterReconciler) findClustersForManagedConfig(ctx conte
 		})
 	}
 
-	// If the scope annotation is present but matched no cluster (empty value
-	// or only unknown cluster names), no cluster would be enqueued and the
-	// ConfigScopeIssues scan would never run on this change — the user would
-	// see no EmptyClusterScope/UnknownClusterInScope event and no condition
-	// update until some unrelated reconcile happened to fire. Fan out to all
-	// clusters so at least one surfaces the issue promptly.
+	// Annotation present but matched no cluster: fan out so at least one
+	// reconcile emits the per-CM scope event. UID dedup collapses N
+	// emissions on the same CM into a single series.
 	if _, scoped := annotations[AnnotationClusterScope]; scoped && len(requests) == 0 {
 		for i := range clusterList.Items {
 			requests = append(requests, ctrl.Request{
@@ -924,12 +947,11 @@ func (r *IdentityServerClusterReconciler) findClusterForSecret(ctx context.Conte
 	}
 }
 
-// updateConfigScopeIssuesCondition scans the namespace for managed
-// ConfigMaps/Secrets whose curity.io/cluster annotation is empty or names
-// non-existent clusters, and updates the cluster's ConfigScopeIssues
-// condition. Events are also emitted (K8s EventRecorder dedups stable
-// messages into a single row via the count field).
-func (r *IdentityServerClusterReconciler) updateConfigScopeIssuesCondition(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) error {
+// emitScopeAnnotationEvents emits Warning Events on managed ConfigMaps/Secrets
+// whose curity.io/cluster annotation is empty or names non-existent clusters.
+// UnknownConfigType and DuplicateConfigKey are emitted by the caller; those
+// come from already-discovered resources, not from a scope scan.
+func (r *IdentityServerClusterReconciler) emitScopeAnnotationEvents(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) error {
 	var clusterList v1alpha1.IdentityServerClusterList
 	if err := r.List(ctx, &clusterList, client.InNamespace(cluster.Namespace)); err != nil {
 		return fmt.Errorf("listing clusters for scope scan: %w", err)
@@ -944,51 +966,25 @@ func (r *IdentityServerClusterReconciler) updateConfigScopeIssuesCondition(ctx c
 		return err
 	}
 
-	if len(issues) == 0 {
-		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigScopeIssues,
-			metav1.ConditionFalse, v1alpha1.ReasonNoIssues,
-			"No scope annotation issues observed", cluster.Generation)
-		return nil
-	}
-
-	// Build the aggregated condition message and emit one event per issue.
-	// EventRecorder collapses repeat emissions with identical (reason, message)
-	// bytes into a single series via the count field — hence the byte-stable
-	// formatters in config_discovery.go.
-	var empties, unknowns []string
-	hasUnknown := false
-	hasEmpty := false
+	log := ctrl.LoggerFrom(ctx)
 	for _, is := range issues {
-		ref := is.Kind + "/" + is.Name
-		if is.Empty {
-			hasEmpty = true
-			empties = append(empties, ref)
-			r.Recorder.Eventf(cluster, corev1.EventTypeWarning,
-				EventReasonEmptyClusterScope, "%s on %s", formatEmptyClusterScopeMessage(), ref)
+		if is.Object == nil {
+			log.Error(nil, "BUG: ScopeIssue has nil Object; scope-annotation event not emitted",
+				"empty", is.Empty, "unknown", is.Unknown)
+			continue
 		}
-		if len(is.Unknown) > 0 {
-			hasUnknown = true
-			unknowns = append(unknowns, ref)
-			r.Recorder.Eventf(cluster, corev1.EventTypeWarning,
-				EventReasonUnknownClusterInScope, "%s on %s",
-				formatUnknownClusterMessage(is.Unknown, is.Applied), ref)
+		// Empty and Unknown are mutually exclusive at construction; a
+		// switch prevents a malformed value from double-emitting.
+		switch {
+		case is.Empty:
+			r.Recorder.Eventf(is.Object, corev1.EventTypeWarning,
+				EventReasonEmptyClusterScope, "%s", formatEmptyClusterScopeMessage())
+		case len(is.Unknown) > 0:
+			r.Recorder.Eventf(is.Object, corev1.EventTypeWarning,
+				EventReasonUnknownClusterInScope, "%s",
+				formatUnknownClusterMessage(is.Unknown, is.Applied))
 		}
 	}
-	var reason string
-	if hasEmpty && !hasUnknown {
-		reason = v1alpha1.ReasonEmptyScope
-	} else {
-		reason = v1alpha1.ReasonUnknownClusters
-	}
-	msg := ""
-	if len(unknowns) > 0 {
-		msg += "Resources with unknown clusters in scope: " + formatNameList(unknowns) + ". "
-	}
-	if len(empties) > 0 {
-		msg += "Resources with empty curity.io/cluster annotation: " + formatNameList(empties) + "."
-	}
-	setCondition(&cluster.Status.Conditions, v1alpha1.ConditionConfigScopeIssues,
-		metav1.ConditionTrue, reason, msg, cluster.Generation)
 	return nil
 }
 

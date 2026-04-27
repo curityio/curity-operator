@@ -53,7 +53,7 @@ status:
   replicas: 1
   deploymentName: primary-pri-admin
   serviceName: primary-pri-admin
-  appliedConfigs:
+  appliedManagedResources:
     - name: base-primary
       kind: ConfigMap
       configType: base

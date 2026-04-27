@@ -241,7 +241,29 @@ Set the `curity.io/config-type` annotation to control where configs are mounted.
 
 Mount filenames are prefixed with the resource kind and name to prevent collisions when multiple ConfigMaps/Secrets contain the same data key. The `{kind}` prefix is `cm` for ConfigMaps and `secret` for Secrets (e.g. `cm_my-config_base-config.xml`).
 
-A resource with an unknown `curity.io/config-type` value is skipped (not mounted) and the operator emits an `UnknownConfigType` Warning event on each cluster and node that has the resource in scope. Other managed resources in the namespace are unaffected.
+A resource with an unknown `curity.io/config-type` value is skipped (not mounted) and the operator emits an `UnknownConfigType` Warning event on the offending ConfigMap/Secret itself. Other managed resources in the namespace are unaffected.
+
+### Debugging managed resources
+
+Issues with managed ConfigMaps/Secrets are surfaced through two complementary surfaces:
+
+**Warning Events on the offending resource** — real-time signal, deduped per resource regardless of how many clusters share the namespace:
+
+```bash
+kubectl describe cm <name>      # or: kubectl describe secret <name>
+kubectl get events -n <namespace> --field-selector type=Warning
+```
+
+Events fire for every issue type: `UnknownConfigType`, `UnknownClusterInScope`, `EmptyClusterScope`, `DuplicateConfigKey`. Native Kubernetes Event TTL is ~1 hour; events refresh on every reconcile while the issue persists.
+
+**`status.managedResourceIssues` on the cluster CR** — durable per-cluster list of issues affecting *this cluster's* mount behavior (a resource was skipped, or a duplicate-key collision could merge configs). Persists indefinitely, GitOps-safe (status subresource is operator-only):
+
+```bash
+kubectl get isc                 # 'Issues' column shows the count
+kubectl describe isc <cluster>  # full list with Kind, Name, Reason, Message
+```
+
+Scope-only issues (`UnknownClusterInScope`, `EmptyClusterScope`) appear only in events on the resource — they don't change what mounts on any cluster, so they are not represented in cluster status.
 
 ### Admin Routing
 

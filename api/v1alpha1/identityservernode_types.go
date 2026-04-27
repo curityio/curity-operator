@@ -118,8 +118,9 @@ type IdentityServerNodeStatus struct {
 	// ServiceName is the name of the Service created by this node.
 	ServiceName string `json:"serviceName,omitempty"`
 
-	// AppliedConfigs lists the discovered configuration resources mounted on this node.
-	AppliedConfigs []AppliedConfigStatus `json:"appliedConfigs,omitempty"`
+	// AppliedManagedResources lists the managed ConfigMaps and Secrets
+	// (curity.io/managed=true) mounted on this node.
+	AppliedManagedResources []AppliedManagedResource `json:"appliedManagedResources,omitempty"`
 }
 
 // +kubebuilder:object:root=true

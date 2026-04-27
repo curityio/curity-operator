@@ -91,6 +91,16 @@ type IdentityServerClusterStatus struct {
 
 	// ClusterConfigSecretName is the name of the Secret containing cluster.xml.
 	ClusterConfigSecretName string `json:"clusterConfigSecretName,omitempty"`
+
+	// ManagedResourceIssueCount mirrors len(ManagedResourceIssues) for the
+	// printer column (kubebuilder JSONPath has no length()). Writers must
+	// keep both fields in sync in the same Status.Update.
+	ManagedResourceIssueCount int `json:"managedResourceIssueCount,omitempty"`
+
+	// ManagedResourceIssues lists problems on managed ConfigMaps/Secrets
+	// (curity.io/managed=true) that affect this cluster's mount behavior.
+	// Each entry is also emitted as a Warning Event on the resource itself.
+	ManagedResourceIssues []ManagedResourceIssue `json:"managedResourceIssues,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -100,6 +110,7 @@ type IdentityServerClusterStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status"
 // +kubebuilder:printcolumn:name="Nodes",type="integer",JSONPath=".status.nodeCount"
 // +kubebuilder:printcolumn:name="Ready Nodes",type="integer",JSONPath=".status.readyNodes"
+// +kubebuilder:printcolumn:name="Issues",type="integer",JSONPath=".status.managedResourceIssueCount"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // IdentityServerCluster is the Schema for the identityserverclusters API.

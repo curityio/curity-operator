@@ -91,8 +91,8 @@ func TestFindNodesForManagedConfig_NoAnnotation_AppliesToAll(t *testing.T) {
 func TestFindNodesForManagedConfig_EmptyAnnotation_AppliesToNone(t *testing.T) {
 	// An empty curity.io/cluster value means "applies to no cluster" (user
 	// mistake) rather than "applies to all". The map-func must enqueue no
-	// nodes; the cluster reconciler separately flags the resource via the
-	// ConfigScopeIssues condition / EmptyClusterScope event.
+	// nodes; the cluster reconciler separately surfaces the resource via
+	// the EmptyClusterScope Warning Event emitted on the offending CM/Secret.
 	ctx := context.Background()
 	c := newNodeTestScheme(t).WithObjects(
 		nodeWithCluster("node-a", "ns", "cluster-a"),

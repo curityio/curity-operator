@@ -29,6 +29,9 @@ spec:
     - jsonPath: .status.readyNodes
       name: Ready Nodes
       type: integer
+    - jsonPath: .status.managedResourceIssueCount
+      name: Issues
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -2067,6 +2070,54 @@ spec:
                   - reason
                   - status
                   - type
+                  type: object
+                type: array
+              managedResourceIssueCount:
+                description: |-
+                  ManagedResourceIssueCount mirrors len(ManagedResourceIssues) for the
+                  printer column (kubebuilder JSONPath has no length()). Writers must
+                  keep both fields in sync in the same Status.Update.
+                type: integer
+              managedResourceIssues:
+                description: |-
+                  ManagedResourceIssues lists problems on managed ConfigMaps/Secrets
+                  (curity.io/managed=true) that affect this cluster's mount behavior.
+                  Each entry is also emitted as a Warning Event on the resource itself.
+                items:
+                  description: |-
+                    ManagedResourceIssue describes a problem on a managed ConfigMap or Secret
+                    (curity.io/managed=true) that affects the cluster carrying this status —
+                    either the resource was skipped from mounting (UnknownConfigType) or it
+                    shares a data key with another applicable resource (DuplicateConfigKey).
+                    Scope-only issues (UnknownClusterInScope, EmptyClusterScope) are not
+                    represented here; they surface only as Warning Events on the resource
+                    itself, since they do not change what mounts on this cluster.
+                  properties:
+                    kind:
+                      description: Kind is "ConfigMap" or "Secret".
+                      enum:
+                      - ConfigMap
+                      - Secret
+                      type: string
+                    message:
+                      description: Message is a byte-stable human-readable description
+                        of the issue.
+                      type: string
+                    name:
+                      description: Name is the name of the ConfigMap or Secret.
+                      type: string
+                    reason:
+                      description: Reason is a stable machine-readable identifier
+                        for the kind of issue.
+                      enum:
+                      - UnknownConfigType
+                      - DuplicateConfigKey
+                      type: string
+                  required:
+                  - kind
+                  - message
+                  - name
+                  - reason
                   type: object
                 type: array
               nodeCount:

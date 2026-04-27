@@ -1481,7 +1481,7 @@ func TestBuildClusterConfigJob_TopologySpreadConstraints(t *testing.T) {
 // --- buildVolumes with discovered configs ---
 
 func TestBuildVolumes_BaseConfigMap(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "base-cm", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"config.xml": []byte("<c/>")}},
 	}
 	volumes, mounts := buildVolumes("cluster-1", configs)
@@ -1508,7 +1508,7 @@ func TestBuildVolumes_BaseConfigMap(t *testing.T) {
 }
 
 func TestBuildVolumes_LicenseSecret(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "lic", IsSecret: true, ConfigType: ConfigTypeLicense, Data: map[string][]byte{"license.json": []byte("{}")}},
 	}
 	volumes, mounts := buildVolumes("cluster-1", configs)
@@ -1532,7 +1532,7 @@ func TestBuildVolumes_LicenseSecret(t *testing.T) {
 }
 
 func TestBuildVolumes_MultipleDiscoveredConfigs(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "cm-1", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
 		{Name: "sec-1", IsSecret: true, ConfigType: ConfigTypeLicense, Data: map[string][]byte{"b.json": []byte("{}")}},
 	}
@@ -1544,7 +1544,7 @@ func TestBuildVolumes_MultipleDiscoveredConfigs(t *testing.T) {
 }
 
 func TestBuildVolumes_ClusterConfigAlwaysFirst(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "aaa", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
 	}
 	volumes, _ := buildVolumes("cluster-1", configs)
@@ -1554,7 +1554,7 @@ func TestBuildVolumes_ClusterConfigAlwaysFirst(t *testing.T) {
 }
 
 func TestBuildVolumes_VolumeNaming(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "foo", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"x.xml": []byte("<x/>")}},
 		{Name: "foo", IsSecret: true, ConfigType: ConfigTypeBase, Data: map[string][]byte{"y.xml": []byte("<y/>")}},
 	}
@@ -1569,7 +1569,7 @@ func TestBuildVolumes_VolumeNaming(t *testing.T) {
 }
 
 func TestBuildVolumes_DeterministicMountOrder(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "cm", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{
 			"z.xml": []byte("<z/>"),
 			"a.xml": []byte("<a/>"),
@@ -1590,7 +1590,7 @@ func TestBuildVolumes_DeterministicMountOrder(t *testing.T) {
 }
 
 func TestBuildVolumes_DuplicateKeysDifferentResources(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "cm-a", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<a/>")}},
 		{Name: "cm-b", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<b/>")}},
 	}
@@ -1606,7 +1606,7 @@ func TestBuildVolumes_DuplicateKeysDifferentResources(t *testing.T) {
 }
 
 func TestBuildVolumes_ClusterConfigUnchanged(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "my-cm", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"cluster.xml": []byte("<c/>")}},
 	}
 	_, mounts := buildVolumes("cluster-1", configs)
@@ -1624,7 +1624,7 @@ func TestBuildVolumes_ClusterConfigUnchanged(t *testing.T) {
 func TestBuildDeployment_WithDiscoveredConfigs(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "base-config", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"cfg.xml": []byte("<cfg/>")}},
 	}
 	deploy := buildDeployment(cluster, node, configs)

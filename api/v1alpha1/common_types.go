@@ -28,10 +28,6 @@ const (
 	// referenced IdentityServerCluster exists and the node has been adopted
 	// via controller OwnerReferences.
 	ConditionClusterReady = "ClusterReady"
-	// ConditionConfigScopeIssues on an IdentityServerCluster surfaces
-	// curity.io/cluster annotation problems (unknown clusters, empty scope)
-	// as a persistent signal that survives Event TTL.
-	ConditionConfigScopeIssues = "ConfigScopeIssues"
 )
 
 // Reason values used across multiple condition types. Each constant names
@@ -43,16 +39,6 @@ const (
 	// and Ready while the orphan state persists.
 	ReasonClusterFound    = "ClusterFound"
 	ReasonClusterNotFound = "ClusterNotFound"
-	// ReasonNoIssues / ReasonUnknownClusters / ReasonEmptyScope are set on
-	// ConditionConfigScopeIssues (IdentityServerCluster) by the scope scan.
-	ReasonNoIssues        = "NoIssues"
-	ReasonUnknownClusters = "UnknownClusters"
-	ReasonEmptyScope      = "EmptyScope"
-	// ReasonScanFailed is set on ConditionConfigScopeIssues with status Unknown
-	// when the scope scan itself fails (e.g. transient List error). Without
-	// this, a prior False/NoIssues condition would persist in etcd and users
-	// would see "no issues" even though the scan never ran.
-	ReasonScanFailed = "ScanFailed"
 	// ReasonOwnedNameCollision is set on ConditionDegraded and ConditionReady
 	// (IdentityServerNode) when its ownedResourceName (clusterName + "-" +
 	// nodeName) collides with another node in the same namespace. The "-"
@@ -191,9 +177,10 @@ type PDBSpec struct {
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
 }
 
-// AppliedConfigStatus represents the status of a discovered configuration resource.
+// AppliedManagedResource describes a managed ConfigMap or Secret
+// (curity.io/managed=true) that the operator has mounted on a node.
 // +kubebuilder:object:generate=true
-type AppliedConfigStatus struct {
+type AppliedManagedResource struct {
 	// Name is the name of the ConfigMap or Secret.
 	Name string `json:"name"`
 
@@ -204,6 +191,30 @@ type AppliedConfigStatus struct {
 	// ConfigType is the curity.io/config-type annotation value ("base" or "license").
 	// +kubebuilder:validation:Enum=base;license
 	ConfigType string `json:"configType"`
+}
+
+// ManagedResourceIssue describes a problem on a managed ConfigMap or Secret
+// (curity.io/managed=true) that affects the cluster carrying this status —
+// either the resource was skipped from mounting (UnknownConfigType) or it
+// shares a data key with another applicable resource (DuplicateConfigKey).
+// Scope-only issues (UnknownClusterInScope, EmptyClusterScope) are not
+// represented here; they surface only as Warning Events on the resource
+// itself, since they do not change what mounts on this cluster.
+// +kubebuilder:object:generate=true
+type ManagedResourceIssue struct {
+	// Kind is "ConfigMap" or "Secret".
+	// +kubebuilder:validation:Enum=ConfigMap;Secret
+	Kind string `json:"kind"`
+
+	// Name is the name of the ConfigMap or Secret.
+	Name string `json:"name"`
+
+	// Reason is a stable machine-readable identifier for the kind of issue.
+	// +kubebuilder:validation:Enum=UnknownConfigType;DuplicateConfigKey
+	Reason string `json:"reason"`
+
+	// Message is a byte-stable human-readable description of the issue.
+	Message string `json:"message"`
 }
 
 // LoggingSpec configures logging behavior.

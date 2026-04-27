@@ -271,27 +271,22 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
 	}
 
-	// 5.5. Discover managed ConfigMaps/Secrets and check validation status.
-	// The cluster reconciler handles validation via a Job. The node reconciler
-	// only mounts configs that the cluster has already validated.
-	// Resources with invalid curity.io/config-type annotations come back as
-	// `skipped` instead of failing the whole call. Emit one Warning per bad
-	// resource on the node (so `kubectl describe node` shows it) and then
-	// mount the valid subset.
-	allConfigs, skipped, err := discoverConfigResources(ctx, r.Client, node.Namespace, clusterRef.Name)
+	// 5.5. Discover managed ConfigMaps/Secrets and mount the valid subset.
+	// Resources with invalid curity.io/config-type annotations are returned
+	// in `skipped`; the cluster reconciler emits the user-visible event on
+	// the offending CM/Secret (UID dedup would not collapse a per-node event).
+	allConfigs, skipped, err := discoverManagedResources(ctx, r.Client, node.Namespace, clusterRef.Name)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("discovering managed configs: %w", err)
 	}
 	for _, sk := range skipped {
 		log.Info("skipping managed resource with invalid config-type annotation",
 			"kind", sk.Kind, "name", sk.Name, "reason", sk.Reason)
-		r.Recorder.Eventf(&node, corev1.EventTypeWarning, "UnknownConfigType",
-			"Skipped %s/%s: %s", sk.Kind, sk.Name, sk.Reason)
 	}
 
 	// Determine admin routing.
 	adminExists := findAdminNodeName(nodeList.Items) != ""
-	var applicableConfigs []DiscoveredConfigResource
+	var applicableConfigs []DiscoveredManagedResource
 	if shouldMountConfig(node.Spec.Type, adminExists) {
 		applicableConfigs = allConfigs
 	}
@@ -301,9 +296,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	configHash := computeConfigHash(applicableConfigs)
 
 	if len(applicableConfigs) > 0 {
-		node.Status.AppliedConfigs = buildAppliedConfigStatus(applicableConfigs)
+		node.Status.AppliedManagedResources = buildAppliedManagedResources(applicableConfigs)
 	} else {
-		node.Status.AppliedConfigs = nil
+		node.Status.AppliedManagedResources = nil
 	}
 
 	// 5.6. Create Service before the Deployment gate below. For admin nodes, this

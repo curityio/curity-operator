@@ -46,7 +46,7 @@ func ownedResourceName(clusterName, nodeName string) string {
 
 // buildDeployment constructs the desired Deployment for an IdentityServerNode.
 // configs contains the validated discovered ConfigMaps/Secrets to mount (may be nil).
-func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode, configs []DiscoveredConfigResource) *appsv1.Deployment {
+func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode, configs []DiscoveredManagedResource) *appsv1.Deployment {
 	labels := buildLabels(cluster, node)
 	podAnnotations := mergeMaps(cluster.Spec.PodAnnotations, node.Spec.PodAnnotations)
 	podLabels := mergeMaps(labels, mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels))
@@ -314,7 +314,7 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 
 // buildVolumes returns volumes and mounts for the cluster-config (cluster.xml)
 // and any discovered config resources. Cluster-config is always first.
-func buildVolumes(clusterName string, configs []DiscoveredConfigResource) ([]corev1.Volume, []corev1.VolumeMount) {
+func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]corev1.Volume, []corev1.VolumeMount) {
 	volumes := make([]corev1.Volume, 0, 1+len(configs))
 	mounts := make([]corev1.VolumeMount, 0, 1+len(configs))
 

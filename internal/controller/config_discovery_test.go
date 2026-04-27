@@ -22,7 +22,7 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// --- discoverConfigResources ---
+// --- discoverManagedResources ---
 
 func TestDiscoverConfigResources_ReturnsOnlyLabeledResources(t *testing.T) {
 	ctx := context.Background()
@@ -45,7 +45,7 @@ func TestDiscoverConfigResources_ReturnsOnlyLabeledResources(t *testing.T) {
 		},
 	).Build()
 
-	configs, _, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
+	configs, _, err := discoverManagedResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestDiscoverConfigResources_ExcludesClusterConfigSecret(t *testing.T) {
 		},
 	).Build()
 
-	configs, _, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
+	configs, _, err := discoverManagedResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestDiscoverConfigResources_DefaultsConfigTypeToBase(t *testing.T) {
 		},
 	).Build()
 
-	configs, _, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
+	configs, _, err := discoverManagedResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestDiscoverConfigResources_LicenseConfigType(t *testing.T) {
 		},
 	).Build()
 
-	configs, _, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
+	configs, _, err := discoverManagedResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestDiscoverConfigResources_UnknownConfigType_SkipsOffenderNotNeighbors(t *
 		},
 	).Build()
 
-	configs, skipped, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
+	configs, skipped, err := discoverManagedResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("expected no hard error; skipping-the-offender must not cascade: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestDiscoverConfigResources_SortedByName(t *testing.T) {
 		},
 	).Build()
 
-	configs, _, err := discoverConfigResources(ctx, c, "ns", "test-cluster")
+	configs, _, err := discoverManagedResources(ctx, c, "ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestDiscoverConfigResources_EmptyNamespace(t *testing.T) {
 	s := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	configs, _, err := discoverConfigResources(ctx, c, "empty-ns", "test-cluster")
+	configs, _, err := discoverManagedResources(ctx, c, "empty-ns", "test-cluster")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestDefaultConfigTypeAnnotations_SetsMissingAnnotation(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
+	if _, err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -305,7 +305,7 @@ func TestDefaultConfigTypeAnnotations_SkipsExistingAnnotation(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
+	if _, err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -333,7 +333,7 @@ func TestDefaultConfigTypeAnnotations_SkipsClusterConfigSecret(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(sec).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
+	if _, err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -359,7 +359,7 @@ func TestDefaultConfigTypeAnnotations_NilAnnotationsMap(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(sec).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
+	if _, err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -378,7 +378,7 @@ func TestDefaultConfigTypeAnnotations_EmptyNamespace(t *testing.T) {
 	s := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "empty-ns", "test-cluster"); err != nil {
+	if _, err := defaultConfigTypeAnnotations(ctx, c, "empty-ns", "test-cluster"); err != nil {
 		t.Fatalf("unexpected error for empty namespace: %v", err)
 	}
 }
@@ -421,7 +421,7 @@ func TestDefaultConfigTypeAnnotations_OnlyAnnotatesOwnCluster(t *testing.T) {
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cmForA, cmForB, cmForAll, secForB).Build()
 
-	if err := defaultConfigTypeAnnotations(ctx, c, "ns", "cluster-a"); err != nil {
+	if _, err := defaultConfigTypeAnnotations(ctx, c, "ns", "cluster-a"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -515,7 +515,7 @@ func TestShouldMountConfig_RuntimeNoAdminExists(t *testing.T) {
 // --- computeConfigHash ---
 
 func TestComputeConfigHash_Deterministic(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "cm-1", Data: map[string][]byte{"a.xml": []byte("<a/>")}},
 		{Name: "cm-2", Data: map[string][]byte{"b.xml": []byte("<b/>")}},
 	}
@@ -530,10 +530,10 @@ func TestComputeConfigHash_Deterministic(t *testing.T) {
 }
 
 func TestComputeConfigHash_DifferentData(t *testing.T) {
-	configs1 := []DiscoveredConfigResource{
+	configs1 := []DiscoveredManagedResource{
 		{Name: "cm-1", Data: map[string][]byte{"a.xml": []byte("<a/>")}},
 	}
-	configs2 := []DiscoveredConfigResource{
+	configs2 := []DiscoveredManagedResource{
 		{Name: "cm-1", Data: map[string][]byte{"a.xml": []byte("<b/>")}},
 	}
 	if computeConfigHash(configs1) == computeConfigHash(configs2) {
@@ -542,10 +542,10 @@ func TestComputeConfigHash_DifferentData(t *testing.T) {
 }
 
 func TestComputeConfigHash_DifferentKindSameName(t *testing.T) {
-	cm := []DiscoveredConfigResource{
+	cm := []DiscoveredManagedResource{
 		{Name: "foo", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
 	}
-	secret := []DiscoveredConfigResource{
+	secret := []DiscoveredManagedResource{
 		{Name: "foo", IsSecret: true, ConfigType: ConfigTypeBase, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
 	}
 	if computeConfigHash(cm) == computeConfigHash(secret) {
@@ -554,10 +554,10 @@ func TestComputeConfigHash_DifferentKindSameName(t *testing.T) {
 }
 
 func TestComputeConfigHash_DifferentConfigType(t *testing.T) {
-	base := []DiscoveredConfigResource{
+	base := []DiscoveredManagedResource{
 		{Name: "foo", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
 	}
-	license := []DiscoveredConfigResource{
+	license := []DiscoveredManagedResource{
 		{Name: "foo", IsSecret: false, ConfigType: ConfigTypeLicense, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
 	}
 	if computeConfigHash(base) == computeConfigHash(license) {
@@ -566,7 +566,7 @@ func TestComputeConfigHash_DifferentConfigType(t *testing.T) {
 }
 
 func TestComputeConfigHash_EmptyConfigs(t *testing.T) {
-	if got := computeConfigHash([]DiscoveredConfigResource{}); got != "" {
+	if got := computeConfigHash([]DiscoveredManagedResource{}); got != "" {
 		t.Errorf("expected empty string for empty configs, got %q", got)
 	}
 }
@@ -574,6 +574,106 @@ func TestComputeConfigHash_EmptyConfigs(t *testing.T) {
 func TestComputeConfigHash_NilConfigs(t *testing.T) {
 	if got := computeConfigHash(nil); got != "" {
 		t.Errorf("expected empty string for nil configs, got %q", got)
+	}
+}
+
+// --- Live-Object invariant on scan/discover outputs ---
+//
+// emitScopeAnnotationEvents and the cluster reconciler's status writer both
+// nil-guard on the Object field. If the upstream constructor leaves Object
+// nil, downstream Warning Events vanish silently. These tests prove the
+// invariant holds end-to-end at the boundary of the scan/discover helpers.
+
+func TestScanConfigScopeIssues_ObjectIsAlwaysPopulated(t *testing.T) {
+	// Both ScopeIssue variants (Empty, Unknown) must carry the live
+	// CM/Secret pointer in Object — required by emitScopeAnnotationEvents to
+	// produce a Warning Event with the right involvedObject.
+	ctx := context.Background()
+	s := newScheme(t)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "empty-cm", Namespace: "ns",
+				Labels:      map[string]string{LabelManagedConfig: "true"},
+				Annotations: map[string]string{AnnotationClusterScope: ""},
+			},
+		},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "unknown-cm", Namespace: "ns",
+				Labels:      map[string]string{LabelManagedConfig: "true"},
+				Annotations: map[string]string{AnnotationClusterScope: "this,typo"},
+			},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "unknown-sec", Namespace: "ns",
+				Labels:      map[string]string{LabelManagedConfig: "true"},
+				Annotations: map[string]string{AnnotationClusterScope: "this,typo"},
+			},
+		},
+	).Build()
+	existing := map[string]struct{}{"this": {}}
+
+	issues, err := scanConfigScopeIssues(ctx, c, "ns", existing)
+	if err != nil {
+		t.Fatalf("scanConfigScopeIssues: %v", err)
+	}
+	if len(issues) != 3 {
+		t.Fatalf("expected 3 issues (empty CM + unknown CM + unknown Secret), got %d: %+v", len(issues), issues)
+	}
+	for i, is := range issues {
+		if is.Object == nil {
+			t.Errorf("issues[%d].Object must be non-nil (otherwise downstream emit is silently dropped); got %+v", i, is)
+		}
+	}
+}
+
+func TestDiscoverConfigResources_ObjectIsAlwaysPopulated(t *testing.T) {
+	// Both DiscoveredManagedResource and SkippedResource carry Object.
+	// detectDuplicateKeys propagates DiscoveredManagedResource.Object into
+	// DuplicateKeyOwner.Object; the cluster reconciler's UnknownConfigType
+	// emitter reads SkippedResource.Object. Either being nil silently
+	// drops the Warning Event downstream.
+	ctx := context.Background()
+	s := newScheme(t)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "ok-cm", Namespace: "ns",
+				Labels: map[string]string{LabelManagedConfig: "true"},
+			},
+			Data: map[string]string{"x.xml": "<x/>"},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "ok-sec", Namespace: "ns",
+				Labels: map[string]string{LabelManagedConfig: "true"},
+			},
+			Data: map[string][]byte{"y.xml": []byte("<y/>")},
+		},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "bad-cm", Namespace: "ns",
+				Labels:      map[string]string{LabelManagedConfig: "true"},
+				Annotations: map[string]string{AnnotationConfigType: "bogus"},
+			},
+		},
+	).Build()
+
+	configs, skipped, err := discoverManagedResources(ctx, c, "ns", "this")
+	if err != nil {
+		t.Fatalf("discoverManagedResources: %v", err)
+	}
+	for i, cfg := range configs {
+		if cfg.Object == nil {
+			t.Errorf("configs[%d].Object must be non-nil; got %+v", i, cfg)
+		}
+	}
+	for i, sk := range skipped {
+		if sk.Object == nil {
+			t.Errorf("skipped[%d].Object must be non-nil; got %+v", i, sk)
+		}
 	}
 }
 
@@ -620,13 +720,13 @@ func TestConfigVolumeName_LongNameUnique(t *testing.T) {
 	}
 }
 
-// --- buildAppliedConfigStatus ---
+// --- buildAppliedManagedResource ---
 
-func TestBuildAppliedConfigStatus_ConfigMap(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+func TestBuildAppliedManagedResource_ConfigMap(t *testing.T) {
+	configs := []DiscoveredManagedResource{
 		{Name: "cm-1", IsSecret: false, ConfigType: ConfigTypeBase},
 	}
-	status := buildAppliedConfigStatus(configs)
+	status := buildAppliedManagedResources(configs)
 	if len(status) != 1 {
 		t.Fatalf("expected 1 status entry, got %d", len(status))
 	}
@@ -635,11 +735,11 @@ func TestBuildAppliedConfigStatus_ConfigMap(t *testing.T) {
 	}
 }
 
-func TestBuildAppliedConfigStatus_Secret(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+func TestBuildAppliedManagedResource_Secret(t *testing.T) {
+	configs := []DiscoveredManagedResource{
 		{Name: "sec-1", IsSecret: true, ConfigType: ConfigTypeLicense},
 	}
-	status := buildAppliedConfigStatus(configs)
+	status := buildAppliedManagedResources(configs)
 	if len(status) != 1 {
 		t.Fatalf("expected 1 status entry, got %d", len(status))
 	}
@@ -651,8 +751,8 @@ func TestBuildAppliedConfigStatus_Secret(t *testing.T) {
 	}
 }
 
-func TestBuildAppliedConfigStatus_EmptyConfigs(t *testing.T) {
-	status := buildAppliedConfigStatus(nil)
+func TestBuildAppliedManagedResource_EmptyConfigs(t *testing.T) {
+	status := buildAppliedManagedResources(nil)
 	if status != nil {
 		t.Errorf("expected nil for empty configs, got %v", status)
 	}
@@ -725,7 +825,7 @@ func TestDetectDuplicateKeys_NoConfigs(t *testing.T) {
 }
 
 func TestDetectDuplicateKeys_DistinctKeys(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"a.xml": []byte("<a/>")}},
 		{Name: "cm-b", ConfigType: ConfigTypeBase, Data: map[string][]byte{"b.xml": []byte("<b/>")}},
 	}
@@ -736,7 +836,7 @@ func TestDetectDuplicateKeys_DistinctKeys(t *testing.T) {
 }
 
 func TestDetectDuplicateKeys_SameKeyDifferentConfigType(t *testing.T) {
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"foo.xml": []byte("<a/>")}},
 		{Name: "cm-b", ConfigType: ConfigTypeLicense, Data: map[string][]byte{"foo.xml": []byte("<b/>")}},
 	}
@@ -747,16 +847,35 @@ func TestDetectDuplicateKeys_SameKeyDifferentConfigType(t *testing.T) {
 }
 
 func TestDetectDuplicateKeys_SameKeySameType(t *testing.T) {
-	configs := []DiscoveredConfigResource{
-		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<a/>")}},
-		{Name: "cm-b", ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<b/>")}},
+	// Use real CM pointers so DiscoveredManagedResource.Object is populated;
+	// this exercises the full Object propagation chain into DuplicateKeyOwner
+	// and lets us assert the invariant downstream emitters depend on.
+	cmA := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm-a", Namespace: "ns"}}
+	cmB := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm-b", Namespace: "ns"}}
+	configs := []DiscoveredManagedResource{
+		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<a/>")}, Object: cmA},
+		{Name: "cm-b", ConfigType: ConfigTypeBase, Data: map[string][]byte{"base-config.xml": []byte("<b/>")}, Object: cmB},
 	}
 	warnings := detectDuplicateKeys(configs)
 	if len(warnings) != 1 {
 		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
 	}
-	if !strings.Contains(warnings[0], "base-config.xml") || !strings.Contains(warnings[0], "ConfigMap/cm-a") || !strings.Contains(warnings[0], "ConfigMap/cm-b") {
-		t.Errorf("warning should mention filename and both resources with kind, got: %s", warnings[0])
+	if !strings.Contains(warnings[0].Message, "base-config.xml") || !strings.Contains(warnings[0].Message, "ConfigMap/cm-a") || !strings.Contains(warnings[0].Message, "ConfigMap/cm-b") {
+		t.Errorf("warning should mention filename and both resources with kind, got: %s", warnings[0].Message)
+	}
+
+	// Invariant: every Owner has a non-nil Object. The cluster reconciler's
+	// emit path nil-guards on Object — if a future refactor leaves Object
+	// nil here, the Warning Event would be silently dropped and only the
+	// status entry would surface, hiding the issue. Assert the invariant
+	// holds end-to-end through detectDuplicateKeys.
+	if len(warnings[0].Owners) < 2 {
+		t.Fatalf("invariant: DuplicateKeyWarning must have >= 2 owners; got %d", len(warnings[0].Owners))
+	}
+	for i, owner := range warnings[0].Owners {
+		if owner.Object == nil {
+			t.Errorf("Owner[%d].Object must be non-nil (otherwise downstream emit is silently dropped); got %+v", i, owner)
+		}
 	}
 }
 
@@ -765,7 +884,7 @@ func TestDetectDuplicateKeys_ConfigMapAndSecret(t *testing.T) {
 	// having the same data key in both a ConfigMap and Secret of the same
 	// config type is likely a user mistake — it may produce unexpected merged
 	// configuration. The warning is about user intent, not mount path collisions.
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "cm-a", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"config.xml": []byte("<a/>")}},
 		{Name: "sec-a", IsSecret: true, ConfigType: ConfigTypeBase, Data: map[string][]byte{"config.xml": []byte("<b/>")}},
 	}
@@ -773,14 +892,14 @@ func TestDetectDuplicateKeys_ConfigMapAndSecret(t *testing.T) {
 	if len(warnings) != 1 {
 		t.Fatalf("expected 1 warning for CM+Secret same key, got %d: %v", len(warnings), warnings)
 	}
-	if !strings.Contains(warnings[0], "ConfigMap/cm-a") || !strings.Contains(warnings[0], "Secret/sec-a") {
-		t.Errorf("warning should mention both resources with kind, got: %s", warnings[0])
+	if !strings.Contains(warnings[0].Message, "ConfigMap/cm-a") || !strings.Contains(warnings[0].Message, "Secret/sec-a") {
+		t.Errorf("warning should mention both resources with kind, got: %s", warnings[0].Message)
 	}
 }
 
 func TestDetectDuplicateKeys_SingleResourceMultipleKeys(t *testing.T) {
 	// A single resource with multiple distinct keys should produce 0 warnings.
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{
 			"a.xml": []byte("<a/>"),
 			"b.xml": []byte("<b/>"),
@@ -795,7 +914,7 @@ func TestDetectDuplicateKeys_SingleResourceMultipleKeys(t *testing.T) {
 
 func TestDetectDuplicateKeys_ThreeResourcesSameKey(t *testing.T) {
 	// Three resources sharing the same key should produce 1 warning listing all three.
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"shared.xml": []byte("<a/>")}},
 		{Name: "cm-b", ConfigType: ConfigTypeBase, Data: map[string][]byte{"shared.xml": []byte("<b/>")}},
 		{Name: "cm-c", ConfigType: ConfigTypeBase, Data: map[string][]byte{"shared.xml": []byte("<c/>")}},
@@ -804,14 +923,14 @@ func TestDetectDuplicateKeys_ThreeResourcesSameKey(t *testing.T) {
 	if len(warnings) != 1 {
 		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
 	}
-	if !strings.Contains(warnings[0], "ConfigMap/cm-a") || !strings.Contains(warnings[0], "ConfigMap/cm-b") || !strings.Contains(warnings[0], "ConfigMap/cm-c") {
-		t.Errorf("warning should list all three resources with kind, got: %s", warnings[0])
+	if !strings.Contains(warnings[0].Message, "ConfigMap/cm-a") || !strings.Contains(warnings[0].Message, "ConfigMap/cm-b") || !strings.Contains(warnings[0].Message, "ConfigMap/cm-c") {
+		t.Errorf("warning should list all three resources with kind, got: %s", warnings[0].Message)
 	}
 }
 
 func TestDetectDuplicateKeys_MultipleDistinctDuplicates(t *testing.T) {
 	// Two different keys are each duplicated — should produce 2 sorted warnings.
-	configs := []DiscoveredConfigResource{
+	configs := []DiscoveredManagedResource{
 		{Name: "cm-a", ConfigType: ConfigTypeBase, Data: map[string][]byte{"x.xml": []byte("<a/>"), "y.xml": []byte("<a/>")}},
 		{Name: "cm-b", ConfigType: ConfigTypeBase, Data: map[string][]byte{"x.xml": []byte("<b/>"), "y.xml": []byte("<b/>")}},
 	}
@@ -820,10 +939,10 @@ func TestDetectDuplicateKeys_MultipleDistinctDuplicates(t *testing.T) {
 		t.Fatalf("expected 2 warnings for two distinct duplicated keys, got %d: %v", len(warnings), warnings)
 	}
 	// Warnings are sorted — "x.xml" before "y.xml".
-	if !strings.Contains(warnings[0], "x.xml") {
-		t.Errorf("first warning should be about x.xml, got: %s", warnings[0])
+	if !strings.Contains(warnings[0].Message, "x.xml") {
+		t.Errorf("first warning should be about x.xml, got: %s", warnings[0].Message)
 	}
-	if !strings.Contains(warnings[1], "y.xml") {
-		t.Errorf("second warning should be about y.xml, got: %s", warnings[1])
+	if !strings.Contains(warnings[1].Message, "y.xml") {
+		t.Errorf("second warning should be about y.xml, got: %s", warnings[1].Message)
 	}
 }

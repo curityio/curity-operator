@@ -937,7 +937,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					"bad-type-config must be skipped")
 			}, timeout, interval).Should(Succeed())
 
-			By("expecting a Warning Event naming the bad resource on the node")
+			By("expecting a Warning Event on the offending ConfigMap (not on the node)")
 			Eventually(func() bool {
 				var events corev1.EventList
 				if err := k8sClient.List(ctx, &events, client.InNamespace(ns)); err != nil {
@@ -945,14 +945,29 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 				}
 				for _, e := range events.Items {
 					if e.Reason == "UnknownConfigType" &&
-						e.InvolvedObject.Name == "cfg-node" &&
-						strings.Contains(e.Message, "bad-type-config") {
+						e.InvolvedObject.Kind == "ConfigMap" &&
+						e.InvolvedObject.Name == "bad-type-config" {
 						return true
 					}
 				}
 				return false
 			}, timeout, interval).Should(BeTrue(),
-				"expected Warning/UnknownConfigType event naming bad-type-config on the node")
+				"expected Warning/UnknownConfigType event on ConfigMap/bad-type-config")
+
+			By("expecting NO UnknownConfigType event on the node (regression guard for the duplicate emit)")
+			Consistently(func() bool {
+				var events corev1.EventList
+				if err := k8sClient.List(ctx, &events, client.InNamespace(ns)); err != nil {
+					return false
+				}
+				for _, e := range events.Items {
+					if e.Reason == "UnknownConfigType" && e.InvolvedObject.Kind == "IdentityServerNode" {
+						return false
+					}
+				}
+				return true
+			}, "2s", "200ms").Should(BeTrue(),
+				"node-side UnknownConfigType emit was removed; only the CM should carry it")
 		})
 
 		It("should update config-hash annotation when config data changes", func() {
@@ -1013,7 +1028,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			}, timeout, interval).Should(Equal(0), "config volume should be removed after label removal")
 		})
 
-		It("should populate AppliedConfigs with discovered managed configs", func() {
+		It("should populate AppliedManagedResources with discovered managed configs", func() {
 			testCreateCluster(ns, "cfg-cluster")
 			testCreateNode(ns, "cfg-node", v1alpha1.NodeTypeRuntime, "cfg-cluster")
 
@@ -1024,10 +1039,10 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			node := &v1alpha1.IdentityServerNode{}
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cfg-node", Namespace: ns}, node)).To(Succeed())
-				g.Expect(node.Status.AppliedConfigs).To(HaveLen(1))
-				g.Expect(node.Status.AppliedConfigs[0].Name).To(Equal("status-config"))
-				g.Expect(node.Status.AppliedConfigs[0].Kind).To(Equal("ConfigMap"))
-				g.Expect(node.Status.AppliedConfigs[0].ConfigType).To(Equal("base"))
+				g.Expect(node.Status.AppliedManagedResources).To(HaveLen(1))
+				g.Expect(node.Status.AppliedManagedResources[0].Name).To(Equal("status-config"))
+				g.Expect(node.Status.AppliedManagedResources[0].Kind).To(Equal("ConfigMap"))
+				g.Expect(node.Status.AppliedManagedResources[0].ConfigType).To(Equal("base"))
 			}, timeout, interval).Should(Succeed())
 		})
 
@@ -2746,6 +2761,64 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(conditionReason(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)).To(Equal("SecretReady"))
 		})
 
+		It("removes stale ConfigScopeIssues condition while in LogsUnavailable", func() {
+			// LogsUnavailable persists Status without the wholesale rebuild,
+			// so a stale ConfigScopeIssues would otherwise survive forever.
+			testCreateCluster(ns, "stale-logs-cluster")
+			testCreateNode(ns, "stale-logs-admin", v1alpha1.NodeTypeAdmin, "stale-logs-cluster")
+
+			job := &batchv1.Job{}
+			eventuallyGetResource(ns, "stale-logs-cluster-cluster-config-job", job)
+			job.Status.Conditions = []batchv1.JobCondition{
+				{
+					Type:               batchv1.JobComplete,
+					Status:             corev1.ConditionTrue,
+					LastTransitionTime: metav1.Now(),
+				},
+			}
+			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+
+			// Wait for cluster to reach LogsUnavailable so we know the
+			// early-return branch is being exercised on each requeue.
+			Eventually(func() string {
+				c := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "stale-logs-cluster", Namespace: ns}, c); err != nil {
+					return ""
+				}
+				return conditionReason(c.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+			}, timeout, interval).Should(Equal("LogsUnavailable"))
+
+			// Inject a stale ConfigScopeIssues condition.
+			cluster := &v1alpha1.IdentityServerCluster{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "stale-logs-cluster", Namespace: ns}, cluster)).To(Succeed())
+			cluster.Status.Conditions = append(cluster.Status.Conditions, metav1.Condition{
+				Type:               "ConfigScopeIssues",
+				Status:             metav1.ConditionTrue,
+				Reason:             "UnknownClusters",
+				Message:            "[stale entry from older operator]",
+				LastTransitionTime: metav1.Now(),
+			})
+			Expect(k8sClient.Status().Update(ctx, cluster)).To(Succeed())
+
+			// Next requeue must drop the stale condition.
+			Eventually(func() bool {
+				c := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "stale-logs-cluster", Namespace: ns}, c); err != nil {
+					return true
+				}
+				for _, cond := range c.Status.Conditions {
+					if cond.Type == "ConfigScopeIssues" {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeFalse(), "stale ConfigScopeIssues was not removed")
+
+			// LogsUnavailable must survive.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "stale-logs-cluster", Namespace: ns}, cluster)).To(Succeed())
+			Expect(conditionReason(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)).To(Equal("LogsUnavailable"))
+		})
+
 		It("should delete Job after 30s timeout when pod logs are permanently unavailable", func() {
 			testCreateCluster(ns, "stale-cluster")
 			testCreateNode(ns, "stale-admin", v1alpha1.NodeTypeAdmin, "stale-cluster")
@@ -3100,33 +3173,54 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			}, timeout, interval).Should(Equal("base"))
 		})
 
-		It("should emit DuplicateConfigKey warning when two ConfigMaps share a data key", func() {
+		It("should emit DuplicateConfigKey warning on each colliding ConfigMap (not the cluster)", func() {
 			testCreateCluster(ns, "dup-cluster")
 
 			// Create two ConfigMaps with the same data key
 			testCreateManagedConfigMap(ns, "dup-cm-a", map[string]string{"shared.xml": "<a/>"}, nil)
 			testCreateManagedConfigMap(ns, "dup-cm-b", map[string]string{"shared.xml": "<b/>"}, nil)
 
-			// Wait for the cluster reconciler to process and emit the event.
-			findDuplicateEvent := func() *corev1.Event {
+			// The warning is routed to each colliding CM via UID-keyed dedup.
+			// Verify both CMs receive the event, and the cluster does not.
+			findOnCM := func(cmName string) *corev1.Event {
 				var events corev1.EventList
 				if err := k8sClient.List(ctx, &events, client.InNamespace(ns)); err != nil {
 					return nil
 				}
 				for i := range events.Items {
-					if events.Items[i].Reason == "DuplicateConfigKey" && events.Items[i].InvolvedObject.Name == "dup-cluster" {
+					if events.Items[i].Reason == "DuplicateConfigKey" &&
+						events.Items[i].InvolvedObject.Kind == "ConfigMap" &&
+						events.Items[i].InvolvedObject.Name == cmName {
 						return &events.Items[i]
 					}
 				}
 				return nil
 			}
-			Eventually(func() *corev1.Event { return findDuplicateEvent() }, timeout, interval).ShouldNot(BeNil(),
-				"expected DuplicateConfigKey warning event on the cluster")
 
-			evt := findDuplicateEvent()
+			Eventually(func() *corev1.Event { return findOnCM("dup-cm-a") }, timeout, interval).ShouldNot(BeNil(),
+				"expected DuplicateConfigKey event on ConfigMap/dup-cm-a")
+			Eventually(func() *corev1.Event { return findOnCM("dup-cm-b") }, timeout, interval).ShouldNot(BeNil(),
+				"expected DuplicateConfigKey event on ConfigMap/dup-cm-b")
+
+			evt := findOnCM("dup-cm-a")
 			Expect(evt.Message).To(ContainSubstring("shared.xml"), "event message should mention the duplicated key")
 			Expect(evt.Message).To(ContainSubstring("dup-cm-a"), "event message should mention first resource")
 			Expect(evt.Message).To(ContainSubstring("dup-cm-b"), "event message should mention second resource")
+
+			By("verifying NO DuplicateConfigKey event landed on the cluster CR")
+			Consistently(func() bool {
+				var events corev1.EventList
+				if err := k8sClient.List(ctx, &events, client.InNamespace(ns)); err != nil {
+					return false
+				}
+				for _, e := range events.Items {
+					if e.Reason == "DuplicateConfigKey" && e.InvolvedObject.Kind == "IdentityServerCluster" {
+						return false
+					}
+				}
+				return true
+			}, "2s", "200ms").Should(BeTrue(),
+				"DuplicateConfigKey events must land on the offending CMs, not on the cluster")
 		})
 	})
 

@@ -83,11 +83,8 @@ func TestFindClustersForManagedConfig_SingleScope_FiltersByName(t *testing.T) {
 }
 
 func TestFindClustersForManagedConfig_EmptyScope_FansOutToAll(t *testing.T) {
-	// Regression: when the curity.io/cluster annotation is empty, the scope
-	// matches no cluster, so the naive mapper would return zero requests and
-	// no cluster would ever run the ConfigScopeIssues scan. The user's typo
-	// would be silently swallowed. Fan out to all clusters instead so at
-	// least one emits the EmptyClusterScope event and updates the condition.
+	// Empty scope matches no cluster — fan out so at least one reconciler
+	// emits EmptyClusterScope on the CM. UID dedup makes the fan-out free.
 	ctx := context.Background()
 	c := newClusterTestScheme(t).WithObjects(
 		clusterObj("cluster-a", "ns"),
@@ -111,10 +108,8 @@ func TestFindClustersForManagedConfig_EmptyScope_FansOutToAll(t *testing.T) {
 }
 
 func TestFindClustersForManagedConfig_AllUnknownScope_FansOutToAll(t *testing.T) {
-	// Regression: when every name in the scope annotation refers to a
-	// non-existent cluster, the naive mapper returns zero requests and the
-	// UnknownClusterInScope event/condition never fires. Fan out to all
-	// clusters so at least one surfaces the issue.
+	// All-typo scope matches no cluster — fan out so at least one
+	// reconciler emits UnknownClusterInScope on the CM.
 	ctx := context.Background()
 	c := newClusterTestScheme(t).WithObjects(
 		clusterObj("cluster-a", "ns"),

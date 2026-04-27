@@ -21,10 +21,15 @@ const (
 	AnnotationClusterScope = "curity.io/cluster"
 )
 
-// Event reasons related to cluster-scope annotation handling.
+// Event reasons surfaced on managed ConfigMaps/Secrets (or the cluster CR
+// for operator-level scan failures).
 const (
-	EventReasonEmptyClusterScope     = "EmptyClusterScope"
-	EventReasonUnknownClusterInScope = "UnknownClusterInScope"
+	EventReasonEmptyClusterScope           = "EmptyClusterScope"
+	EventReasonUnknownClusterInScope       = "UnknownClusterInScope"
+	EventReasonUnknownConfigType           = "UnknownConfigType"
+	EventReasonDuplicateConfigKey          = "DuplicateConfigKey"
+	EventReasonConfigTypeAnnotationDefault = "ConfigTypeAnnotationDefault"
+	EventReasonScanFailed                  = "ScanFailed"
 )
 
 // Config type values matching the README.
@@ -50,13 +55,14 @@ const (
 // curity.io/config-type annotation value.
 var ErrUnknownConfigType = errors.New("unknown config type")
 
-// DiscoveredConfigResource represents a ConfigMap or Secret found via
+// DiscoveredManagedResource represents a ConfigMap or Secret found via
 // label-based discovery (curity.io/managed=true).
-type DiscoveredConfigResource struct {
+type DiscoveredManagedResource struct {
 	Name       string
 	IsSecret   bool
 	ConfigType string
 	Data       map[string][]byte
+	Object     client.Object // for use as Event involvedObject
 }
 
 // SkippedResource records a managed resource that was excluded from a
@@ -66,8 +72,9 @@ type DiscoveredConfigResource struct {
 // into the entire managed-config feature going dark.
 type SkippedResource struct {
 	Name   string
-	Kind   string // "ConfigMap" or "Secret"
-	Reason string // stable, human-readable; used for EventRecorder dedup
+	Kind   string        // "ConfigMap" or "Secret"
+	Reason string        // stable, human-readable; used for EventRecorder dedup
+	Object client.Object // for use as Event involvedObject
 }
 
 // parseClusterScope returns the set of cluster names the curity.io/cluster
@@ -109,17 +116,17 @@ func appliesToCluster(annotations map[string]string, clusterName string) bool {
 	return ok
 }
 
-// discoverConfigResources lists ConfigMaps and Secrets labeled
+// discoverManagedResources lists ConfigMaps and Secrets labeled
 // curity.io/managed=true in the given namespace, filtered by the
 // curity.io/cluster annotation to those applying to clusterName.
 // Operator-internal cluster-config secrets are filtered out.
 //
 // Returns (configs, skipped, error). Resources with an invalid
 // curity.io/config-type annotation are reported via `skipped` and omitted
-// from `configs` — one bad annotation must not block validation of the
+// from `configs` — one bad annotation must not block discovery of the
 // remaining valid resources. Hard errors (e.g. List failures) still go in
 // `error`. Results are sorted by name for deterministic ordering.
-func discoverConfigResources(ctx context.Context, c client.Client, namespace, clusterName string) ([]DiscoveredConfigResource, []SkippedResource, error) {
+func discoverManagedResources(ctx context.Context, c client.Client, namespace, clusterName string) ([]DiscoveredManagedResource, []SkippedResource, error) {
 	managedLabel := client.MatchingLabels{LabelManagedConfig: "true"}
 
 	var configMaps corev1.ConfigMapList
@@ -132,7 +139,7 @@ func discoverConfigResources(ctx context.Context, c client.Client, namespace, cl
 		return nil, nil, fmt.Errorf("listing managed Secrets: %w", err)
 	}
 
-	result := make([]DiscoveredConfigResource, 0, len(configMaps.Items)+len(secrets.Items))
+	result := make([]DiscoveredManagedResource, 0, len(configMaps.Items)+len(secrets.Items))
 	var skipped []SkippedResource
 
 	for i := range configMaps.Items {
@@ -146,6 +153,7 @@ func discoverConfigResources(ctx context.Context, c client.Client, namespace, cl
 				Name:   cm.Name,
 				Kind:   "ConfigMap",
 				Reason: err.Error(),
+				Object: cm,
 			})
 			continue
 		}
@@ -153,11 +161,12 @@ func discoverConfigResources(ctx context.Context, c client.Client, namespace, cl
 		for k, v := range cm.Data {
 			data[k] = []byte(v)
 		}
-		result = append(result, DiscoveredConfigResource{
+		result = append(result, DiscoveredManagedResource{
 			Name:       cm.Name,
 			IsSecret:   false,
 			ConfigType: configType,
 			Data:       data,
+			Object:     cm,
 		})
 	}
 
@@ -176,14 +185,16 @@ func discoverConfigResources(ctx context.Context, c client.Client, namespace, cl
 				Name:   s.Name,
 				Kind:   "Secret",
 				Reason: err.Error(),
+				Object: s,
 			})
 			continue
 		}
-		result = append(result, DiscoveredConfigResource{
+		result = append(result, DiscoveredManagedResource{
 			Name:       s.Name,
 			IsSecret:   true,
 			ConfigType: configType,
 			Data:       s.Data,
+			Object:     s,
 		})
 	}
 
@@ -197,17 +208,30 @@ func discoverConfigResources(ctx context.Context, c client.Client, namespace, cl
 	return result, skipped, nil
 }
 
+// DefaultConfigTypeFailure records a single failed write of the default
+// curity.io/config-type annotation. Object is used as Event involvedObject;
+// Err drives IsConflict-aware severity in the caller.
+type DefaultConfigTypeFailure struct {
+	Object client.Object
+	Kind   string // "ConfigMap" or "Secret"
+	Name   string
+	Err    error
+}
+
 // defaultConfigTypeAnnotations writes the curity.io/config-type annotation on
 // managed ConfigMaps/Secrets when absent, so users can see the effective type.
 // Only resources applying to clusterName are considered, so two clusters in the
 // same namespace do not race to default-annotate each other's resources.
-// Only called from the cluster reconciler (which has update RBAC on configmaps/secrets).
-func defaultConfigTypeAnnotations(ctx context.Context, c client.Client, namespace, clusterName string) error {
+//
+// Per-resource Update failures are collected and returned; only hard List
+// failures bubble up. Callers must surface per-resource failures themselves.
+func defaultConfigTypeAnnotations(ctx context.Context, c client.Client, namespace, clusterName string) ([]DefaultConfigTypeFailure, error) {
 	managedLabel := client.MatchingLabels{LabelManagedConfig: "true"}
+	var failures []DefaultConfigTypeFailure
 
 	var configMaps corev1.ConfigMapList
 	if err := c.List(ctx, &configMaps, client.InNamespace(namespace), managedLabel); err != nil {
-		return fmt.Errorf("listing managed ConfigMaps: %w", err)
+		return nil, fmt.Errorf("listing managed ConfigMaps: %w", err)
 	}
 	for i := range configMaps.Items {
 		cm := &configMaps.Items[i]
@@ -222,13 +246,16 @@ func defaultConfigTypeAnnotations(ctx context.Context, c client.Client, namespac
 		}
 		cm.Annotations[AnnotationConfigType] = ConfigTypeBase
 		if err := c.Update(ctx, cm); err != nil {
-			return fmt.Errorf("setting default config-type on configmap %q: %w", cm.Name, err)
+			failures = append(failures, DefaultConfigTypeFailure{
+				Object: cm, Kind: "ConfigMap", Name: cm.Name, Err: err,
+			})
+			continue
 		}
 	}
 
 	var secrets corev1.SecretList
 	if err := c.List(ctx, &secrets, client.InNamespace(namespace), managedLabel); err != nil {
-		return fmt.Errorf("listing managed Secrets: %w", err)
+		return failures, fmt.Errorf("listing managed Secrets: %w", err)
 	}
 	for i := range secrets.Items {
 		s := &secrets.Items[i]
@@ -246,11 +273,14 @@ func defaultConfigTypeAnnotations(ctx context.Context, c client.Client, namespac
 		}
 		s.Annotations[AnnotationConfigType] = ConfigTypeBase
 		if err := c.Update(ctx, s); err != nil {
-			return fmt.Errorf("setting default config-type on secret %q: %w", s.Name, err)
+			failures = append(failures, DefaultConfigTypeFailure{
+				Object: s, Kind: "Secret", Name: s.Name, Err: err,
+			})
+			continue
 		}
 	}
 
-	return nil
+	return failures, nil
 }
 
 // formatUnknownClusterMessage returns the byte-stable UnknownClusterInScope
@@ -288,9 +318,10 @@ func formatNameList(names []string) string {
 type ScopeIssue struct {
 	Kind    string // "ConfigMap" or "Secret"
 	Name    string
-	Empty   bool     // annotation was present but empty
-	Unknown []string // cluster names in the annotation that don't exist
-	Applied []string // cluster names in the annotation that do exist (companion to Unknown)
+	Empty   bool          // annotation was present but empty
+	Unknown []string      // cluster names in the annotation that don't exist
+	Applied []string      // cluster names in the annotation that do exist (companion to Unknown)
+	Object  client.Object // for use as Event involvedObject
 }
 
 // scanConfigScopeIssues lists all managed resources in a namespace and returns
@@ -309,7 +340,7 @@ func scanConfigScopeIssues(ctx context.Context, c client.Client, namespace strin
 	}
 
 	var issues []ScopeIssue
-	eval := func(kind, name string, ann map[string]string) {
+	eval := func(kind, name string, ann map[string]string, obj client.Object) {
 		raw, present := ann[AnnotationClusterScope]
 		if !present {
 			return
@@ -319,7 +350,7 @@ func scanConfigScopeIssues(ctx context.Context, c client.Client, namespace strin
 			// Annotation present but yields no names (e.g. "", "  ", ",,").
 			// Under applies-to-none semantics this mounts nowhere, which is
 			// almost always a mistake — flag uniformly.
-			issues = append(issues, ScopeIssue{Kind: kind, Name: name, Empty: true})
+			issues = append(issues, ScopeIssue{Kind: kind, Name: name, Empty: true, Object: obj})
 			return
 		}
 		var missing, applied []string
@@ -333,19 +364,19 @@ func scanConfigScopeIssues(ctx context.Context, c client.Client, namespace strin
 		if len(missing) > 0 {
 			sort.Strings(missing)
 			sort.Strings(applied)
-			issues = append(issues, ScopeIssue{Kind: kind, Name: name, Unknown: missing, Applied: applied})
+			issues = append(issues, ScopeIssue{Kind: kind, Name: name, Unknown: missing, Applied: applied, Object: obj})
 		}
 	}
 	for i := range configMaps.Items {
 		cm := &configMaps.Items[i]
-		eval("ConfigMap", cm.Name, cm.Annotations)
+		eval("ConfigMap", cm.Name, cm.Annotations, cm)
 	}
 	for i := range secrets.Items {
 		s := &secrets.Items[i]
 		if s.Labels["curity.io/component"] == "cluster-config" {
 			continue
 		}
-		eval("Secret", s.Name, s.Annotations)
+		eval("Secret", s.Name, s.Annotations, s)
 	}
 	sort.Slice(issues, func(i, j int) bool {
 		if issues[i].Kind != issues[j].Kind {
@@ -390,7 +421,7 @@ func shouldMountConfig(nodeType v1alpha1.NodeType, adminExists bool) bool {
 
 // computeConfigHash returns a deterministic SHA256 hex string over the sorted
 // config names and their data. Returns empty string for nil or empty configs.
-func computeConfigHash(configs []DiscoveredConfigResource) string {
+func computeConfigHash(configs []DiscoveredManagedResource) string {
 	if len(configs) == 0 {
 		return ""
 	}
@@ -460,21 +491,46 @@ func mountFilename(isSecret bool, resourceName, key string) string {
 	return prefix + resourceName + "_" + key
 }
 
+// DuplicateKeyWarning describes a single duplicated data key across managed
+// resources of the same config type. Construct via newDuplicateKeyWarning,
+// which enforces len(Owners) >= 2.
+type DuplicateKeyWarning struct {
+	Owners  []DuplicateKeyOwner
+	Message string
+}
+
+// newDuplicateKeyWarning returns ok=false when len(owners) < 2, which would
+// be an upstream invariant violation (a "duplicate" requires ≥ 2 owners).
+func newDuplicateKeyWarning(owners []DuplicateKeyOwner, message string) (DuplicateKeyWarning, bool) {
+	if len(owners) < 2 {
+		return DuplicateKeyWarning{}, false
+	}
+	return DuplicateKeyWarning{Owners: owners, Message: message}, true
+}
+
+type DuplicateKeyOwner struct {
+	Kind   string // "ConfigMap" or "Secret"
+	Name   string
+	Object client.Object // non-nil; for use as Event involvedObject
+}
+
 // detectDuplicateKeys checks whether any two discovered config resources of the
-// same config type share a data key. Returns a list of human-readable warnings
-// (one per duplicated key). Returns nil if no duplicates exist.
+// same config type share a data key. Returns one warning per duplicated key,
+// each carrying the live owner objects so callers can emit Warning Events
+// keyed to each colliding ConfigMap/Secret (UID dedup applies). Returns nil
+// if no duplicates exist.
 //
 // This intentionally groups by (configType, filename) without distinguishing
 // ConfigMap vs Secret. Even though mountFilename() guarantees distinct mount
 // paths (cm_* vs secret_*), having the same data key in both a ConfigMap and
 // a Secret of the same config type is still likely a user mistake — it may
 // produce unexpected merged configuration.
-func detectDuplicateKeys(configs []DiscoveredConfigResource) []string {
+func detectDuplicateKeys(configs []DiscoveredManagedResource) []DuplicateKeyWarning {
 	type mountKey struct {
 		configType string
 		filename   string
 	}
-	seen := make(map[mountKey][]string)
+	seen := make(map[mountKey][]DuplicateKeyOwner)
 	for _, cfg := range configs {
 		kind := "ConfigMap"
 		if cfg.IsSecret {
@@ -482,35 +538,50 @@ func detectDuplicateKeys(configs []DiscoveredConfigResource) []string {
 		}
 		for key := range cfg.Data {
 			mk := mountKey{configType: cfg.ConfigType, filename: key}
-			seen[mk] = append(seen[mk], kind+"/"+cfg.Name)
+			seen[mk] = append(seen[mk], DuplicateKeyOwner{Kind: kind, Name: cfg.Name, Object: cfg.Object})
 		}
 	}
-	var warnings []string
+	var warnings []DuplicateKeyWarning
 	for mk, owners := range seen {
-		if len(owners) > 1 {
-			sort.Strings(owners)
-			warnings = append(warnings, fmt.Sprintf(
-				"data key %q (config type %q) exists in multiple resources: %v — all will be mounted at distinct paths (prefixed by resource name), verify this is intentional",
-				mk.filename, mk.configType, owners,
-			))
+		if len(owners) <= 1 {
+			continue // not a collision
 		}
+		sort.Slice(owners, func(i, j int) bool {
+			if owners[i].Kind != owners[j].Kind {
+				return owners[i].Kind < owners[j].Kind
+			}
+			return owners[i].Name < owners[j].Name
+		})
+		refs := make([]string, len(owners))
+		for i, o := range owners {
+			refs[i] = o.Kind + "/" + o.Name
+		}
+		w, ok := newDuplicateKeyWarning(owners, fmt.Sprintf(
+			"data key %q (config type %q) exists in multiple resources: %v — all will be mounted at distinct paths (prefixed by resource name), verify this is intentional",
+			mk.filename, mk.configType, refs,
+		))
+		if !ok {
+			continue // invariant violated upstream; skip rather than emit malformed
+		}
+		warnings = append(warnings, w)
 	}
-	sort.Strings(warnings)
+	sort.Slice(warnings, func(i, j int) bool { return warnings[i].Message < warnings[j].Message })
 	return warnings
 }
 
-// buildAppliedConfigStatus creates the status slice for discovered configs.
-func buildAppliedConfigStatus(configs []DiscoveredConfigResource) []v1alpha1.AppliedConfigStatus {
+// buildAppliedManagedResources creates the status slice for discovered
+// managed ConfigMaps and Secrets that have been mounted.
+func buildAppliedManagedResources(configs []DiscoveredManagedResource) []v1alpha1.AppliedManagedResource {
 	if len(configs) == 0 {
 		return nil
 	}
-	result := make([]v1alpha1.AppliedConfigStatus, 0, len(configs))
+	result := make([]v1alpha1.AppliedManagedResource, 0, len(configs))
 	for _, cfg := range configs {
 		kind := "ConfigMap"
 		if cfg.IsSecret {
 			kind = "Secret"
 		}
-		result = append(result, v1alpha1.AppliedConfigStatus{
+		result = append(result, v1alpha1.AppliedManagedResource{
 			Name:       cfg.Name,
 			Kind:       kind,
 			ConfigType: cfg.ConfigType,

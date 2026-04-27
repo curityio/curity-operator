@@ -179,37 +179,31 @@ var _ = Describe("Multi-cluster config scoping", Ordered, func() {
 			}, e2eTimeout, e2eInterval).Should(Succeed())
 		}
 
-		By("verifying status.appliedConfigs is per-cluster truthful")
+		By("verifying status.appliedManagedResources is per-cluster truthful")
 		Eventually(func(g Gomega) {
 			pri := &v1alpha1.IdentityServerNode{}
 			g.Expect(k().Get(ctx, client.ObjectKey{Name: primaryAdmin, Namespace: ns}, pri)).To(Succeed())
-			names := namesOf(pri.Status.AppliedConfigs)
+			names := namesOf(pri.Status.AppliedManagedResources)
 			g.Expect(names).To(ConsistOf(cmScopedPri, cmShared, secretShared))
 			g.Expect(names).NotTo(ContainElement(cmScopedStg))
 		}, e2eTimeout, e2eInterval).Should(Succeed())
 		Eventually(func(g Gomega) {
 			stg := &v1alpha1.IdentityServerNode{}
 			g.Expect(k().Get(ctx, client.ObjectKey{Name: stagingAdmin, Namespace: ns}, stg)).To(Succeed())
-			names := namesOf(stg.Status.AppliedConfigs)
+			names := namesOf(stg.Status.AppliedManagedResources)
 			g.Expect(names).To(ConsistOf(cmScopedStg, cmShared, secretShared))
 			g.Expect(names).NotTo(ContainElement(cmScopedPri))
 		}, e2eTimeout, e2eInterval).Should(Succeed())
 
-		By("verifying ConfigScopeIssues condition is False/NoIssues on both clusters")
+		By("verifying neither cluster carries the (removed) ConfigScopeIssues condition")
 		for _, name := range []string{primary, staging} {
 			Eventually(func(g Gomega) {
 				c := &v1alpha1.IdentityServerCluster{}
 				g.Expect(k().Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, c)).To(Succeed())
-				var cond *metav1.Condition
 				for i := range c.Status.Conditions {
-					if c.Status.Conditions[i].Type == v1alpha1.ConditionConfigScopeIssues {
-						cond = &c.Status.Conditions[i]
-						break
-					}
+					g.Expect(c.Status.Conditions[i].Type).NotTo(Equal("ConfigScopeIssues"),
+						"ConfigScopeIssues condition is no longer written — managed-config issues live as Events on the CM/Secret")
 				}
-				g.Expect(cond).NotTo(BeNil(), "ConfigScopeIssues condition missing on cluster %q", name)
-				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-				g.Expect(cond.Reason).To(Equal(v1alpha1.ReasonNoIssues))
 			}, e2eTimeout, e2eInterval).Should(Succeed())
 		}
 
@@ -224,7 +218,7 @@ var _ = Describe("Multi-cluster config scoping", Ordered, func() {
 		utils.MatchCRDResource(stgNode, "multi-scope-staging-admin")
 	})
 
-	It("surfaces ConfigScopeIssues when the annotation names a non-existent cluster", func() {
+	It("emits an UnknownClusterInScope Warning Event on the offending CM (not the cluster)", func() {
 		By("adding a config scoped to a non-existent cluster")
 		bad := &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
@@ -236,27 +230,42 @@ var _ = Describe("Multi-cluster config scoping", Ordered, func() {
 		}
 		Expect(k().Create(ctx, bad)).To(Succeed())
 
-		By("verifying each cluster reports UnknownClusters in ConfigScopeIssues")
-		for _, name := range []string{primary, staging} {
-			Eventually(func(g Gomega) {
-				c := &v1alpha1.IdentityServerCluster{}
-				g.Expect(k().Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, c)).To(Succeed())
-				var cond *metav1.Condition
-				for i := range c.Status.Conditions {
-					if c.Status.Conditions[i].Type == v1alpha1.ConditionConfigScopeIssues {
-						cond = &c.Status.Conditions[i]
-						break
-					}
+		By("verifying a Warning Event lands on the ConfigMap")
+		Eventually(func(g Gomega) {
+			var events corev1.EventList
+			g.Expect(k().List(ctx, &events, client.InNamespace(ns))).To(Succeed())
+			found := false
+			for _, e := range events.Items {
+				if e.Reason == "UnknownClusterInScope" &&
+					e.InvolvedObject.Kind == "ConfigMap" &&
+					e.InvolvedObject.Name == "scoped-to-missing" {
+					found = true
+					g.Expect(e.Message).To(ContainSubstring("does-not-exist"))
 				}
-				g.Expect(cond).NotTo(BeNil())
-				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(cond.Reason).To(Equal(v1alpha1.ReasonUnknownClusters))
-				g.Expect(cond.Message).To(ContainSubstring("ConfigMap/scoped-to-missing"))
-			}, e2eTimeout, e2eInterval).Should(Succeed())
-		}
+			}
+			g.Expect(found).To(BeTrue(), "expected UnknownClusterInScope event on ConfigMap/scoped-to-missing")
+		}, e2eTimeout, e2eInterval).Should(Succeed())
+
+		By("verifying NO event landed on either cluster CR")
+		// Always assert (count == 0). The previous shape ("if bad event found,
+		// assert it isn't bad") passed vacuously when no bad event existed —
+		// the assertion never ran, so a regression that emitted on the cluster
+		// CR could be missed if it slipped past one polling tick.
+		Consistently(func(g Gomega) {
+			var events corev1.EventList
+			g.Expect(k().List(ctx, &events, client.InNamespace(ns))).To(Succeed())
+			badOnCluster := 0
+			for _, e := range events.Items {
+				if e.Reason == "UnknownClusterInScope" && e.InvolvedObject.Kind == "IdentityServerCluster" {
+					badOnCluster++
+				}
+			}
+			g.Expect(badOnCluster).To(Equal(0),
+				"UnknownClusterInScope must land on the offending CM, not the cluster CR")
+		}, "3s", "500ms").Should(Succeed())
 	})
 
-	It("treats an empty curity.io/cluster annotation as applies-to-none and flags it", func() {
+	It("emits an EmptyClusterScope Warning Event on the offending CM and does not mount it", func() {
 		const cmEmpty = "scoped-to-empty"
 		By("adding a managed config with an empty curity.io/cluster annotation")
 		empty := &corev1.ConfigMap{
@@ -269,38 +278,35 @@ var _ = Describe("Multi-cluster config scoping", Ordered, func() {
 		}
 		Expect(k().Create(ctx, empty)).To(Succeed())
 
-		By("verifying each cluster surfaces ConfigScopeIssues with EmptyScope and does not mount the config on any node")
-		for _, name := range []string{primary, staging} {
-			Eventually(func(g Gomega) {
-				c := &v1alpha1.IdentityServerCluster{}
-				g.Expect(k().Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, c)).To(Succeed())
-				var cond *metav1.Condition
-				for i := range c.Status.Conditions {
-					if c.Status.Conditions[i].Type == v1alpha1.ConditionConfigScopeIssues {
-						cond = &c.Status.Conditions[i]
-						break
-					}
+		By("verifying a Warning Event lands on the ConfigMap")
+		Eventually(func(g Gomega) {
+			var events corev1.EventList
+			g.Expect(k().List(ctx, &events, client.InNamespace(ns))).To(Succeed())
+			found := false
+			for _, e := range events.Items {
+				if e.Reason == "EmptyClusterScope" &&
+					e.InvolvedObject.Kind == "ConfigMap" &&
+					e.InvolvedObject.Name == cmEmpty {
+					found = true
 				}
-				g.Expect(cond).NotTo(BeNil())
-				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-				g.Expect(cond.Message).To(ContainSubstring("ConfigMap/" + cmEmpty))
-			}, e2eTimeout, e2eInterval).Should(Succeed())
-		}
+			}
+			g.Expect(found).To(BeTrue(), "expected EmptyClusterScope event on ConfigMap/%s", cmEmpty)
+		}, e2eTimeout, e2eInterval).Should(Succeed())
 
-		// Empty-scope resource must not appear in any node's AppliedConfigs —
+		// Empty-scope resource must not appear in any node's AppliedManagedResources —
 		// applies-to-none means mount nowhere.
 		for _, adminName := range []string{primaryAdmin, stagingAdmin} {
 			Eventually(func(g Gomega) {
 				n := &v1alpha1.IdentityServerNode{}
 				g.Expect(k().Get(ctx, client.ObjectKey{Name: adminName, Namespace: ns}, n)).To(Succeed())
-				g.Expect(namesOf(n.Status.AppliedConfigs)).NotTo(ContainElement(cmEmpty))
+				g.Expect(namesOf(n.Status.AppliedManagedResources)).NotTo(ContainElement(cmEmpty))
 			}, e2eTimeout, e2eInterval).Should(Succeed())
 		}
 	})
 })
 
-// namesOf extracts the Name field of each AppliedConfigStatus.
-func namesOf(status []v1alpha1.AppliedConfigStatus) []string {
+// namesOf extracts the Name field of each AppliedManagedResource.
+func namesOf(status []v1alpha1.AppliedManagedResource) []string {
 	out := make([]string, 0, len(status))
 	for _, s := range status {
 		out = append(out, s.Name)

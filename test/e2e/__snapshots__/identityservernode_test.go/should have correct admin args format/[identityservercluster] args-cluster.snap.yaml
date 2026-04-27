@@ -39,11 +39,6 @@ status:
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
-    - type: ConfigScopeIssues
-      status: ""
-      lastTransitionTime: "0001-01-01T00:00:00Z"
-      reason: ""
-      message: ""
   observedGeneration: <Any value>
   version: "11.0"
   clusterConfigSecretName: args-cluster-cluster-config

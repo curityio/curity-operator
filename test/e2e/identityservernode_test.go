@@ -1339,9 +1339,9 @@ var _ = Describe("IdentityServerNode", func() {
 				Expect(container.Image).To(ContainSubstring("curity"))
 				Expect(container.Env).To(ContainElement(
 					Satisfy(func(e corev1.EnvVar) bool {
-						return e.Name == "CONFIG_SERVICE_HOST" && e.Value == "job-admin"
+						return e.Name == "CONFIG_SERVICE_HOST" && e.Value == "job-cluster-job-admin"
 					}),
-				), "Job should have CONFIG_SERVICE_HOST=job-admin")
+				), "Job should have CONFIG_SERVICE_HOST=job-cluster-job-admin (the admin Service name)")
 
 				utils.MatchResource(job, "job", "job-cluster-cluster-config-job")
 

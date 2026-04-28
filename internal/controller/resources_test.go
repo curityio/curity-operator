@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"regexp"
 	"testing"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -998,7 +999,9 @@ func TestBuildClusterConfigJob_BasicSpec(t *testing.T) {
 	}
 
 	// Env vars
-	assertEnvVar(t, container.Env, "CONFIG_SERVICE_HOST", "admin-1")
+	// CONFIG_SERVICE_HOST must equal the admin Service name (cluster-prefixed),
+	// not the bare CR name — runtime pods resolve this hostname via cluster DNS.
+	assertEnvVar(t, container.Env, "CONFIG_SERVICE_HOST", "cluster-1-admin-1")
 	assertEnvVar(t, container.Env, "CONFIG_SERVICE_PORT", "6789")
 
 	// Security context
@@ -1015,6 +1018,31 @@ func TestBuildClusterConfigJob_BasicSpec(t *testing.T) {
 	// Restart policy
 	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("expected RestartPolicyNever")
+	}
+}
+
+// TestBuildClusterConfigJob_HostUsesPrefixedNameWithHyphens covers scenario E1:
+// cluster and admin names that contain hyphens still produce a valid DNS-1123
+// label as the genclust CONFIG_SERVICE_HOST, matching the admin Service name.
+func TestBuildClusterConfigJob_HostUsesPrefixedNameWithHyphens(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Name = "prod-east"
+	job := buildClusterConfigJob(cluster, "primary-admin")
+
+	container := job.Spec.Template.Spec.Containers[0]
+	assertEnvVar(t, container.Env, "CONFIG_SERVICE_HOST", "prod-east-primary-admin")
+
+	// DNS-1123 label: lowercase alphanumerics and '-', must start/end with alphanumeric, max 63 chars.
+	dns1123 := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	for _, e := range container.Env {
+		if e.Name == "CONFIG_SERVICE_HOST" {
+			if len(e.Value) > 63 {
+				t.Errorf("CONFIG_SERVICE_HOST %q exceeds DNS-1123 label length 63", e.Value)
+			}
+			if !dns1123.MatchString(e.Value) {
+				t.Errorf("CONFIG_SERVICE_HOST %q is not a valid DNS-1123 label", e.Value)
+			}
+		}
 	}
 }
 

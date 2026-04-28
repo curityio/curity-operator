@@ -426,10 +426,7 @@ func TestEnsureManagedConfigDiscovery_ScopeScanFailure_ReturnsError(t *testing.T
 	}
 }
 
-func TestEnsureManagedConfigDiscovery_DefaultConfigTypeAnnotationsFailure_EmitsOnCM(t *testing.T) {
-	// A failed Update on a CM (Forbidden, webhook reject, server error)
-	// must surface as a Warning Event on the offending CM, not stay silent
-	// in operator logs only.
+func TestEnsureManagedConfigDiscovery_DoesNotWriteAnnotation_NoEvent_NoIssue(t *testing.T) {
 	ctx := context.Background()
 	s := newScheme(t)
 	if err := v1alpha1.AddToScheme(s); err != nil {
@@ -441,126 +438,33 @@ func TestEnsureManagedConfigDiscovery_DefaultConfigTypeAnnotationsFailure_EmitsO
 	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "cm-forbidden", Namespace: "ns",
+			Name: "no-annotation-cm", Namespace: "ns",
 			Labels: map[string]string{LabelManagedConfig: "true"},
 		},
+		Data: map[string]string{"x.xml": "<x/>"},
 	}
-	updateErr := errors.New("forbidden on configmap update")
+
+	updates := 0
 	c := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(cluster, cm).
 		WithStatusSubresource(&v1alpha1.IdentityServerCluster{}).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(ctx context.Context, client client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 				if _, ok := obj.(*corev1.ConfigMap); ok {
-					return updateErr
+					updates++
 				}
-				return client.Update(ctx, obj, opts...)
+				return cl.Update(ctx, obj, opts...)
+			},
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*corev1.ConfigMap); ok {
+					updates++
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
 			},
 		}).
 		Build()
 
-	rec := &capturingRecorder{}
-	r := &IdentityServerClusterReconciler{
-		Client:   c,
-		Scheme:   s,
-		Recorder: rec,
-	}
-
-	// Reconcile must NOT return an error — the failure is per-resource and
-	// reconcile continues for other resources / for the rest of the
-	// reconcile pipeline.
-	if err := r.ensureManagedConfigDiscovery(ctx, cluster); err != nil {
-		t.Fatalf("expected nil error (continue-past-default-failure), got: %v", err)
-	}
-
-	// Find the ConfigTypeAnnotationDefault event on the offending CM.
-	var found *capturedEvent
-	for i := range rec.events {
-		if rec.events[i].reason != "ConfigTypeAnnotationDefault" {
-			continue
-		}
-		evCM, ok := rec.events[i].object.(*corev1.ConfigMap)
-		if !ok || evCM.Name != "cm-forbidden" {
-			t.Errorf("ConfigTypeAnnotationDefault event has wrong involvedObject: %T %+v", rec.events[i].object, rec.events[i].object)
-			continue
-		}
-		found = &rec.events[i]
-	}
-	if found == nil {
-		t.Fatalf("expected Warning ConfigTypeAnnotationDefault event on ConfigMap/cm-forbidden, got events: %+v", rec.events)
-	}
-	// Stable message — no rotating bytes from the underlying error — so
-	// EventRecorder dedups a retry storm into one series per resource.
-	if strings.Contains(found.message, updateErr.Error()) {
-		t.Errorf("event message must NOT include raw error (breaks dedup); got: %q", found.message)
-	}
-	if !strings.Contains(found.message, "see operator logs") {
-		t.Errorf("event message should point to operator logs; got: %q", found.message)
-	}
-
-	// Regression guard: the event must NOT land on the cluster CR —
-	// managed-config events live on the resource, not the cluster.
-	for _, ev := range rec.events {
-		if ev.reason != "ConfigTypeAnnotationDefault" {
-			continue
-		}
-		if _, ok := ev.object.(*v1alpha1.IdentityServerCluster); ok {
-			t.Errorf("ConfigTypeAnnotationDefault must not land on the cluster CR; got %+v", ev)
-		}
-	}
-
-	// Deliberate exclusion: this failure doesn't affect mount behaviour
-	// (read-time defaulting picks base), so it stays out of status.
-	for _, issue := range cluster.Status.ManagedResourceIssues {
-		if issue.Reason == "ConfigTypeAnnotationDefault" {
-			t.Errorf("ConfigTypeAnnotationDefault must NOT appear in status.managedResourceIssues; got %+v", issue)
-		}
-	}
-	if cluster.Status.ManagedResourceIssueCount != len(cluster.Status.ManagedResourceIssues) {
-		t.Errorf("count denormalized: count=%d len=%d",
-			cluster.Status.ManagedResourceIssueCount, len(cluster.Status.ManagedResourceIssues))
-	}
-}
-
-func TestEnsureManagedConfigDiscovery_DefaultConfigTypeAnnotationsFailure_OneBadDoesNotBlockOthers(t *testing.T) {
-	// One CM whose Update fails must not block defaulting on the next CM.
-	// Pre-fix the function returned on first failure; this regression-guards
-	// the "continue past per-resource failure" behavior.
-	ctx := context.Background()
-	s := newScheme(t)
-	if err := v1alpha1.AddToScheme(s); err != nil {
-		t.Fatalf("adding v1alpha1 to scheme: %v", err)
-	}
-	cluster := &v1alpha1.IdentityServerCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "this", Namespace: "ns"},
-	}
-	// Two CMs — 'a-bad' fails Update, 'b-good' succeeds.
-	cmBad := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "a-bad", Namespace: "ns",
-			Labels: map[string]string{LabelManagedConfig: "true"},
-		},
-	}
-	cmGood := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "b-good", Namespace: "ns",
-			Labels: map[string]string{LabelManagedConfig: "true"},
-		},
-	}
-	c := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(cluster, cmBad, cmGood).
-		WithStatusSubresource(&v1alpha1.IdentityServerCluster{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(ctx context.Context, client client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				if cm, ok := obj.(*corev1.ConfigMap); ok && cm.Name == "a-bad" {
-					return errors.New("forbidden on a-bad")
-				}
-				return client.Update(ctx, obj, opts...)
-			},
-		}).
-		Build()
 	rec := &capturingRecorder{}
 	r := &IdentityServerClusterReconciler{
 		Client:   c,
@@ -572,83 +476,32 @@ func TestEnsureManagedConfigDiscovery_DefaultConfigTypeAnnotationsFailure_OneBad
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// b-good must have been defaulted despite a-bad's failure.
-	var liveGood corev1.ConfigMap
-	if err := c.Get(ctx, client.ObjectKey{Name: "b-good", Namespace: "ns"}, &liveGood); err != nil {
-		t.Fatalf("re-fetch b-good: %v", err)
-	}
-	if liveGood.Annotations[AnnotationConfigType] != ConfigTypeBase {
-		t.Errorf("b-good must have been defaulted to %q despite a-bad's failure; got annotation = %q",
-			ConfigTypeBase, liveGood.Annotations[AnnotationConfigType])
+	if updates != 0 {
+		t.Errorf("expected zero CM writes from reconcile, got %d", updates)
 	}
 
-	// Exactly one event (on a-bad).
-	defaultEvents := 0
+	var live corev1.ConfigMap
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cm), &live); err != nil {
+		t.Fatalf("re-fetch cm: %v", err)
+	}
+	if v := live.Annotations[AnnotationConfigType]; v != "" {
+		t.Errorf("CM annotation must remain absent after reconcile; got %q", v)
+	}
+
+	if len(cluster.Status.ManagedResourceIssues) != 0 {
+		t.Errorf("expected empty ManagedResourceIssues, got %+v", cluster.Status.ManagedResourceIssues)
+	}
+	if cluster.Status.ManagedResourceIssueCount != 0 {
+		t.Errorf("expected ManagedResourceIssueCount=0, got %d", cluster.Status.ManagedResourceIssueCount)
+	}
+
 	for _, ev := range rec.events {
-		if ev.reason == "ConfigTypeAnnotationDefault" {
-			defaultEvents++
-			if cm, ok := ev.object.(*corev1.ConfigMap); !ok || cm.Name != "a-bad" {
-				t.Errorf("event on wrong resource: %T %+v", ev.object, ev.object)
-			}
-		}
-	}
-	if defaultEvents != 1 {
-		t.Errorf("expected exactly 1 ConfigTypeAnnotationDefault event (on a-bad), got %d", defaultEvents)
-	}
-}
-
-func TestEnsureManagedConfigDiscovery_DefaultConfigTypeAnnotationsFailure_EmitsOnSecret(t *testing.T) {
-	// Same shape as the CM test, for Secrets — verifies the Kind disambiguator
-	// works when the failing resource is a Secret.
-	ctx := context.Background()
-	s := newScheme(t)
-	if err := v1alpha1.AddToScheme(s); err != nil {
-		t.Fatalf("adding v1alpha1 to scheme: %v", err)
-	}
-	cluster := &v1alpha1.IdentityServerCluster{
-		ObjectMeta: metav1.ObjectMeta{Name: "this", Namespace: "ns"},
-	}
-	sec := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "secret-forbidden", Namespace: "ns",
-			Labels: map[string]string{LabelManagedConfig: "true"},
-		},
-	}
-	c := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(cluster, sec).
-		WithStatusSubresource(&v1alpha1.IdentityServerCluster{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(ctx context.Context, client client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				if _, ok := obj.(*corev1.Secret); ok {
-					return errors.New("forbidden on secret update")
-				}
-				return client.Update(ctx, obj, opts...)
-			},
-		}).
-		Build()
-	rec := &capturingRecorder{}
-	r := &IdentityServerClusterReconciler{
-		Client:   c,
-		Scheme:   s,
-		Recorder: rec,
-	}
-
-	if err := r.ensureManagedConfigDiscovery(ctx, cluster); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	found := false
-	for _, ev := range rec.events {
-		if ev.reason != "ConfigTypeAnnotationDefault" {
+		if ev.eventtype != corev1.EventTypeWarning {
 			continue
 		}
-		if evSec, ok := ev.object.(*corev1.Secret); ok && evSec.Name == "secret-forbidden" {
-			found = true
+		if evCM, ok := ev.object.(*corev1.ConfigMap); ok && evCM.Name == cm.Name {
+			t.Errorf("no Warning event expected on the user CM; got %+v", ev)
 		}
-	}
-	if !found {
-		t.Errorf("expected Warning ConfigTypeAnnotationDefault on Secret/secret-forbidden; got: %+v", rec.events)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func newScheme(t *testing.T) *runtime.Scheme {
@@ -262,63 +263,12 @@ func TestDiscoverConfigResources_EmptyNamespace(t *testing.T) {
 	}
 }
 
-// --- defaultConfigTypeAnnotations ---
+// --- discoverManagedResources non-mutation guarantee ---
 
-func TestDefaultConfigTypeAnnotations_SetsMissingAnnotation(t *testing.T) {
-	ctx := context.Background()
-	s := newScheme(t)
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "no-annotation",
-			Namespace: "ns",
-			Labels:    map[string]string{LabelManagedConfig: "true"},
-		},
-		Data: map[string]string{"config.xml": "<config/>"},
-	}
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
-
-	if _, err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	var updated corev1.ConfigMap
-	if err := c.Get(ctx, client.ObjectKeyFromObject(cm), &updated); err != nil {
-		t.Fatalf("getting configmap: %v", err)
-	}
-	if updated.Annotations[AnnotationConfigType] != ConfigTypeBase {
-		t.Errorf("expected annotation %q=%q, got %q", AnnotationConfigType, ConfigTypeBase, updated.Annotations[AnnotationConfigType])
-	}
-}
-
-func TestDefaultConfigTypeAnnotations_SkipsExistingAnnotation(t *testing.T) {
-	ctx := context.Background()
-	s := newScheme(t)
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "has-annotation",
-			Namespace: "ns",
-			Labels:    map[string]string{LabelManagedConfig: "true"},
-			Annotations: map[string]string{
-				AnnotationConfigType: ConfigTypeLicense,
-			},
-		},
-	}
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
-
-	if _, err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	var updated corev1.ConfigMap
-	if err := c.Get(ctx, client.ObjectKeyFromObject(cm), &updated); err != nil {
-		t.Fatalf("getting configmap: %v", err)
-	}
-	if updated.Annotations[AnnotationConfigType] != ConfigTypeLicense {
-		t.Errorf("expected annotation unchanged at %q, got %q", ConfigTypeLicense, updated.Annotations[AnnotationConfigType])
-	}
-}
-
-func TestDefaultConfigTypeAnnotations_SkipsClusterConfigSecret(t *testing.T) {
+// Operator-internal cluster-config Secrets are tagged
+// curity.io/component=cluster-config and must be excluded from discovery
+// even when (mistakenly) also tagged curity.io/managed=true.
+func TestDiscoverManagedResources_ExcludesClusterConfigSecretEvenWhenManaged(t *testing.T) {
 	ctx := context.Background()
 	s := newScheme(t)
 	sec := &corev1.Secret{
@@ -330,139 +280,97 @@ func TestDefaultConfigTypeAnnotations_SkipsClusterConfigSecret(t *testing.T) {
 				"curity.io/component": "cluster-config",
 			},
 		},
+		Data: map[string][]byte{"cluster.xml": []byte("<config/>")},
 	}
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(sec).Build()
 
-	if _, err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
+	configs, skipped, err := discoverManagedResources(ctx, c, "ns", "test-cluster")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	var updated corev1.Secret
-	if err := c.Get(ctx, client.ObjectKeyFromObject(sec), &updated); err != nil {
-		t.Fatalf("getting secret: %v", err)
+	if len(configs) != 0 {
+		t.Errorf("cluster-config Secret must be excluded from discovery, got %+v", configs)
 	}
-	if updated.Annotations != nil && updated.Annotations[AnnotationConfigType] != "" {
-		t.Errorf("cluster-config secret should not get annotation, got %q", updated.Annotations[AnnotationConfigType])
+	if len(skipped) != 0 {
+		t.Errorf("cluster-config Secret must not appear as a skipped (UnknownConfigType) resource, got %+v", skipped)
 	}
 }
 
-func TestDefaultConfigTypeAnnotations_NilAnnotationsMap(t *testing.T) {
+// Regression guard against re-introducing a writeback into discovery.
+func TestDiscoverManagedResources_DoesNotWriteAnnotation(t *testing.T) {
 	ctx := context.Background()
 	s := newScheme(t)
-	sec := &corev1.Secret{
+
+	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "nil-annotations",
+			Name:      "no-annotation-cm",
 			Namespace: "ns",
 			Labels:    map[string]string{LabelManagedConfig: "true"},
-			// Annotations is nil
 		},
+		Data: map[string]string{"x.xml": "<x/>"},
 	}
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(sec).Build()
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "no-annotation-secret",
+			Namespace: "ns",
+			Labels:    map[string]string{LabelManagedConfig: "true"},
+		},
+		Data: map[string][]byte{"k": []byte("v")},
+	}
 
-	if _, err := defaultConfigTypeAnnotations(ctx, c, "ns", "test-cluster"); err != nil {
+	updates := 0
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cm, sec).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				switch obj.(type) {
+				case *corev1.ConfigMap, *corev1.Secret:
+					updates++
+				}
+				return cl.Update(ctx, obj, opts...)
+			},
+			Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				switch obj.(type) {
+				case *corev1.ConfigMap, *corev1.Secret:
+					updates++
+				}
+				return cl.Patch(ctx, obj, patch, opts...)
+			},
+		}).Build()
+
+	configs, skipped, err := discoverManagedResources(ctx, c, "ns", "test-cluster")
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	var updated corev1.Secret
-	if err := c.Get(ctx, client.ObjectKeyFromObject(sec), &updated); err != nil {
-		t.Fatalf("getting secret: %v", err)
+	if updates != 0 {
+		t.Errorf("expected zero CM/Secret writes from discovery, got %d", updates)
 	}
-	if updated.Annotations[AnnotationConfigType] != ConfigTypeBase {
-		t.Errorf("expected annotation %q=%q on secret with nil annotations map, got %q",
-			AnnotationConfigType, ConfigTypeBase, updated.Annotations[AnnotationConfigType])
-	}
-}
-
-func TestDefaultConfigTypeAnnotations_EmptyNamespace(t *testing.T) {
-	ctx := context.Background()
-	s := newScheme(t)
-	c := fake.NewClientBuilder().WithScheme(s).Build()
-
-	if _, err := defaultConfigTypeAnnotations(ctx, c, "empty-ns", "test-cluster"); err != nil {
-		t.Fatalf("unexpected error for empty namespace: %v", err)
-	}
-}
-
-func TestDefaultConfigTypeAnnotations_OnlyAnnotatesOwnCluster(t *testing.T) {
-	// Race prevention: two clusters in the same namespace must not
-	// default-annotate each other's resources. Cluster A's reconcile should
-	// only set config-type on resources that apply to A (either annotated
-	// for A or without any scope annotation).
-	ctx := context.Background()
-	s := newScheme(t)
-
-	cmForA := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "cm-for-a", Namespace: "ns",
-			Labels:      map[string]string{LabelManagedConfig: "true"},
-			Annotations: map[string]string{AnnotationClusterScope: "cluster-a"},
-		},
-	}
-	cmForB := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "cm-for-b", Namespace: "ns",
-			Labels:      map[string]string{LabelManagedConfig: "true"},
-			Annotations: map[string]string{AnnotationClusterScope: "cluster-b"},
-		},
-	}
-	cmForAll := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "cm-for-all", Namespace: "ns",
-			Labels: map[string]string{LabelManagedConfig: "true"},
-			// No scope annotation — applies to every cluster.
-		},
-	}
-	secForB := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "sec-for-b", Namespace: "ns",
-			Labels:      map[string]string{LabelManagedConfig: "true"},
-			Annotations: map[string]string{AnnotationClusterScope: "cluster-b"},
-		},
-	}
-	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cmForA, cmForB, cmForAll, secForB).Build()
-
-	if _, err := defaultConfigTypeAnnotations(ctx, c, "ns", "cluster-a"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if len(skipped) != 0 {
+		t.Errorf("expected no skipped resources, got %+v", skipped)
 	}
 
-	// cm-for-a: must be annotated (in scope for cluster-a).
-	var updatedA corev1.ConfigMap
-	if err := c.Get(ctx, client.ObjectKeyFromObject(cmForA), &updatedA); err != nil {
-		t.Fatalf("getting cm-for-a: %v", err)
+	if len(configs) != 2 {
+		t.Fatalf("expected 2 discovered configs, got %d (%+v)", len(configs), configs)
 	}
-	if updatedA.Annotations[AnnotationConfigType] != ConfigTypeBase {
-		t.Errorf("cm-for-a: expected annotation %q=%q, got %q",
-			AnnotationConfigType, ConfigTypeBase, updatedA.Annotations[AnnotationConfigType])
-	}
-
-	// cm-for-all: must be annotated (applies to all clusters).
-	var updatedAll corev1.ConfigMap
-	if err := c.Get(ctx, client.ObjectKeyFromObject(cmForAll), &updatedAll); err != nil {
-		t.Fatalf("getting cm-for-all: %v", err)
-	}
-	if updatedAll.Annotations[AnnotationConfigType] != ConfigTypeBase {
-		t.Errorf("cm-for-all: expected annotation %q=%q, got %q",
-			AnnotationConfigType, ConfigTypeBase, updatedAll.Annotations[AnnotationConfigType])
+	for _, cfg := range configs {
+		if cfg.ConfigType != ConfigTypeBase {
+			t.Errorf("config %q: expected ConfigType=%q (read-time default), got %q",
+				cfg.Name, ConfigTypeBase, cfg.ConfigType)
+		}
 	}
 
-	// cm-for-b: must NOT be annotated (out of scope for cluster-a — race prevention).
-	var updatedB corev1.ConfigMap
-	if err := c.Get(ctx, client.ObjectKeyFromObject(cmForB), &updatedB); err != nil {
-		t.Fatalf("getting cm-for-b: %v", err)
+	var liveCM corev1.ConfigMap
+	if err := c.Get(ctx, client.ObjectKeyFromObject(cm), &liveCM); err != nil {
+		t.Fatalf("get cm: %v", err)
 	}
-	if updatedB.Annotations[AnnotationConfigType] != "" {
-		t.Errorf("cm-for-b must not be annotated by cluster-a, got %q",
-			updatedB.Annotations[AnnotationConfigType])
+	if v := liveCM.Annotations[AnnotationConfigType]; v != "" {
+		t.Errorf("CM annotation must remain absent; got %q", v)
 	}
-
-	// sec-for-b: same — Secret branch must honor scope too.
-	var updatedSecB corev1.Secret
-	if err := c.Get(ctx, client.ObjectKeyFromObject(secForB), &updatedSecB); err != nil {
-		t.Fatalf("getting sec-for-b: %v", err)
+	var liveSec corev1.Secret
+	if err := c.Get(ctx, client.ObjectKeyFromObject(sec), &liveSec); err != nil {
+		t.Fatalf("get secret: %v", err)
 	}
-	if updatedSecB.Annotations[AnnotationConfigType] != "" {
-		t.Errorf("sec-for-b must not be annotated by cluster-a, got %q",
-			updatedSecB.Annotations[AnnotationConfigType])
+	if v := liveSec.Annotations[AnnotationConfigType]; v != "" {
+		t.Errorf("Secret annotation must remain absent; got %q", v)
 	}
 }
 

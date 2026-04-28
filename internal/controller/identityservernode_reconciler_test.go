@@ -3159,18 +3159,17 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 	})
 
 	Context("Managed config discovery", func() {
-		It("should default config-type annotation on managed resources", func() {
+		It("should not write the config-type annotation onto managed resources", func() {
 			testCreateCluster(ns, "val-cluster")
 			testCreateManagedConfigMap(ns, "no-type-config", map[string]string{"x.xml": "<x/>"}, nil)
 
-			// Cluster reconciler should default the annotation
 			cm := &corev1.ConfigMap{}
-			Eventually(func() string {
+			Consistently(func() string {
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "no-type-config", Namespace: ns}, cm); err != nil {
 					return ""
 				}
 				return cm.Annotations["curity.io/config-type"]
-			}, timeout, interval).Should(Equal("base"))
+			}, 5*time.Second, interval).Should(BeEmpty())
 		})
 
 		It("should emit DuplicateConfigKey warning on each colliding ConfigMap (not the cluster)", func() {

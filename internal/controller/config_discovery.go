@@ -24,14 +24,13 @@ const (
 // Event reasons surfaced on managed ConfigMaps/Secrets (or the cluster CR
 // for operator-level scan failures).
 const (
-	EventReasonEmptyClusterScope           = "EmptyClusterScope"
-	EventReasonUnknownClusterInScope       = "UnknownClusterInScope"
-	EventReasonUnknownConfigType           = "UnknownConfigType"
-	EventReasonDuplicateConfigKey          = "DuplicateConfigKey"
-	EventReasonConfigTypeAnnotationDefault = "ConfigTypeAnnotationDefault"
-	EventReasonScanFailed                  = "ScanFailed"
-	EventReasonLoggingConfigInvalid        = "LoggingConfigInvalid"
-	EventReasonDuplicateLoggingConfig      = "DuplicateLoggingConfig"
+	EventReasonEmptyClusterScope      = "EmptyClusterScope"
+	EventReasonUnknownClusterInScope  = "UnknownClusterInScope"
+	EventReasonUnknownConfigType      = "UnknownConfigType"
+	EventReasonDuplicateConfigKey     = "DuplicateConfigKey"
+	EventReasonScanFailed             = "ScanFailed"
+	EventReasonLoggingConfigInvalid   = "LoggingConfigInvalid"
+	EventReasonDuplicateLoggingConfig = "DuplicateLoggingConfig"
 )
 
 // Config type values matching the README.
@@ -211,81 +210,6 @@ func discoverManagedResources(ctx context.Context, c client.Client, namespace, c
 	})
 
 	return result, skipped, nil
-}
-
-// DefaultConfigTypeFailure records a single failed write of the default
-// curity.io/config-type annotation. Object is used as Event involvedObject;
-// Err drives IsConflict-aware severity in the caller.
-type DefaultConfigTypeFailure struct {
-	Object client.Object
-	Kind   string // "ConfigMap" or "Secret"
-	Name   string
-	Err    error
-}
-
-// defaultConfigTypeAnnotations writes the curity.io/config-type annotation on
-// managed ConfigMaps/Secrets when absent, so users can see the effective type.
-// Only resources applying to clusterName are considered, so two clusters in the
-// same namespace do not race to default-annotate each other's resources.
-//
-// Per-resource Update failures are collected and returned; only hard List
-// failures bubble up. Callers must surface per-resource failures themselves.
-func defaultConfigTypeAnnotations(ctx context.Context, c client.Client, namespace, clusterName string) ([]DefaultConfigTypeFailure, error) {
-	managedLabel := client.MatchingLabels{LabelManagedConfig: "true"}
-	var failures []DefaultConfigTypeFailure
-
-	var configMaps corev1.ConfigMapList
-	if err := c.List(ctx, &configMaps, client.InNamespace(namespace), managedLabel); err != nil {
-		return nil, fmt.Errorf("listing managed ConfigMaps: %w", err)
-	}
-	for i := range configMaps.Items {
-		cm := &configMaps.Items[i]
-		if !appliesToCluster(cm.Annotations, clusterName) {
-			continue
-		}
-		if cm.Annotations[AnnotationConfigType] != "" {
-			continue
-		}
-		if cm.Annotations == nil {
-			cm.Annotations = make(map[string]string)
-		}
-		cm.Annotations[AnnotationConfigType] = ConfigTypeBase
-		if err := c.Update(ctx, cm); err != nil {
-			failures = append(failures, DefaultConfigTypeFailure{
-				Object: cm, Kind: "ConfigMap", Name: cm.Name, Err: err,
-			})
-			continue
-		}
-	}
-
-	var secrets corev1.SecretList
-	if err := c.List(ctx, &secrets, client.InNamespace(namespace), managedLabel); err != nil {
-		return failures, fmt.Errorf("listing managed Secrets: %w", err)
-	}
-	for i := range secrets.Items {
-		s := &secrets.Items[i]
-		if s.Labels["curity.io/component"] == "cluster-config" {
-			continue
-		}
-		if !appliesToCluster(s.Annotations, clusterName) {
-			continue
-		}
-		if s.Annotations[AnnotationConfigType] != "" {
-			continue
-		}
-		if s.Annotations == nil {
-			s.Annotations = make(map[string]string)
-		}
-		s.Annotations[AnnotationConfigType] = ConfigTypeBase
-		if err := c.Update(ctx, s); err != nil {
-			failures = append(failures, DefaultConfigTypeFailure{
-				Object: s, Kind: "Secret", Name: s.Name, Err: err,
-			})
-			continue
-		}
-	}
-
-	return failures, nil
 }
 
 // formatUnknownClusterMessage returns the byte-stable UnknownClusterInScope

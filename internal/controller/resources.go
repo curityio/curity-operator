@@ -342,9 +342,21 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 
 	// Discovered config volumes.
 	for _, cfg := range configs {
-		volName := configVolumeName(cfg.IsSecret, cfg.Name)
-		mountBase := mountPathForConfigType(cfg.ConfigType)
+		mountPath, isLeaf := mountPathForConfigType(cfg.ConfigType)
 
+		keys := make([]string, 0, len(cfg.Data))
+		for k := range cfg.Data {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		// applyLoggingValidations guarantees len(keys)==1 for leaf mounts;
+		// skip the entire volume if a malformed resource ever reaches here.
+		if isLeaf && len(keys) != 1 {
+			continue
+		}
+
+		volName := configVolumeName(cfg.IsSecret, cfg.Name)
 		if cfg.IsSecret {
 			volumes = append(volumes, corev1.Volume{
 				Name: volName,
@@ -365,16 +377,20 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 			})
 		}
 
-		// Mount each data key as a SubPath mount.
-		keys := make([]string, 0, len(cfg.Data))
-		for k := range cfg.Data {
-			keys = append(keys, k)
+		if isLeaf {
+			mounts = append(mounts, corev1.VolumeMount{
+				Name:      volName,
+				MountPath: mountPath,
+				SubPath:   keys[0],
+				ReadOnly:  true,
+			})
+			continue
 		}
-		sort.Strings(keys)
+
 		for _, key := range keys {
 			mounts = append(mounts, corev1.VolumeMount{
 				Name:      volName,
-				MountPath: mountBase + mountFilename(cfg.IsSecret, cfg.Name, key),
+				MountPath: mountPath + mountFilename(cfg.IsSecret, cfg.Name, key),
 				SubPath:   key,
 				ReadOnly:  true,
 			})

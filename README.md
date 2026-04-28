@@ -232,7 +232,7 @@ data:
 
 ### Config Types
 
-Set the `curity.io/config-type` annotation to control where configs are mounted. If omitted, the operator defaults it to `base`.
+Set the `curity.io/config-type` annotation to control where configs are mounted. If omitted, it is treated as `base`. The operator does not modify the annotation.
 
 | Type | Annotation Value | Mount Path |
 |---|---|---|

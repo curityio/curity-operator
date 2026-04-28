@@ -47,7 +47,7 @@ type IdentityServerClusterReconciler struct {
 // +kubebuilder:rbac:groups=curity.io,resources=identityserverclusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=curity.io,resources=identityservernodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;update
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -302,12 +302,12 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 		).
 		Watches(
 			&corev1.ConfigMap{},
-			newManagedConfigHandler(r.findClustersForManagedConfig),
+			newClusterManagedConfigHandler(r.findClustersForManagedConfig),
 			builder.WithPredicates(managedConfigPredicate{}),
 		).
 		Watches(
 			&corev1.Secret{},
-			newManagedConfigHandler(r.findClustersForManagedConfig),
+			newClusterManagedConfigHandler(r.findClustersForManagedConfig),
 			builder.WithPredicates(managedConfigPredicate{}),
 		).
 		Complete(r)
@@ -755,7 +755,7 @@ func (r *IdentityServerClusterReconciler) readJobPodLogs(ctx context.Context, jo
 	return nil, fmt.Errorf("no succeeded pod found for Job %s", job.Name)
 }
 
-// --- Managed config discovery (defaulting, scope-issue surfacing, discovery) ---
+// --- Managed config discovery (scope-issue surfacing, discovery) ---
 
 // ensureManagedConfigDiscovery emits per-resource Warning Events for managed
 // CM/Secret problems and populates status.managedResourceIssues with the
@@ -776,30 +776,6 @@ func (r *IdentityServerClusterReconciler) ensureManagedConfigDiscovery(ctx conte
 		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, EventReasonScanFailed,
 			"Failed to scan managed ConfigMaps/Secrets; see operator logs for details")
 		scanFailedEmitted = true
-	}
-
-	failures, err := defaultConfigTypeAnnotations(ctx, r.Client, cluster.Namespace, cluster.Name)
-	if err != nil {
-		log.Error(err, "failed to list managed resources for config-type defaulting")
-		emitScanFailed()
-	}
-	for _, f := range failures {
-		// Conflicts self-heal on the next reconcile (user edited the CM
-		// concurrently); demote to V(1) so monitoring isn't poisoned.
-		if apierrors.IsConflict(f.Err) {
-			log.V(1).Info("config-type defaulting hit a conflict; will retry next reconcile",
-				"kind", f.Kind, "name", f.Name, "err", f.Err.Error())
-		} else {
-			log.Error(f.Err, "failed to default curity.io/config-type annotation",
-				"kind", f.Kind, "name", f.Name)
-		}
-		// Stable message bytes — keeps EventRecorder dedup tight on a
-		// persistent failure (e.g. Forbidden) instead of one event per retry.
-		r.Recorder.Eventf(f.Object, corev1.EventTypeWarning, EventReasonConfigTypeAnnotationDefault,
-			"Failed to default curity.io/config-type annotation; see operator logs for details")
-		// Deliberately NOT mirrored into status: read-time defaulting in
-		// resolveConfigType means the CM still mounts as base, so this
-		// failure doesn't affect mount behaviour.
 	}
 
 	if err := r.emitScopeAnnotationEvents(ctx, cluster); err != nil {

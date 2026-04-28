@@ -1668,18 +1668,22 @@ var _ = Describe("IdentityServerNode", func() {
 				})
 			})
 
-			Describe("Config type defaulting", Ordered, func() {
+			Describe("Config type defaulting (read-time only — operator does not write annotation)", Ordered, func() {
 				const ns = "e2e-cfg-type-default"
 				BeforeAll(func() { createNS(ns) })
 				AfterAll(func() { deleteNS(ns) })
 
-				It("should handle config type defaulting by cluster reconciler", func() {
+				It("treats absent annotation as base without writing it back", func() {
 					ctx := context.Background()
 
 					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
 						map[string]interface{}{"name": "cfg-td-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "cfg-td-runtime", "namespace": ns, "clusterName": "cfg-td-cluster"})
 
-					// Create ConfigMap WITHOUT config-type annotation
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cfg-td-cluster", "cfg-td-runtime"), Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
 					cm := &corev1.ConfigMap{
 						ObjectMeta: metav1.ObjectMeta{Name: "no-type-config", Namespace: ns,
 							Labels: map[string]string{"curity.io/managed": "true"}},
@@ -1687,14 +1691,20 @@ var _ = Describe("IdentityServerNode", func() {
 					}
 					Expect(k().Create(ctx, cm)).To(Succeed())
 
-					// Cluster reconciler should default the annotation
-					Eventually(func() string {
+					By("waiting for the operator to discover the unannotated CM and mount it as base")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cfg-td-cluster", "cfg-td-runtime"), Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-no-type-config")).To(BeTrue(), "unannotated CM should mount as base via read-time defaulting")
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("asserting the operator never writes curity.io/config-type back onto the source CM")
+					Consistently(func() string {
 						updated := &corev1.ConfigMap{}
 						if err := k().Get(ctx, client.ObjectKey{Name: "no-type-config", Namespace: ns}, updated); err != nil {
 							return ""
 						}
 						return updated.Annotations["curity.io/config-type"]
-					}, e2eTimeout, e2eInterval).Should(Equal("base"))
+					}, 10*time.Second, e2eInterval).Should(BeEmpty(), "operator must not write the curity.io/config-type annotation")
 				})
 			})
 

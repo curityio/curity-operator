@@ -5,6 +5,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllertest"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -212,4 +214,238 @@ func equalRequests(a, b []ctrl.Request) bool {
 		}
 	}
 	return true
+}
+
+type recordingSink struct {
+	infos []logEntry
+}
+
+type logEntry struct {
+	msg    string
+	fields map[string]any
+}
+
+func (s *recordingSink) Init(logr.RuntimeInfo)          {}
+func (s *recordingSink) Enabled(int) bool               { return true }
+func (s *recordingSink) Error(error, string, ...any)    {}
+func (s *recordingSink) WithName(string) logr.LogSink   { return s }
+func (s *recordingSink) WithValues(...any) logr.LogSink { return s }
+func (s *recordingSink) Info(_ int, msg string, kv ...any) {
+	fields := map[string]any{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		k, _ := kv[i].(string)
+		fields[k] = kv[i+1]
+	}
+	s.infos = append(s.infos, logEntry{msg: msg, fields: fields})
+}
+
+func ctxWithSink() (context.Context, *recordingSink) {
+	sink := &recordingSink{}
+	return logf.IntoContext(context.Background(), logr.New(sink)), sink
+}
+
+func countLogs(entries []logEntry, msg string) int {
+	n := 0
+	for _, e := range entries {
+		if e.msg == msg {
+			n++
+		}
+	}
+	return n
+}
+
+func findLog(entries []logEntry, msg string) logEntry {
+	for _, e := range entries {
+		if e.msg == msg {
+			return e
+		}
+	}
+	return logEntry{}
+}
+
+func handlerTestCM(name string, annotations map[string]string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   "ns",
+			Labels:      map[string]string{LabelManagedConfig: "true"},
+			Annotations: annotations,
+		},
+	}
+}
+
+func handlerTestSecret(name string, annotations map[string]string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   "ns",
+			Labels:      map[string]string{LabelManagedConfig: "true"},
+			Annotations: annotations,
+		},
+	}
+}
+
+func TestClusterManagedConfigHandler_LogsOnCreateOfUnannotatedCM(t *testing.T) {
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	h.Create(ctx, event.CreateEvent{Object: handlerTestCM("cm-bare", nil)}, newTestQueue())
+
+	if got := countLogs(sink.infos, implicitConfigTypeLogMsg); got != 1 {
+		t.Fatalf("expected 1 log on Create, got %d (entries=%+v)", got, sink.infos)
+	}
+	e := findLog(sink.infos, implicitConfigTypeLogMsg)
+	if e.fields["kind"] != "ConfigMap" || e.fields["name"] != "cm-bare" || e.fields["namespace"] != "ns" {
+		t.Errorf("unexpected log fields: %+v", e.fields)
+	}
+}
+
+func TestClusterManagedConfigHandler_LogsOnCreateOfUnannotatedSecret(t *testing.T) {
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	h.Create(ctx, event.CreateEvent{Object: handlerTestSecret("sec-bare", nil)}, newTestQueue())
+
+	e := findLog(sink.infos, implicitConfigTypeLogMsg)
+	if e.fields["kind"] != "Secret" {
+		t.Errorf("expected kind=Secret in log fields, got %+v", e.fields)
+	}
+}
+
+func TestClusterManagedConfigHandler_NoLog_WhenAnnotationExplicitlyBase(t *testing.T) {
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	h.Create(ctx, event.CreateEvent{
+		Object: handlerTestCM("cm-base", map[string]string{AnnotationConfigType: ConfigTypeBase}),
+	}, newTestQueue())
+
+	if got := countLogs(sink.infos, implicitConfigTypeLogMsg); got != 0 {
+		t.Errorf("expected zero logs when annotation set explicitly, got %d", got)
+	}
+}
+
+func TestClusterManagedConfigHandler_NoLog_WhenAnnotationUnknownValue(t *testing.T) {
+	// Any non-empty annotation value suppresses the log; UnknownConfigType
+	// is surfaced separately by discovery.
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	h.Create(ctx, event.CreateEvent{
+		Object: handlerTestCM("cm-bogus", map[string]string{AnnotationConfigType: "bogus"}),
+	}, newTestQueue())
+
+	if got := countLogs(sink.infos, implicitConfigTypeLogMsg); got != 0 {
+		t.Errorf("expected zero logs for unknown annotation value, got %d", got)
+	}
+}
+
+func TestClusterManagedConfigHandler_NoLog_OnDelete(t *testing.T) {
+	// Resource is being removed — logging "treating as base" would mislead.
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	h.Delete(ctx, event.DeleteEvent{Object: handlerTestCM("cm-bare", nil)}, newTestQueue())
+
+	if got := countLogs(sink.infos, implicitConfigTypeLogMsg); got != 0 {
+		t.Errorf("expected zero logs on Delete, got %d", got)
+	}
+}
+
+func TestClusterManagedConfigHandler_LogsOnceOnUpdate_NewSideOnly(t *testing.T) {
+	// Inner handler invokes the mapper twice on Update (old + new union);
+	// the wrapper must not log twice.
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	old := handlerTestCM("cm-bare", nil)
+	new := handlerTestCM("cm-bare", nil)
+	h.Update(ctx, event.UpdateEvent{ObjectOld: old, ObjectNew: new}, newTestQueue())
+
+	if got := countLogs(sink.infos, implicitConfigTypeLogMsg); got != 1 {
+		t.Fatalf("expected exactly 1 log per Update event (new-side only), got %d (entries=%+v)", got, sink.infos)
+	}
+}
+
+func TestClusterManagedConfigHandler_NoLog_OnUpdateWhenNewSideHasAnnotation(t *testing.T) {
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	old := handlerTestCM("cm", nil)
+	new := handlerTestCM("cm", map[string]string{AnnotationConfigType: ConfigTypeBase})
+	h.Update(ctx, event.UpdateEvent{ObjectOld: old, ObjectNew: new}, newTestQueue())
+
+	if got := countLogs(sink.infos, implicitConfigTypeLogMsg); got != 0 {
+		t.Errorf("expected zero logs when new-side annotation is set, got %d", got)
+	}
+}
+
+func TestClusterManagedConfigHandler_NoLog_OnUpdateLabelRemoval(t *testing.T) {
+	// Predicate lets the Update through because old had the label; the new
+	// side is no longer managed, so the log must not fire.
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	old := handlerTestCM("cm", nil)
+	new := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm", Namespace: "ns"}}
+	h.Update(ctx, event.UpdateEvent{ObjectOld: old, ObjectNew: new}, newTestQueue())
+
+	if got := countLogs(sink.infos, implicitConfigTypeLogMsg); got != 0 {
+		t.Errorf("expected zero logs on label-removal Update, got %d", got)
+	}
+}
+
+func TestClusterManagedConfigHandler_PerEventCount_TwoEventsTwoLogs(t *testing.T) {
+	// Locks event-driven semantics against any future per-UID memoization.
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	obj := handlerTestCM("cm-bare", nil)
+	h.Create(ctx, event.CreateEvent{Object: obj}, newTestQueue())
+	h.Create(ctx, event.CreateEvent{Object: obj}, newTestQueue())
+
+	if got := countLogs(sink.infos, implicitConfigTypeLogMsg); got != 2 {
+		t.Errorf("expected 2 logs (one per event), got %d", got)
+	}
+}
+
+func TestClusterManagedConfigHandler_NoLog_WhenUnlabeled(t *testing.T) {
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	h.Create(ctx, event.CreateEvent{
+		Object: &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "unlabeled", Namespace: "ns"}},
+	}, newTestQueue())
+
+	if got := countLogs(sink.infos, implicitConfigTypeLogMsg); got != 0 {
+		t.Errorf("unlabeled CM must not trigger the log, got %d", got)
+	}
+}
+
+func TestClusterManagedConfigHandler_LogsOnCreateWithNilAnnotationsMap(t *testing.T) {
+	ctx, sink := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(nil))
+
+	h.Create(ctx, event.CreateEvent{Object: handlerTestCM("cm-nil", nil)}, newTestQueue())
+
+	if got := countLogs(sink.infos, implicitConfigTypeLogMsg); got != 1 {
+		t.Errorf("nil annotations should still log once, got %d", got)
+	}
+}
+
+func TestClusterManagedConfigHandler_DelegatesRequestMapping(t *testing.T) {
+	// Adding the log side-effect must not break cluster-scope dispatch.
+	ctx, _ := ctxWithSink()
+	h := newClusterManagedConfigHandler(mapByName(map[string][]ctrl.Request{
+		"cm-bare": {req("ns", "cluster-a")},
+	}))
+	q := newTestQueue()
+
+	h.Create(ctx, event.CreateEvent{Object: handlerTestCM("cm-bare", nil)}, q)
+
+	got := drainQueue(q)
+	want := []ctrl.Request{req("ns", "cluster-a")}
+	if !equalRequests(got, want) {
+		t.Errorf("delegation broke: got %v want %v", got, want)
+	}
 }

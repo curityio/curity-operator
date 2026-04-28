@@ -30,19 +30,24 @@ const (
 	EventReasonDuplicateConfigKey          = "DuplicateConfigKey"
 	EventReasonConfigTypeAnnotationDefault = "ConfigTypeAnnotationDefault"
 	EventReasonScanFailed                  = "ScanFailed"
+	EventReasonLoggingConfigInvalid        = "LoggingConfigInvalid"
+	EventReasonDuplicateLoggingConfig      = "DuplicateLoggingConfig"
 )
 
 // Config type values matching the README.
 const (
 	ConfigTypeBase    = "base"
 	ConfigTypeLicense = "license"
+	ConfigTypeLogging = "logging"
 )
 
-// Mount paths per config type.
 const (
 	MountPathBase    = "/opt/idsvr/etc/init/"
 	MountPathLicense = "/opt/idsvr/etc/init/license/"
+	MountPathLogging = "/opt/idsvr/etc/log4j2.xml"
 )
+
+const LoggingDataKey = "log4j2.xml"
 
 // Volume name prefixes to avoid collisions with cluster-config.
 const (
@@ -396,23 +401,35 @@ func resolveConfigType(annotations map[string]string) (string, error) {
 		return ConfigTypeBase, nil
 	case ConfigTypeLicense:
 		return ConfigTypeLicense, nil
+	case ConfigTypeLogging:
+		return ConfigTypeLogging, nil
 	default:
-		return "", fmt.Errorf("%w: %q (valid: %q, %q)", ErrUnknownConfigType, val, ConfigTypeBase, ConfigTypeLicense)
+		return "", fmt.Errorf("%w: %q (valid: %q, %q, %q)",
+			ErrUnknownConfigType, val, ConfigTypeBase, ConfigTypeLicense, ConfigTypeLogging)
 	}
 }
 
-// mountPathForConfigType returns the mount base path for the given config type.
-func mountPathForConfigType(configType string) string {
-	if configType == ConfigTypeLicense {
-		return MountPathLicense
+// mountPathForConfigType returns the mount path and whether it is a single-
+// file leaf (logging) or a directory base shared by per-key mangled filenames
+// (base, license).
+func mountPathForConfigType(configType string) (path string, isLeaf bool) {
+	switch configType {
+	case ConfigTypeLicense:
+		return MountPathLicense, false
+	case ConfigTypeLogging:
+		return MountPathLogging, true
+	default:
+		return MountPathBase, false
 	}
-	return MountPathBase
 }
 
-// shouldMountConfig determines whether a node should receive discovered configs.
-// When an admin node exists, only admin gets configs (it distributes to runtimes
-// via the Curity clustering protocol). Without an admin, all nodes get configs.
-func shouldMountConfig(nodeType v1alpha1.NodeType, adminExists bool) bool {
+// shouldMountConfig returns whether a node should receive a config of the
+// given type. Logging mounts on every node regardless; base and license
+// follow the admin-distributes pattern (admin-only when an admin exists).
+func shouldMountConfig(nodeType v1alpha1.NodeType, adminExists bool, configType string) bool {
+	if configType == ConfigTypeLogging {
+		return true
+	}
 	if !adminExists {
 		return true
 	}
@@ -532,6 +549,11 @@ func detectDuplicateKeys(configs []DiscoveredManagedResource) []DuplicateKeyWarn
 	}
 	seen := make(map[mountKey][]DuplicateKeyOwner)
 	for _, cfg := range configs {
+		// Logging duplicates are reported via DuplicateLoggingConfig; skip
+		// here so the same root cause isn't surfaced twice.
+		if cfg.ConfigType == ConfigTypeLogging {
+			continue
+		}
 		kind := "ConfigMap"
 		if cfg.IsSecret {
 			kind = "Secret"
@@ -567,6 +589,141 @@ func detectDuplicateKeys(configs []DiscoveredManagedResource) []DuplicateKeyWarn
 	}
 	sort.Slice(warnings, func(i, j int) bool { return warnings[i].Message < warnings[j].Message })
 	return warnings
+}
+
+// validateLoggingResource enforces: exactly one data key named LoggingDataKey
+// (case-sensitive). The byte-stable message goes into Events and status
+// issues, so changes here affect Event dedup.
+func validateLoggingResource(cfg DiscoveredManagedResource) (message string, ok bool) {
+	keys := make([]string, 0, len(cfg.Data))
+	for k := range cfg.Data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	if len(keys) == 1 && keys[0] == LoggingDataKey {
+		return "", true
+	}
+	return fmt.Sprintf(
+		"Logging-typed resource must have exactly one data key named %q; got %d keys: %v",
+		LoggingDataKey, len(keys), keys,
+	), false
+}
+
+type DuplicateLoggingOwner struct {
+	Kind   string
+	Name   string
+	Object client.Object
+}
+
+// detectDuplicateLoggingConfigs returns all logging-typed resources sorted
+// by (Kind, Name) when more than one is present, or nil when ≤ 1.
+// Picking one arbitrarily would surprise the user; the caller drops them all.
+func detectDuplicateLoggingConfigs(configs []DiscoveredManagedResource) []DuplicateLoggingOwner {
+	owners := make([]DuplicateLoggingOwner, 0)
+	for _, cfg := range configs {
+		if cfg.ConfigType != ConfigTypeLogging {
+			continue
+		}
+		kind := "ConfigMap"
+		if cfg.IsSecret {
+			kind = "Secret"
+		}
+		owners = append(owners, DuplicateLoggingOwner{
+			Kind:   kind,
+			Name:   cfg.Name,
+			Object: cfg.Object,
+		})
+	}
+	if len(owners) <= 1 {
+		return nil
+	}
+	sort.Slice(owners, func(i, j int) bool {
+		if owners[i].Kind != owners[j].Kind {
+			return owners[i].Kind < owners[j].Kind
+		}
+		return owners[i].Name < owners[j].Name
+	})
+	return owners
+}
+
+type LoggingValidationIssue struct {
+	Kind        string
+	Name        string
+	Object      client.Object
+	EventReason string
+	Message     string
+}
+
+// applyLoggingValidations returns configs with invalid and duplicate
+// logging resources removed plus the issues to surface. Called by both
+// reconcilers so the mount set and the surfaced issues stay in sync.
+func applyLoggingValidations(configs []DiscoveredManagedResource) ([]DiscoveredManagedResource, []LoggingValidationIssue) {
+	issues := make([]LoggingValidationIssue, 0)
+
+	valid := make([]DiscoveredManagedResource, 0, len(configs))
+	for _, cfg := range configs {
+		if cfg.ConfigType != ConfigTypeLogging {
+			valid = append(valid, cfg)
+			continue
+		}
+		if msg, ok := validateLoggingResource(cfg); !ok {
+			kind := "ConfigMap"
+			if cfg.IsSecret {
+				kind = "Secret"
+			}
+			issues = append(issues, LoggingValidationIssue{
+				Kind:        kind,
+				Name:        cfg.Name,
+				Object:      cfg.Object,
+				EventReason: EventReasonLoggingConfigInvalid,
+				Message:     msg,
+			})
+			continue
+		}
+		valid = append(valid, cfg)
+	}
+
+	dups := detectDuplicateLoggingConfigs(valid)
+	if dups == nil {
+		return valid, issues
+	}
+
+	names := make([]string, len(dups))
+	for i, d := range dups {
+		names[i] = d.Kind + "/" + d.Name
+	}
+	msg := fmt.Sprintf(
+		"Cluster has %d applicable logging-typed resources: %v. None will be mounted; remove or scope all but one.",
+		len(dups), names,
+	)
+	dupSet := make(map[string]struct{}, len(dups))
+	for _, d := range dups {
+		dupSet[d.Kind+"/"+d.Name] = struct{}{}
+		issues = append(issues, LoggingValidationIssue{
+			Kind:        d.Kind,
+			Name:        d.Name,
+			Object:      d.Object,
+			EventReason: EventReasonDuplicateLoggingConfig,
+			Message:     msg,
+		})
+	}
+	filtered := make([]DiscoveredManagedResource, 0, len(valid)-len(dups))
+	for _, cfg := range valid {
+		if cfg.ConfigType != ConfigTypeLogging {
+			filtered = append(filtered, cfg)
+			continue
+		}
+		kind := "ConfigMap"
+		if cfg.IsSecret {
+			kind = "Secret"
+		}
+		if _, isDup := dupSet[kind+"/"+cfg.Name]; isDup {
+			continue
+		}
+		filtered = append(filtered, cfg)
+	}
+	return filtered, issues
 }
 
 // buildAppliedManagedResources creates the status slice for discovered

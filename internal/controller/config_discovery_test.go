@@ -469,46 +469,86 @@ func TestDefaultConfigTypeAnnotations_OnlyAnnotatesOwnCluster(t *testing.T) {
 // --- mountPathForConfigType ---
 
 func TestMountPathForConfigType_Base(t *testing.T) {
-	if got := mountPathForConfigType(ConfigTypeBase); got != MountPathBase {
+	got, isLeaf := mountPathForConfigType(ConfigTypeBase)
+	if got != MountPathBase {
 		t.Errorf("expected %q, got %q", MountPathBase, got)
+	}
+	if isLeaf {
+		t.Error("base is a directory mount-base, not leaf")
 	}
 }
 
 func TestMountPathForConfigType_License(t *testing.T) {
-	if got := mountPathForConfigType(ConfigTypeLicense); got != MountPathLicense {
+	got, isLeaf := mountPathForConfigType(ConfigTypeLicense)
+	if got != MountPathLicense {
 		t.Errorf("expected %q, got %q", MountPathLicense, got)
+	}
+	if isLeaf {
+		t.Error("license is a directory mount-base, not leaf")
+	}
+}
+
+func TestMountPathForConfigType_Logging(t *testing.T) {
+	got, isLeaf := mountPathForConfigType(ConfigTypeLogging)
+	if got != MountPathLogging {
+		t.Errorf("expected %q, got %q", MountPathLogging, got)
+	}
+	if !isLeaf {
+		t.Error("logging is a leaf path (single-file mount), not directory base")
 	}
 }
 
 func TestMountPathForConfigType_DefaultsToBase(t *testing.T) {
-	if got := mountPathForConfigType("something-unknown"); got != MountPathBase {
+	got, isLeaf := mountPathForConfigType("something-unknown")
+	if got != MountPathBase {
 		t.Errorf("expected %q for unknown type, got %q", MountPathBase, got)
+	}
+	if isLeaf {
+		t.Error("unknown should fall back to directory base, not leaf")
 	}
 }
 
 // --- shouldMountConfig ---
 
 func TestShouldMountConfig_AdminWithAdminExists(t *testing.T) {
-	if !shouldMountConfig(v1alpha1.NodeTypeAdmin, true) {
-		t.Error("expected true: admin node should mount when admin exists")
+	if !shouldMountConfig(v1alpha1.NodeTypeAdmin, true, ConfigTypeBase) {
+		t.Error("expected true: admin node should mount base config when admin exists")
 	}
 }
 
 func TestShouldMountConfig_RuntimeWithAdminExists(t *testing.T) {
-	if shouldMountConfig(v1alpha1.NodeTypeRuntime, true) {
-		t.Error("expected false: runtime should not mount when admin exists")
+	if shouldMountConfig(v1alpha1.NodeTypeRuntime, true, ConfigTypeBase) {
+		t.Error("expected false: runtime should not mount base config when admin exists")
 	}
 }
 
 func TestShouldMountConfig_AdminNoAdminExists(t *testing.T) {
-	if !shouldMountConfig(v1alpha1.NodeTypeAdmin, false) {
-		t.Error("expected true: admin node should mount when no admin exists")
+	if !shouldMountConfig(v1alpha1.NodeTypeAdmin, false, ConfigTypeBase) {
+		t.Error("expected true: admin node should mount base config when no admin exists")
 	}
 }
 
 func TestShouldMountConfig_RuntimeNoAdminExists(t *testing.T) {
-	if !shouldMountConfig(v1alpha1.NodeTypeRuntime, false) {
-		t.Error("expected true: runtime should mount when no admin exists")
+	if !shouldMountConfig(v1alpha1.NodeTypeRuntime, false, ConfigTypeBase) {
+		t.Error("expected true: runtime should mount base config when no admin exists")
+	}
+}
+
+func TestShouldMountConfig_LoggingMountsOnRuntimeWithAdminExists(t *testing.T) {
+	if !shouldMountConfig(v1alpha1.NodeTypeRuntime, true, ConfigTypeLogging) {
+		t.Error("expected true: logging is per-pod and must mount on runtime even when admin exists")
+	}
+}
+
+func TestShouldMountConfig_LoggingMountsOnAdminWithAdminExists(t *testing.T) {
+	if !shouldMountConfig(v1alpha1.NodeTypeAdmin, true, ConfigTypeLogging) {
+		t.Error("expected true: logging mounts on admin")
+	}
+}
+
+func TestShouldMountConfig_LicenseFollowsBasePattern(t *testing.T) {
+	if shouldMountConfig(v1alpha1.NodeTypeRuntime, true, ConfigTypeLicense) {
+		t.Error("expected false: license follows base admin-routing rule, not logging override")
 	}
 }
 
@@ -944,5 +984,312 @@ func TestDetectDuplicateKeys_MultipleDistinctDuplicates(t *testing.T) {
 	}
 	if !strings.Contains(warnings[1].Message, "y.xml") {
 		t.Errorf("second warning should be about y.xml, got: %s", warnings[1].Message)
+	}
+}
+
+func TestDetectDuplicateKeys_SkipsLoggingType(t *testing.T) {
+	// Two logging-typed CMs with the same data key would otherwise trip
+	// DuplicateConfigKey, double-reporting the same root cause that
+	// DuplicateLoggingConfig already surfaces. detectDuplicateKeys must
+	// skip logging configs to keep the issue count clean.
+	configs := []DiscoveredManagedResource{
+		{Name: "log-a", ConfigType: ConfigTypeLogging, Data: map[string][]byte{LoggingDataKey: []byte("<a/>")}},
+		{Name: "log-b", ConfigType: ConfigTypeLogging, Data: map[string][]byte{LoggingDataKey: []byte("<b/>")}},
+	}
+	if got := detectDuplicateKeys(configs); len(got) != 0 {
+		t.Errorf("expected zero DuplicateKeyWarnings for logging-typed duplicates; got %d: %v", len(got), got)
+	}
+}
+
+// --- resolveConfigType ---
+
+func TestResolveConfigType_EmptyDefaultsToBase(t *testing.T) {
+	got, err := resolveConfigType(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != ConfigTypeBase {
+		t.Errorf("expected %q, got %q", ConfigTypeBase, got)
+	}
+}
+
+func TestResolveConfigType_ExplicitBase(t *testing.T) {
+	got, err := resolveConfigType(map[string]string{AnnotationConfigType: "base"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != ConfigTypeBase {
+		t.Errorf("expected %q, got %q", ConfigTypeBase, got)
+	}
+}
+
+func TestResolveConfigType_License(t *testing.T) {
+	got, err := resolveConfigType(map[string]string{AnnotationConfigType: "license"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != ConfigTypeLicense {
+		t.Errorf("expected %q, got %q", ConfigTypeLicense, got)
+	}
+}
+
+func TestResolveConfigType_Logging(t *testing.T) {
+	got, err := resolveConfigType(map[string]string{AnnotationConfigType: "logging"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != ConfigTypeLogging {
+		t.Errorf("expected %q, got %q", ConfigTypeLogging, got)
+	}
+}
+
+func TestResolveConfigType_Unknown(t *testing.T) {
+	_, err := resolveConfigType(map[string]string{AnnotationConfigType: "Logging"}) // case-mismatched
+	if err == nil {
+		t.Fatal("expected error for case-mismatched type, got nil")
+	}
+}
+
+// --- validateLoggingResource ---
+
+func TestValidateLoggingResource_CorrectSingleKey(t *testing.T) {
+	cfg := DiscoveredManagedResource{
+		Name: "ok", ConfigType: ConfigTypeLogging,
+		Data: map[string][]byte{LoggingDataKey: []byte("<Configuration/>")},
+	}
+	if msg, ok := validateLoggingResource(cfg); !ok {
+		t.Errorf("expected valid, got: %s", msg)
+	}
+}
+
+func TestValidateLoggingResource_EmptyValueIsValid(t *testing.T) {
+	cfg := DiscoveredManagedResource{
+		Name: "ok", ConfigType: ConfigTypeLogging,
+		Data: map[string][]byte{LoggingDataKey: []byte("")},
+	}
+	if _, ok := validateLoggingResource(cfg); !ok {
+		t.Error("expected empty value to pass shape validation")
+	}
+}
+
+func TestValidateLoggingResource_ZeroKeys(t *testing.T) {
+	cfg := DiscoveredManagedResource{
+		Name: "empty", ConfigType: ConfigTypeLogging,
+		Data: map[string][]byte{},
+	}
+	msg, ok := validateLoggingResource(cfg)
+	if ok {
+		t.Fatal("expected zero keys to fail validation")
+	}
+	if !strings.Contains(msg, "0 keys") {
+		t.Errorf("message should mention 0 keys, got: %s", msg)
+	}
+}
+
+func TestValidateLoggingResource_WrongKeyName(t *testing.T) {
+	cfg := DiscoveredManagedResource{
+		Name: "wrong", ConfigType: ConfigTypeLogging,
+		Data: map[string][]byte{"config.xml": []byte("<Configuration/>")},
+	}
+	msg, ok := validateLoggingResource(cfg)
+	if ok {
+		t.Fatal("expected wrong key name to fail validation")
+	}
+	if !strings.Contains(msg, "config.xml") {
+		t.Errorf("message should name the wrong key, got: %s", msg)
+	}
+}
+
+func TestValidateLoggingResource_MultipleKeysIncludingLog4j2(t *testing.T) {
+	cfg := DiscoveredManagedResource{
+		Name: "extra", ConfigType: ConfigTypeLogging,
+		Data: map[string][]byte{
+			LoggingDataKey: []byte("<Configuration/>"),
+			"notes.txt":    []byte("hello"),
+		},
+	}
+	msg, ok := validateLoggingResource(cfg)
+	if ok {
+		t.Fatal("expected multiple keys to fail validation")
+	}
+	if !strings.Contains(msg, "2 keys") {
+		t.Errorf("message should mention 2 keys, got: %s", msg)
+	}
+}
+
+func TestValidateLoggingResource_MultipleKeysWithoutLog4j2(t *testing.T) {
+	cfg := DiscoveredManagedResource{
+		Name: "no-log", ConfigType: ConfigTypeLogging,
+		Data: map[string][]byte{
+			"a.xml": []byte("<a/>"),
+			"b.xml": []byte("<b/>"),
+		},
+	}
+	if _, ok := validateLoggingResource(cfg); ok {
+		t.Fatal("expected multiple keys without log4j2.xml to fail validation")
+	}
+}
+
+func TestValidateLoggingResource_CaseMismatchUppercaseL(t *testing.T) {
+	cfg := DiscoveredManagedResource{
+		Name: "case", ConfigType: ConfigTypeLogging,
+		Data: map[string][]byte{"Log4j2.xml": []byte("<Configuration/>")},
+	}
+	if _, ok := validateLoggingResource(cfg); ok {
+		t.Fatal("expected case-mismatched key to fail validation")
+	}
+}
+
+func TestValidateLoggingResource_CaseMismatchAllUpper(t *testing.T) {
+	cfg := DiscoveredManagedResource{
+		Name: "shout", ConfigType: ConfigTypeLogging,
+		Data: map[string][]byte{"LOG4J2.XML": []byte("<Configuration/>")},
+	}
+	if _, ok := validateLoggingResource(cfg); ok {
+		t.Fatal("expected uppercase key to fail validation")
+	}
+}
+
+// --- detectDuplicateLoggingConfigs ---
+
+func newCMObject(name string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "demo"}}
+}
+
+func newSecretObject(name string) *corev1.Secret {
+	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "demo"}}
+}
+
+func TestDetectDuplicateLoggingConfigs_None(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "log", ConfigType: ConfigTypeLogging, Object: newCMObject("log"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<Configuration/>")}},
+		{Name: "base", ConfigType: ConfigTypeBase, Object: newCMObject("base"),
+			Data: map[string][]byte{"a.xml": []byte("<a/>")}},
+	}
+	if got := detectDuplicateLoggingConfigs(configs); got != nil {
+		t.Errorf("expected nil for single logging resource, got %v", got)
+	}
+}
+
+func TestDetectDuplicateLoggingConfigs_TwoApplicable(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "log-a", ConfigType: ConfigTypeLogging, Object: newCMObject("log-a"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<a/>")}},
+		{Name: "log-b", ConfigType: ConfigTypeLogging, IsSecret: true, Object: newSecretObject("log-b"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<b/>")}},
+	}
+	got := detectDuplicateLoggingConfigs(configs)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 owners, got %d", len(got))
+	}
+	// Sort: ConfigMap before Secret
+	if got[0].Kind != "ConfigMap" || got[0].Name != "log-a" {
+		t.Errorf("owners[0] expected ConfigMap/log-a, got %+v", got[0])
+	}
+	if got[1].Kind != "Secret" || got[1].Name != "log-b" {
+		t.Errorf("owners[1] expected Secret/log-b, got %+v", got[1])
+	}
+}
+
+func TestDetectDuplicateLoggingConfigs_IgnoresNonLogging(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "log", ConfigType: ConfigTypeLogging, Object: newCMObject("log"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<Configuration/>")}},
+		{Name: "other", ConfigType: ConfigTypeBase, Object: newCMObject("other"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<Configuration/>")}}, // base, not counted
+	}
+	if got := detectDuplicateLoggingConfigs(configs); got != nil {
+		t.Errorf("base resource with log4j2.xml key must not count; got %v", got)
+	}
+}
+
+// --- applyLoggingValidations ---
+
+func TestApplyLoggingValidations_ValidLoggingPasses(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "log", ConfigType: ConfigTypeLogging, Object: newCMObject("log"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<Configuration/>")}},
+	}
+	filtered, issues := applyLoggingValidations(configs)
+	if len(filtered) != 1 {
+		t.Errorf("expected valid logging resource to pass through, got %d", len(filtered))
+	}
+	if len(issues) != 0 {
+		t.Errorf("expected no issues, got %v", issues)
+	}
+}
+
+func TestApplyLoggingValidations_InvalidExcludedAndReported(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "bad", ConfigType: ConfigTypeLogging, Object: newCMObject("bad"),
+			Data: map[string][]byte{}}, // zero keys
+		{Name: "base-x", ConfigType: ConfigTypeBase, Object: newCMObject("base-x"),
+			Data: map[string][]byte{"a.xml": []byte("<a/>")}},
+	}
+	filtered, issues := applyLoggingValidations(configs)
+	if len(filtered) != 1 || filtered[0].Name != "base-x" {
+		t.Errorf("expected only base-x to remain, got %d configs: %v", len(filtered), filtered)
+	}
+	if len(issues) != 1 || issues[0].EventReason != EventReasonLoggingConfigInvalid {
+		t.Errorf("expected one LoggingConfigInvalid issue, got %v", issues)
+	}
+}
+
+func TestApplyLoggingValidations_DuplicatesExcludeBoth(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "log-a", ConfigType: ConfigTypeLogging, Object: newCMObject("log-a"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<a/>")}},
+		{Name: "log-b", ConfigType: ConfigTypeLogging, Object: newCMObject("log-b"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<b/>")}},
+		{Name: "base-y", ConfigType: ConfigTypeBase, Object: newCMObject("base-y"),
+			Data: map[string][]byte{"a.xml": []byte("<a/>")}},
+	}
+	filtered, issues := applyLoggingValidations(configs)
+	if len(filtered) != 1 || filtered[0].Name != "base-y" {
+		t.Errorf("expected only base-y to remain, got %v", filtered)
+	}
+	if len(issues) != 2 {
+		t.Fatalf("expected 2 DuplicateLoggingConfig issues, got %d: %v", len(issues), issues)
+	}
+	for _, i := range issues {
+		if i.EventReason != EventReasonDuplicateLoggingConfig {
+			t.Errorf("expected DuplicateLoggingConfig reason, got %s", i.EventReason)
+		}
+	}
+}
+
+func TestApplyLoggingValidations_InvalidNotCountedAsDuplicate(t *testing.T) {
+	// One valid logging resource + one invalid logging resource = NOT a duplicate.
+	// The invalid one is excluded by validation before the duplicate check runs.
+	configs := []DiscoveredManagedResource{
+		{Name: "good", ConfigType: ConfigTypeLogging, Object: newCMObject("good"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<a/>")}},
+		{Name: "bad", ConfigType: ConfigTypeLogging, Object: newCMObject("bad"),
+			Data: map[string][]byte{"wrong.xml": []byte("<b/>")}},
+	}
+	filtered, issues := applyLoggingValidations(configs)
+	if len(filtered) != 1 || filtered[0].Name != "good" {
+		t.Errorf("expected only 'good' to remain, got %v", filtered)
+	}
+	if len(issues) != 1 || issues[0].EventReason != EventReasonLoggingConfigInvalid {
+		t.Errorf("expected one LoggingConfigInvalid issue, got %v", issues)
+	}
+}
+
+func TestApplyLoggingValidations_NonLoggingResourcesPassThroughUntouched(t *testing.T) {
+	// Regression guard: data keys of non-logging resources are not inspected.
+	configs := []DiscoveredManagedResource{
+		{Name: "base-x", ConfigType: ConfigTypeBase, Object: newCMObject("base-x"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<a/>")}},
+		{Name: "lic-y", ConfigType: ConfigTypeLicense, Object: newCMObject("lic-y"),
+			Data: map[string][]byte{LoggingDataKey: []byte("<b/>")}},
+	}
+	filtered, issues := applyLoggingValidations(configs)
+	if len(filtered) != 2 {
+		t.Errorf("expected both resources to pass through, got %d", len(filtered))
+	}
+	if len(issues) != 0 {
+		t.Errorf("expected zero issues for non-logging resources with log4j2.xml key; got %v", issues)
 	}
 }

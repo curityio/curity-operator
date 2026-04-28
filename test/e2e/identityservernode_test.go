@@ -1698,6 +1698,307 @@ var _ = Describe("IdentityServerNode", func() {
 				})
 			})
 
+			Describe("Logging config-type", Ordered, func() {
+				const ns = "e2e-cfg-logging"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				const loggingMountPath = "/opt/idsvr/etc/log4j2.xml"
+
+				countIssuesFor := func(g Gomega, clusterName, resourceName, reason string) int {
+					cluster := &v1alpha1.IdentityServerCluster{}
+					g.Expect(k().Get(context.Background(),
+						client.ObjectKey{Name: clusterName, Namespace: ns}, cluster)).To(Succeed())
+					n := 0
+					for _, issue := range cluster.Status.ManagedResourceIssues {
+						if issue.Name == resourceName && issue.Reason == reason {
+							n++
+						}
+					}
+					return n
+				}
+
+				countWarningEvents := func(g Gomega, resourceName, reason string) int {
+					var events corev1.EventList
+					g.Expect(k().List(context.Background(), &events, client.InNamespace(ns))).To(Succeed())
+					n := 0
+					for _, e := range events.Items {
+						if e.InvolvedObject.Name == resourceName &&
+							e.Reason == reason &&
+							e.Type == corev1.EventTypeWarning {
+							n++
+						}
+					}
+					return n
+				}
+
+				It("mounts log4j2.xml at the leaf path with no filename mangling", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "log-ok-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "log-ok-admin", "namespace": ns, "clusterName": "log-ok-cluster"})
+					utils.SimulateClusterConfigReady(ns, "log-ok-cluster", e2eTimeout, e2eInterval)
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("log-ok-cluster", "log-ok-admin"), Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "my-log4j2", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{
+								"curity.io/config-type": "logging",
+								"curity.io/cluster":     "log-ok-cluster",
+							},
+						},
+						Data: map[string]string{
+							"log4j2.xml": `<?xml version="1.0" encoding="UTF-8"?>
+<Configuration><Appenders><Console name="stdout" target="SYSTEM_OUT"><PatternLayout pattern="%level %msg%n"/></Console></Appenders><Loggers><Root level="INFO"><AppenderRef ref="stdout"/></Root></Loggers></Configuration>`,
+						},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("log-ok-cluster", "log-ok-admin"), Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-my-log4j2")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-my-log4j2", loggingMountPath)).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-my-log4j2", "/opt/idsvr/etc/init/cm_my-log4j2_log4j2.xml")).To(BeFalse(),
+							"logging type must use leaf path, not mangled prefix")
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					utils.MatchYAMLResource(deploy, "[deployment] log-ok-admin")
+				})
+
+				It("surfaces LoggingConfigInvalid when the data shape is wrong", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "log-bad-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "log-bad-admin", "namespace": ns, "clusterName": "log-bad-cluster"})
+					utils.SimulateClusterConfigReady(ns, "log-bad-cluster", e2eTimeout, e2eInterval)
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("log-bad-cluster", "log-bad-admin"), Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					// Logging-typed CM with the wrong key name.
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "bad-log", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{
+								"curity.io/config-type": "logging",
+								"curity.io/cluster":     "log-bad-cluster",
+							},
+						},
+						Data: map[string]string{"config.xml": "<wrong/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					By("expecting LoggingConfigInvalid issue on the cluster status")
+					Eventually(func(g Gomega) {
+						g.Expect(countIssuesFor(g, "log-bad-cluster", "bad-log", "LoggingConfigInvalid")).
+							To(Equal(1))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("expecting a Warning event on the offending CM")
+					Eventually(func(g Gomega) {
+						g.Expect(countWarningEvents(g, "bad-log", "LoggingConfigInvalid")).
+							To(BeNumerically(">=", 1))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("expecting the resource to NOT be mounted")
+					Consistently(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("log-bad-cluster", "log-bad-admin"), Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-bad-log")).To(BeFalse(),
+							"invalid logging resource must not mount")
+					}, 3*time.Second, time.Second).Should(Succeed())
+				})
+
+				It("blocks both resources on DuplicateLoggingConfig", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "log-dup-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "log-dup-admin", "namespace": ns, "clusterName": "log-dup-cluster"})
+					utils.SimulateClusterConfigReady(ns, "log-dup-cluster", e2eTimeout, e2eInterval)
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("log-dup-cluster", "log-dup-admin"), Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					// Two valid logging-typed resources, both scoped to this cluster.
+					cmA := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "log-dup-a", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{
+								"curity.io/config-type": "logging",
+								"curity.io/cluster":     "log-dup-cluster",
+							},
+						},
+						Data: map[string]string{"log4j2.xml": "<a/>"},
+					}
+					cmB := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "log-dup-b", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{
+								"curity.io/config-type": "logging",
+								"curity.io/cluster":     "log-dup-cluster",
+							},
+						},
+						Data: map[string]string{"log4j2.xml": "<b/>"},
+					}
+					Expect(k().Create(ctx, cmA)).To(Succeed())
+					Expect(k().Create(ctx, cmB)).To(Succeed())
+
+					By("expecting both resources to surface DuplicateLoggingConfig")
+					Eventually(func(g Gomega) {
+						g.Expect(countIssuesFor(g, "log-dup-cluster", "log-dup-a", "DuplicateLoggingConfig")).
+							To(Equal(1))
+						g.Expect(countIssuesFor(g, "log-dup-cluster", "log-dup-b", "DuplicateLoggingConfig")).
+							To(Equal(1))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("expecting a Warning event on each conflicting CM")
+					Eventually(func(g Gomega) {
+						g.Expect(countWarningEvents(g, "log-dup-a", "DuplicateLoggingConfig")).
+							To(BeNumerically(">=", 1))
+						g.Expect(countWarningEvents(g, "log-dup-b", "DuplicateLoggingConfig")).
+							To(BeNumerically(">=", 1))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("expecting no DuplicateConfigKey events on either CM (no double-reporting)")
+					Consistently(func(g Gomega) {
+						g.Expect(countWarningEvents(g, "log-dup-a", "DuplicateConfigKey")).To(Equal(0))
+						g.Expect(countWarningEvents(g, "log-dup-b", "DuplicateConfigKey")).To(Equal(0))
+					}, 3*time.Second, time.Second).Should(Succeed())
+
+					By("expecting NEITHER resource to be mounted (predictable failure)")
+					Consistently(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("log-dup-cluster", "log-dup-admin"), Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-log-dup-a")).To(BeFalse())
+						g.Expect(e2eHasCfgVolume(deploy, "cfg-cm-log-dup-b")).To(BeFalse())
+					}, 3*time.Second, time.Second).Should(Succeed())
+				})
+
+				It("does NOT inspect non-logging resources for log4j2.xml keys (lock-in)", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "log-wt-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "log-wt-admin", "namespace": ns, "clusterName": "log-wt-cluster"})
+					utils.SimulateClusterConfigReady(ns, "log-wt-cluster", e2eTimeout, e2eInterval)
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("log-wt-cluster", "log-wt-admin"), Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					// Base CM with key log4j2.xml — user mistake, but operator
+					// must trust the declared type and stay silent.
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "wrong-type-base", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{
+								// Annotation defaults to "base" via cluster reconciler;
+								// scope binds to this test's cluster so it cannot leak
+								// into other tests sharing this namespace.
+								"curity.io/cluster": "log-wt-cluster",
+							},
+						},
+						Data: map[string]string{"log4j2.xml": "<wrong/>"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					By("expecting the base CM to mount at the mangled path")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("log-wt-cluster", "log-wt-admin"), Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-wrong-type-base",
+							"/opt/idsvr/etc/init/cm_wrong-type-base_log4j2.xml")).To(BeTrue(),
+							"base CM with log4j2.xml key must mount at the mangled base path")
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-wrong-type-base", loggingMountPath)).To(BeFalse(),
+							"base CM must NOT mount at the leaf logging path")
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("expecting NO LoggingConfigInvalid, DuplicateLoggingConfig, or hint-style issue on this CM")
+					Consistently(func(g Gomega) {
+						cluster := &v1alpha1.IdentityServerCluster{}
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: "log-wt-cluster", Namespace: ns}, cluster)).To(Succeed())
+						for _, issue := range cluster.Status.ManagedResourceIssues {
+							if issue.Name == "wrong-type-base" {
+								g.Expect(issue.Reason).NotTo(Or(
+									Equal("LoggingConfigInvalid"),
+									Equal("DuplicateLoggingConfig"),
+									Equal("LoggingKeyInWrongType"),
+								), "operator must not inspect data keys of non-logging resources")
+							}
+						}
+					}, 3*time.Second, time.Second).Should(Succeed())
+				})
+
+				It("mounts logging on runtime even when admin exists (per-pod routing)", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "log-rt-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "log-rt-admin", "namespace": ns, "clusterName": "log-rt-cluster"})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "log-rt-runtime", "namespace": ns, "clusterName": "log-rt-cluster"})
+					utils.SimulateClusterConfigReady(ns, "log-rt-cluster", e2eTimeout, e2eInterval)
+
+					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("log-rt-cluster", "log-rt-admin"), Namespace: ns}}
+					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("log-rt-cluster", "log-rt-runtime"), Namespace: ns}}
+					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
+					utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
+
+					// One logging CM + one base CM, both scoped to this cluster.
+					logCM := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "log-rt", Namespace: ns,
+							Labels: map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{
+								"curity.io/config-type": "logging",
+								"curity.io/cluster":     "log-rt-cluster",
+							},
+						},
+						Data: map[string]string{"log4j2.xml": "<Configuration/>"},
+					}
+					baseCM := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "base-rt", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/cluster": "log-rt-cluster"},
+						},
+						Data: map[string]string{"server.xml": "<server/>"},
+					}
+					Expect(k().Create(ctx, logCM)).To(Succeed())
+					Expect(k().Create(ctx, baseCM)).To(Succeed())
+
+					By("expecting admin to mount BOTH base and logging")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("log-rt-cluster", "log-rt-admin"), Namespace: ns}, adminDeploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(adminDeploy, "cfg-cm-log-rt")).To(BeTrue())
+						g.Expect(e2eHasCfgVolume(adminDeploy, "cfg-cm-base-rt")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(adminDeploy, "cfg-cm-log-rt", loggingMountPath)).To(BeTrue())
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("expecting runtime to mount ONLY logging (base goes to admin)")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("log-rt-cluster", "log-rt-runtime"), Namespace: ns}, runtimeDeploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(runtimeDeploy, "cfg-cm-log-rt")).To(BeTrue(),
+							"logging must mount on runtime even when admin exists")
+						g.Expect(e2eHasVolumeMount(runtimeDeploy, "cfg-cm-log-rt", loggingMountPath)).To(BeTrue())
+						g.Expect(e2eHasCfgVolume(runtimeDeploy, "cfg-cm-base-rt")).To(BeFalse(),
+							"base must not mount on runtime when admin exists (existing routing rule unchanged)")
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+				})
+			})
+
 			Describe("Admin node added re-routes configs", Ordered, func() {
 				const ns = "e2e-cfg-admin-added"
 				BeforeAll(func() { createNS(ns) })

@@ -2112,6 +2112,8 @@ spec:
                       enum:
                       - UnknownConfigType
                       - DuplicateConfigKey
+                      - LoggingConfigInvalid
+                      - DuplicateLoggingConfig
                       type: string
                   required:
                   - kind

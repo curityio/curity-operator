@@ -284,11 +284,20 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			"kind", sk.Kind, "name", sk.Name, "reason", sk.Reason)
 	}
 
-	// Determine admin routing.
+	// Issues are surfaced by the cluster reconciler; here we only use the
+	// filtered slice so invalid/duplicate logging resources do not mount.
+	allConfigs, loggingIssues := applyLoggingValidations(allConfigs)
+	for _, li := range loggingIssues {
+		log.Info("excluding logging resource from mount",
+			"kind", li.Kind, "name", li.Name, "reason", li.EventReason)
+	}
+
 	adminExists := findAdminNodeName(nodeList.Items) != ""
-	var applicableConfigs []DiscoveredManagedResource
-	if shouldMountConfig(node.Spec.Type, adminExists) {
-		applicableConfigs = allConfigs
+	applicableConfigs := make([]DiscoveredManagedResource, 0, len(allConfigs))
+	for _, cfg := range allConfigs {
+		if shouldMountConfig(node.Spec.Type, adminExists, cfg.ConfigType) {
+			applicableConfigs = append(applicableConfigs, cfg)
+		}
 	}
 
 	// Hash drives the pod-template config-hash annotation, which triggers

@@ -1507,6 +1507,112 @@ func TestBuildVolumes_BaseConfigMap(t *testing.T) {
 	}
 }
 
+func TestBuildVolumes_LoggingConfigMapMountsAtLeafPath(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "my-log4j2", IsSecret: false, ConfigType: ConfigTypeLogging,
+			Data: map[string][]byte{LoggingDataKey: []byte("<Configuration/>")}},
+	}
+	volumes, mounts := buildVolumes("cluster-1", configs)
+	if len(volumes) != 2 {
+		t.Fatalf("expected 2 volumes (cluster-config + logging), got %d", len(volumes))
+	}
+	vol := volumes[1]
+	if vol.ConfigMap == nil || vol.ConfigMap.Name != "my-log4j2" {
+		t.Errorf("expected ConfigMap volume for my-log4j2, got %v", vol)
+	}
+
+	// Find the logging mount and assert its leaf-path properties.
+	var logMount *corev1.VolumeMount
+	for i, m := range mounts {
+		if m.MountPath == MountPathLogging {
+			logMount = &mounts[i]
+			break
+		}
+	}
+	if logMount == nil {
+		t.Fatalf("expected mount at %s; mounts=%v", MountPathLogging, mounts)
+	}
+	if logMount.SubPath != LoggingDataKey {
+		t.Errorf("expected SubPath=%q, got %q", LoggingDataKey, logMount.SubPath)
+	}
+	// Assert NO mangled-path mount exists (regression guard against
+	// accidentally falling through to the directory-base loop).
+	mangled := MountPathBase + mountFilename(false, "my-log4j2", LoggingDataKey)
+	for _, m := range mounts {
+		if m.MountPath == mangled {
+			t.Errorf("logging type must not produce mangled mount; found %q", mangled)
+		}
+	}
+}
+
+func TestBuildVolumes_LoggingMalformedResourceProducesNoOrphanVolume(t *testing.T) {
+	// Defensive: if a leaf-mount config ever reaches buildVolumes with the
+	// wrong number of keys (which applyLoggingValidations should prevent),
+	// skip the resource entirely — no volume, no mount. Regression guard
+	// against an orphan volume being appended without a matching mount.
+	configs := []DiscoveredManagedResource{
+		{Name: "malformed", ConfigType: ConfigTypeLogging,
+			Data: map[string][]byte{"a.xml": []byte("<a/>"), "b.xml": []byte("<b/>")}},
+	}
+	volumes, mounts := buildVolumes("cluster-1", configs)
+	for _, v := range volumes {
+		if v.Name == "cfg-cm-malformed" {
+			t.Errorf("malformed leaf-mount resource must not produce a volume; got %v", v)
+		}
+	}
+	for _, m := range mounts {
+		if m.Name == "cfg-cm-malformed" {
+			t.Errorf("malformed leaf-mount resource must not produce a mount; got %v", m)
+		}
+	}
+}
+
+func TestBuildVolumes_LoggingSecretMountsAtLeafPath(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "log-sec", IsSecret: true, ConfigType: ConfigTypeLogging,
+			Data: map[string][]byte{LoggingDataKey: []byte("<Configuration/>")}},
+	}
+	volumes, mounts := buildVolumes("cluster-1", configs)
+	if vol := volumes[1]; vol.Secret == nil || vol.Secret.SecretName != "log-sec" {
+		t.Errorf("expected Secret volume for log-sec, got %v", vol)
+	}
+	found := false
+	for _, m := range mounts {
+		if m.MountPath == MountPathLogging && m.SubPath == LoggingDataKey {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected leaf-path mount at %s for Secret", MountPathLogging)
+	}
+}
+
+func TestBuildVolumes_BaseLicenseLoggingCoexist(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "base-cm", IsSecret: false, ConfigType: ConfigTypeBase,
+			Data: map[string][]byte{LoggingDataKey: []byte("<base/>")}},
+		{Name: "lic", IsSecret: true, ConfigType: ConfigTypeLicense,
+			Data: map[string][]byte{"license.json": []byte("{}")}},
+		{Name: "log", IsSecret: false, ConfigType: ConfigTypeLogging,
+			Data: map[string][]byte{LoggingDataKey: []byte("<log/>")}},
+	}
+	_, mounts := buildVolumes("cluster-1", configs)
+
+	wantBase := MountPathBase + mountFilename(false, "base-cm", LoggingDataKey)
+	wantLicense := MountPathLicense + mountFilename(true, "lic", "license.json")
+	wantLogging := MountPathLogging
+
+	gotPaths := make(map[string]bool)
+	for _, m := range mounts {
+		gotPaths[m.MountPath] = true
+	}
+	for _, want := range []string{wantBase, wantLicense, wantLogging} {
+		if !gotPaths[want] {
+			t.Errorf("missing expected mount path %q; got paths %v", want, gotPaths)
+		}
+	}
+}
+
 func TestBuildVolumes_LicenseSecret(t *testing.T) {
 	configs := []DiscoveredManagedResource{
 		{Name: "lic", IsSecret: true, ConfigType: ConfigTypeLicense, Data: map[string][]byte{"license.json": []byte("{}")}},

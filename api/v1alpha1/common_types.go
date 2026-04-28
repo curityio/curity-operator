@@ -188,8 +188,8 @@ type AppliedManagedResource struct {
 	// +kubebuilder:validation:Enum=ConfigMap;Secret
 	Kind string `json:"kind"`
 
-	// ConfigType is the curity.io/config-type annotation value ("base" or "license").
-	// +kubebuilder:validation:Enum=base;license
+	// ConfigType is the curity.io/config-type annotation value ("base", "license", or "logging").
+	// +kubebuilder:validation:Enum=base;license;logging
 	ConfigType string `json:"configType"`
 }
 
@@ -210,7 +210,7 @@ type ManagedResourceIssue struct {
 	Name string `json:"name"`
 
 	// Reason is a stable machine-readable identifier for the kind of issue.
-	// +kubebuilder:validation:Enum=UnknownConfigType;DuplicateConfigKey
+	// +kubebuilder:validation:Enum=UnknownConfigType;DuplicateConfigKey;LoggingConfigInvalid;DuplicateLoggingConfig
 	Reason string `json:"reason"`
 
 	// Message is a byte-stable human-readable description of the issue.

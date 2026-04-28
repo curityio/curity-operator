@@ -852,6 +852,26 @@ func (r *IdentityServerClusterReconciler) ensureManagedConfigDiscovery(ctx conte
 		}
 	}
 
+	// Filtered slice is discarded here; the node reconciler runs the same
+	// call to drive mount filtering.
+	_, loggingIssues := applyLoggingValidations(configs)
+	for _, li := range loggingIssues {
+		log.Info("logging config rejected",
+			"kind", li.Kind, "name", li.Name, "reason", li.EventReason)
+		if li.Object != nil {
+			r.Recorder.Eventf(li.Object, corev1.EventTypeWarning, li.EventReason, "%s", li.Message)
+		} else {
+			log.Error(nil, "BUG: LoggingValidationIssue has nil Object; event not emitted",
+				"kind", li.Kind, "name", li.Name, "reason", li.EventReason)
+		}
+		issues = append(issues, v1alpha1.ManagedResourceIssue{
+			Kind:    li.Kind,
+			Name:    li.Name,
+			Reason:  li.EventReason,
+			Message: li.Message,
+		})
+	}
+
 	sort.Slice(issues, func(i, j int) bool {
 		if issues[i].Kind != issues[j].Kind {
 			return issues[i].Kind < issues[j].Kind

@@ -2535,9 +2535,9 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				return secret.Annotations["curity.io/admin-node"]
 			}, timeout, interval).Should(Equal("rename-admin"))
 
-			// Pre-populate Secret with XML containing the admin hostname
+			// Pre-populate Secret with XML containing the admin hostname (prefixed Service name).
 			secret.Data = map[string][]byte{"cluster.xml": []byte(
-				"<config><cluster><host>rename-admin</host><port>6789</port></cluster></config>")}
+				"<config><cluster><host>rename-cluster-rename-admin</host><port>6789</port></cluster></config>")}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
 			// Delete old admin node, create new one with different name
@@ -2560,8 +2560,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			// Verify the XML was updated in-place with new hostname
 			updatedSecret := &corev1.Secret{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-cluster-cluster-config", Namespace: ns}, updatedSecret)).To(Succeed())
-			Expect(string(updatedSecret.Data["cluster.xml"])).To(ContainSubstring("<host>rename-admin-v2</host>"))
-			Expect(string(updatedSecret.Data["cluster.xml"])).NotTo(ContainSubstring("<host>rename-admin</host>"))
+			Expect(string(updatedSecret.Data["cluster.xml"])).To(ContainSubstring("<host>rename-cluster-rename-admin-v2</host>"))
+			Expect(string(updatedSecret.Data["cluster.xml"])).NotTo(ContainSubstring("<host>rename-cluster-rename-admin</host>"))
 			// Rest of XML preserved
 			Expect(string(updatedSecret.Data["cluster.xml"])).To(ContainSubstring("<port>6789</port>"))
 		})
@@ -2863,7 +2863,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 
 			// Step 2: Simulate Job completion — pre-populate Secret with real data
 			configSecret.Data = map[string][]byte{"cluster.xml": []byte(
-				"<config><cluster><host>lifecycle-admin</host><port>6789</port></cluster></config>")}
+				"<config><cluster><host>lifecycle-cluster-lifecycle-admin</host><port>6789</port></cluster></config>")}
 			Expect(k8sClient.Update(ctx, configSecret)).To(Succeed())
 
 			cluster := &v1alpha1.IdentityServerCluster{}
@@ -2886,7 +2886,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					return ""
 				}
 				return string(s.Data["cluster.xml"])
-			}, 3*time.Second, interval).Should(ContainSubstring("<host>lifecycle-admin</host>"))
+			}, 3*time.Second, interval).Should(ContainSubstring("<host>lifecycle-cluster-lifecycle-admin</host>"))
 		})
 
 		It("should do admin rename workflow: rename → in-place update → condition stays ready", func() {
@@ -2903,7 +2903,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			}, timeout, interval).Should(Equal("wf-rename-admin"))
 
 			secret.Data = map[string][]byte{"cluster.xml": []byte(
-				"<config><cluster><keystore>abc123</keystore><host>wf-rename-admin</host><port>6789</port></cluster></config>")}
+				"<config><cluster><keystore>abc123</keystore><host>wf-rename-cluster-wf-rename-admin</host><port>6789</port></cluster></config>")}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
 			cluster := &v1alpha1.IdentityServerCluster{}
@@ -2929,9 +2929,9 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				}
 				return string(s.Data["cluster.xml"])
 			}, timeout, interval).Should(And(
-				ContainSubstring("<host>wf-rename-admin-v2</host>"),
+				ContainSubstring("<host>wf-rename-cluster-wf-rename-admin-v2</host>"),
 				ContainSubstring("<keystore>abc123</keystore>"),
-				Not(ContainSubstring("<host>wf-rename-admin</host>")),
+				Not(ContainSubstring("<host>wf-rename-cluster-wf-rename-admin</host>")),
 			))
 
 			// ClusterConfigReady should still be True (not reset)
@@ -3016,7 +3016,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			secret := &corev1.Secret{}
 			eventuallyGetResource(ns, "wf-delsecret-cluster-cluster-config", secret)
 
-			secret.Data = map[string][]byte{"cluster.xml": []byte("<config><host>wf-delsecret-admin</host></config>")}
+			secret.Data = map[string][]byte{"cluster.xml": []byte("<config><host>wf-delsecret-cluster-wf-delsecret-admin</host></config>")}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
 			Eventually(func() bool {
@@ -3045,7 +3045,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			secret := &corev1.Secret{}
 			eventuallyGetResource(ns, "wf-delcr-cluster-cluster-config", secret)
 
-			secret.Data = map[string][]byte{"cluster.xml": []byte("<config><host>wf-delcr-admin</host></config>")}
+			secret.Data = map[string][]byte{"cluster.xml": []byte("<config><host>wf-delcr-cluster-wf-delcr-admin</host></config>")}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
 			// Delete the Node first (finalizer requires this)
@@ -3063,7 +3063,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			// Secret should still exist (no OwnerReference on Cluster CR)
 			survivedSecret := &corev1.Secret{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-cluster-cluster-config", Namespace: ns}, survivedSecret)).To(Succeed())
-			Expect(string(survivedSecret.Data["cluster.xml"])).To(Equal("<config><host>wf-delcr-admin</host></config>"))
+			Expect(string(survivedSecret.Data["cluster.xml"])).To(Equal("<config><host>wf-delcr-cluster-wf-delcr-admin</host></config>"))
 		})
 
 		It("should accept user-edited Secret without regenerating (Scenario 6)", func() {
@@ -3084,7 +3084,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 						"app.kubernetes.io/managed-by": "curity-operator",
 					},
 				},
-				Data: map[string][]byte{"cluster.xml": []byte("<config><host>wf-useredit-admin</host></config>")},
+				Data: map[string][]byte{"cluster.xml": []byte("<config><host>wf-useredit-cluster-wf-useredit-admin</host></config>")},
 			}
 			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 

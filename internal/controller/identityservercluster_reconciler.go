@@ -464,7 +464,7 @@ func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeNam
 								"/opt/idsvr/bin/genclust -c $CONFIG_SERVICE_HOST -p $CONFIG_SERVICE_PORT",
 							},
 							Env: []corev1.EnvVar{
-								{Name: "CONFIG_SERVICE_HOST", Value: adminNodeName},
+								{Name: "CONFIG_SERVICE_HOST", Value: ownedResourceName(cluster.Name, adminNodeName)},
 								{Name: "CONFIG_SERVICE_PORT", Value: fmt.Sprintf("%d", portConfig)},
 							},
 						},
@@ -542,12 +542,15 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 			// Check if admin node name changed (Scenario 5)
 			// Update the XML in-place — same key, new hostname — no Job needed.
 			if storedAdmin, ok := configSecret.Annotations["curity.io/admin-node"]; ok && storedAdmin != adminNodeName {
+				oldHost := ownedResourceName(cluster.Name, storedAdmin)
+				newHost := ownedResourceName(cluster.Name, adminNodeName)
 				log.Info("admin node changed, updating cluster config in-place",
-					"old", storedAdmin, "new", adminNodeName)
+					"old", storedAdmin, "new", adminNodeName,
+					"oldHost", oldHost, "newHost", newHost)
 				oldXML := string(configSecret.Data[clusterConfigKey])
 				newXML := strings.Replace(oldXML,
-					"<host>"+storedAdmin+"</host>",
-					"<host>"+adminNodeName+"</host>", 1)
+					"<host>"+oldHost+"</host>",
+					"<host>"+newHost+"</host>", 1)
 				configSecret.Data[clusterConfigKey] = []byte(newXML)
 				configSecret.Annotations["curity.io/admin-node"] = adminNodeName
 				if err := r.Update(ctx, &configSecret); err != nil {

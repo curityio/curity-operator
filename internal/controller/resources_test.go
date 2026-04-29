@@ -1,7 +1,11 @@
 package controller
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
@@ -937,7 +941,7 @@ func TestIsClusterConfigReady_EmptyData(t *testing.T) {
 
 func TestBuildClusterConfigSecret_Placeholder(t *testing.T) {
 	cluster := newTestCluster()
-	secret := buildClusterConfigSecret(cluster, nil, "admin-1", "abc123")
+	secret := buildClusterConfigSecret(cluster, nil, "admin-1", "abc123", "deadbeef")
 
 	if secret.Name != "cluster-1-cluster-config" {
 		t.Errorf("expected name 'cluster-1-cluster-config', got %q", secret.Name)
@@ -960,6 +964,9 @@ func TestBuildClusterConfigSecret_Placeholder(t *testing.T) {
 	if secret.Annotations["curity.io/encryption-key-hash"] != "abc123" {
 		t.Errorf("expected encryption-key-hash annotation 'abc123'")
 	}
+	if secret.Annotations["curity.io/cluster-config-hash"] != "deadbeef" {
+		t.Errorf("expected cluster-config-hash annotation 'deadbeef', got %q", secret.Annotations["curity.io/cluster-config-hash"])
+	}
 	if secret.Annotations["argocd.argoproj.io/compare-options"] != "IgnoreExtraneous" {
 		t.Errorf("expected ArgoCD IgnoreExtraneous annotation")
 	}
@@ -968,16 +975,19 @@ func TestBuildClusterConfigSecret_Placeholder(t *testing.T) {
 func TestBuildClusterConfigSecret_WithData(t *testing.T) {
 	cluster := newTestCluster()
 	xmlData := []byte("<config>test</config>")
-	secret := buildClusterConfigSecret(cluster, xmlData, "admin-1", "")
+	secret := buildClusterConfigSecret(cluster, xmlData, "admin-1", "", "")
 
 	if string(secret.Data["cluster.xml"]) != "<config>test</config>" {
 		t.Errorf("expected real data, got %q", secret.Data["cluster.xml"])
+	}
+	if _, present := secret.Annotations["curity.io/cluster-config-hash"]; present {
+		t.Errorf("expected no cluster-config-hash annotation when configHash is empty")
 	}
 }
 
 func TestBuildClusterConfigJob_BasicSpec(t *testing.T) {
 	cluster := newTestCluster()
-	job := buildClusterConfigJob(cluster, "admin-1")
+	job := buildClusterConfigJob(cluster, "admin-1", "")
 
 	if job.Name != "cluster-1-cluster-config-job" {
 		t.Errorf("expected job name 'cluster-1-cluster-config-job', got %q", job.Name)
@@ -1027,7 +1037,7 @@ func TestBuildClusterConfigJob_BasicSpec(t *testing.T) {
 func TestBuildClusterConfigJob_HostUsesPrefixedNameWithHyphens(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Name = "prod-east"
-	job := buildClusterConfigJob(cluster, "primary-admin")
+	job := buildClusterConfigJob(cluster, "primary-admin", "")
 
 	container := job.Spec.Template.Spec.Containers[0]
 	assertEnvVar(t, container.Env, "CONFIG_SERVICE_HOST", "prod-east-primary-admin")
@@ -1049,7 +1059,7 @@ func TestBuildClusterConfigJob_HostUsesPrefixedNameWithHyphens(t *testing.T) {
 func TestBuildClusterConfigJob_ImagePullSecret(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.ImagePullSecret = "my-registry-secret"
-	job := buildClusterConfigJob(cluster, "admin-1")
+	job := buildClusterConfigJob(cluster, "admin-1", "")
 
 	if len(job.Spec.Template.Spec.ImagePullSecrets) != 1 {
 		t.Fatalf("expected 1 imagePullSecret, got %d", len(job.Spec.Template.Spec.ImagePullSecrets))
@@ -1061,7 +1071,7 @@ func TestBuildClusterConfigJob_ImagePullSecret(t *testing.T) {
 
 func TestBuildClusterConfigJob_NoImagePullSecret(t *testing.T) {
 	cluster := newTestCluster()
-	job := buildClusterConfigJob(cluster, "admin-1")
+	job := buildClusterConfigJob(cluster, "admin-1", "")
 
 	if len(job.Spec.Template.Spec.ImagePullSecrets) != 0 {
 		t.Errorf("expected 0 imagePullSecrets, got %d", len(job.Spec.Template.Spec.ImagePullSecrets))
@@ -1078,7 +1088,7 @@ func TestBuildClusterConfigJob_EncryptionKey(t *testing.T) {
 			},
 		},
 	}
-	job := buildClusterConfigJob(cluster, "admin-1")
+	job := buildClusterConfigJob(cluster, "admin-1", "")
 
 	container := job.Spec.Template.Spec.Containers[0]
 	found := false
@@ -1104,7 +1114,7 @@ func TestBuildClusterConfigJob_SchedulingConstraints(t *testing.T) {
 		{Key: "special", Operator: corev1.TolerationOpExists},
 	}
 
-	job := buildClusterConfigJob(cluster, "admin-1")
+	job := buildClusterConfigJob(cluster, "admin-1", "")
 
 	if job.Spec.Template.Spec.NodeSelector["disk"] != "ssd" {
 		t.Error("expected nodeSelector to be inherited")
@@ -1117,7 +1127,7 @@ func TestBuildClusterConfigJob_SchedulingConstraints(t *testing.T) {
 func TestBuildClusterConfigJob_CustomImage(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.Image = "myregistry.io/curity:custom"
-	job := buildClusterConfigJob(cluster, "admin-1")
+	job := buildClusterConfigJob(cluster, "admin-1", "")
 
 	if job.Spec.Template.Spec.Containers[0].Image != "myregistry.io/curity:custom" {
 		t.Errorf("expected custom image, got %q", job.Spec.Template.Spec.Containers[0].Image)
@@ -1126,7 +1136,7 @@ func TestBuildClusterConfigJob_CustomImage(t *testing.T) {
 
 func TestBuildClusterConfigJob_Labels(t *testing.T) {
 	cluster := newTestCluster()
-	job := buildClusterConfigJob(cluster, "admin-1")
+	job := buildClusterConfigJob(cluster, "admin-1", "")
 
 	if job.Labels["curity.io/cluster"] != "cluster-1" {
 		t.Error("expected curity.io/cluster label")
@@ -1498,7 +1508,7 @@ func TestBuildClusterConfigJob_TopologySpreadConstraints(t *testing.T) {
 		WhenUnsatisfiable: corev1.ScheduleAnyway,
 	}}
 
-	job := buildClusterConfigJob(cluster, "admin-1")
+	job := buildClusterConfigJob(cluster, "admin-1", "")
 
 	tsc := job.Spec.Template.Spec.TopologySpreadConstraints
 	if len(tsc) != 1 || tsc[0].TopologyKey != "topology.kubernetes.io/zone" {
@@ -2253,5 +2263,239 @@ func TestBuildPDB_Selector(t *testing.T) {
 		if pdb.Spec.Selector.MatchLabels[k] != v {
 			t.Errorf("selector label %q: want %q, got %q", k, v, pdb.Spec.Selector.MatchLabels[k])
 		}
+	}
+}
+
+// Bridges for the external controller_test package; not part of the public API.
+
+func ComputeClusterConfigHashForTest(cluster *v1alpha1.IdentityServerCluster, adminNodeName string) string {
+	return computeClusterConfigHash(cluster, adminNodeName)
+}
+
+func EncryptionKeyHashForTest(key []byte) string {
+	if len(key) == 0 {
+		return ""
+	}
+	h := sha256.Sum256(key)
+	return hex.EncodeToString(h[:])
+}
+
+// P1: same inputs always yield the same hash.
+func TestComputeClusterConfigHash_Deterministic(t *testing.T) {
+	cluster := newTestCluster()
+	first := computeClusterConfigHash(cluster, "admin-1")
+	for i := 0; i < 100; i++ {
+		got := computeClusterConfigHash(cluster, "admin-1")
+		if got != first {
+			t.Fatalf("hash drifted on iteration %d: got %q, want %q", i, got, first)
+		}
+	}
+}
+
+// P2: changing any single input changes the hash.
+func TestComputeClusterConfigHash_DiffersPerInput(t *testing.T) {
+	base := newTestCluster()
+	baseHash := computeClusterConfigHash(base, "admin-1")
+
+	tests := []struct {
+		name         string
+		mutate       func() (*v1alpha1.IdentityServerCluster, string)
+		shouldDiffer bool
+	}{
+		{
+			name: "Version changes",
+			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
+				c := base.DeepCopy()
+				c.Spec.Version = "11.1"
+				return c, "admin-1"
+			},
+			shouldDiffer: true,
+		},
+		{
+			name: "Image changes",
+			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
+				c := base.DeepCopy()
+				c.Spec.Image = "private/idsvr:11.0"
+				return c, "admin-1"
+			},
+			shouldDiffer: true,
+		},
+		{
+			name: "ImagePullSecret changes",
+			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
+				c := base.DeepCopy()
+				c.Spec.ImagePullSecret = "regcred"
+				return c, "admin-1"
+			},
+			shouldDiffer: true,
+		},
+		{
+			name: "adminNodeName changes",
+			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
+				return base, "admin-2"
+			},
+			shouldDiffer: true,
+		},
+		{
+			name: "Tolerations change (not in hash by design)",
+			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
+				c := base.DeepCopy()
+				c.Spec.Tolerations = []corev1.Toleration{{Key: "x"}}
+				return c, "admin-1"
+			},
+			shouldDiffer: false,
+		},
+		{
+			name: "NodeSelector changes (not in hash by design)",
+			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
+				c := base.DeepCopy()
+				c.Spec.NodeSelector = map[string]string{"zone": "us-east-1a"}
+				return c, "admin-1"
+			},
+			shouldDiffer: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, admin := tt.mutate()
+			got := computeClusterConfigHash(c, admin)
+			if (got != baseHash) != tt.shouldDiffer {
+				t.Errorf("hash differs = %v, want %v (base=%q, got=%q)",
+					got != baseHash, tt.shouldDiffer, baseHash, got)
+			}
+		})
+	}
+}
+
+// P3: catches "developer added a new field and forgot to update the hash."
+// New IdentityServerClusterSpec fields must be added to includedInHash (and
+// to computeClusterConfigHash) or excludedFromHash with rationale.
+func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
+	includedInHash := map[string]bool{
+		"Version":         true, // via buildImage(cluster)
+		"Image":           true, // via buildImage(cluster)
+		"ImagePullSecret": true,
+	}
+	excludedFromHash := map[string]bool{
+		// AdminCredentials is excluded: handled by curity.io/encryption-key-hash
+		// with empty-guards that tolerate the credentials-Secret cache miss on
+		// first reconcile.
+		"AdminCredentials":          true,
+		"Logging":                   true,
+		"PodAnnotations":            true,
+		"PodLabels":                 true,
+		"Resources":                 true,
+		"Probes":                    true,
+		"Autoscaling":               true,
+		"PodDisruptionBudget":       true,
+		"NodeSelector":              true,
+		"Tolerations":               true,
+		"TopologySpreadConstraints": true,
+		"Affinity":                  true,
+	}
+
+	specType := reflect.TypeOf(v1alpha1.IdentityServerClusterSpec{})
+	for i := 0; i < specType.NumField(); i++ {
+		f := specType.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name := f.Name
+		if !includedInHash[name] && !excludedFromHash[name] {
+			t.Errorf("spec field %q must be in includedInHash or excludedFromHash", name)
+		}
+	}
+}
+
+// N4: hash is non-empty even when every input is empty.
+func TestComputeClusterConfigHash_NonEmptyForEmptyInputs(t *testing.T) {
+	c := &v1alpha1.IdentityServerCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c"},
+		Spec:       v1alpha1.IdentityServerClusterSpec{},
+	}
+	got := computeClusterConfigHash(c, "")
+	if got == "" {
+		t.Fatal("hash must be non-empty even for empty inputs")
+	}
+	if len(got) != 64 { // sha256 hex = 64 chars
+		t.Errorf("expected 64-char hex hash, got %d chars: %q", len(got), got)
+	}
+}
+
+// E1: NUL separator prevents distinct field assignments from colliding.
+func TestComputeClusterConfigHash_DistinctFieldsDistinctHashes(t *testing.T) {
+	a := newTestCluster()
+	a.Spec.Image = "ab"
+	a.Spec.ImagePullSecret = "cd"
+
+	b := newTestCluster()
+	b.Spec.Image = "abcd"
+	b.Spec.ImagePullSecret = ""
+
+	if computeClusterConfigHash(a, "admin") == computeClusterConfigHash(b, "admin") {
+		t.Error("distinct field assignments must produce distinct hashes")
+	}
+}
+
+// E2: hash works when all optional fields are empty.
+func TestComputeClusterConfigHash_AllOptionalFieldsEmpty(t *testing.T) {
+	c := &v1alpha1.IdentityServerCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c"},
+		Spec:       v1alpha1.IdentityServerClusterSpec{Version: "11.0"},
+	}
+	got := computeClusterConfigHash(c, "admin-1")
+	if got == "" {
+		t.Fatal("hash must be non-empty when only Version + adminNodeName are set")
+	}
+}
+
+// E3: long combined names don't panic or silently truncate.
+func TestComputeClusterConfigHash_LongCombinedNames(t *testing.T) {
+	c := newTestCluster()
+	c.Name = strings.Repeat("a", 200)
+	got := computeClusterConfigHash(c, strings.Repeat("b", 200))
+	if got == "" {
+		t.Fatal("hash must be non-empty for long names")
+	}
+}
+
+func TestEncryptionKeyHashForTest(t *testing.T) {
+	tests := []struct {
+		name     string
+		key      []byte
+		wantHash bool
+	}{
+		{"empty bytes returns empty string", nil, false},
+		{"zero-length bytes returns empty string", []byte{}, false},
+		{"single byte produces 64-char hex", []byte{0}, true},
+		{"32-byte key produces 64-char hex", make([]byte, 32), true},
+		{"long key produces 64-char hex", make([]byte, 1024), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := EncryptionKeyHashForTest(tt.key)
+			if tt.wantHash {
+				if len(got) != 64 {
+					t.Errorf("expected 64-char hex hash, got %d chars: %q", len(got), got)
+				}
+			} else {
+				if got != "" {
+					t.Errorf("expected empty string, got %q", got)
+				}
+			}
+		})
+	}
+
+	key := []byte("smoke-test-key")
+	first := EncryptionKeyHashForTest(key)
+	for i := 0; i < 100; i++ {
+		if got := EncryptionKeyHashForTest(key); got != first {
+			t.Fatalf("hash drifted on iteration %d", i)
+		}
+	}
+
+	if EncryptionKeyHashForTest([]byte("a")) == EncryptionKeyHashForTest([]byte("b")) {
+		t.Error("different keys must produce different hashes")
 	}
 }

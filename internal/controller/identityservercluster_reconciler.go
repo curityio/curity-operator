@@ -299,6 +299,7 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findClusterForSecret),
+			builder.WithPredicates(adminCredsCandidatePredicate{}),
 		).
 		Watches(
 			&corev1.ConfigMap{},
@@ -382,8 +383,27 @@ func (r *IdentityServerClusterReconciler) computeEncryptionKeyHash(ctx context.C
 	return hex.EncodeToString(h[:])
 }
 
+// computeClusterConfigHash hashes the spec inputs that should trigger a
+// genclust Job re-run when changed. The encryption key is intentionally NOT
+// included: a stale credentials-Secret cache on first reconcile would cause
+// every cluster to spuriously regen — see Branch A in ensureClusterConfig.
+// The "v1\x00" prefix versions the hash shape; bump on any input change.
+func computeClusterConfigHash(cluster *v1alpha1.IdentityServerCluster, adminNodeName string) string {
+	var b strings.Builder
+	const sep = "\x00"
+	b.WriteString("v1")
+	b.WriteString(sep)
+	b.WriteString(buildImage(cluster))
+	b.WriteString(sep)
+	b.WriteString(cluster.Spec.ImagePullSecret)
+	b.WriteString(sep)
+	b.WriteString(adminNodeName)
+	h := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(h[:])
+}
+
 // buildClusterConfigSecret creates the Secret that holds cluster.xml.
-func buildClusterConfigSecret(cluster *v1alpha1.IdentityServerCluster, clusterXML []byte, adminNodeName, encryptionKeyHash string) *corev1.Secret {
+func buildClusterConfigSecret(cluster *v1alpha1.IdentityServerCluster, clusterXML []byte, adminNodeName, encryptionKeyHash, configHash string) *corev1.Secret {
 	data := []byte(clusterConfigPlaceholder)
 	if len(clusterXML) > 0 {
 		data = clusterXML
@@ -396,6 +416,9 @@ func buildClusterConfigSecret(cluster *v1alpha1.IdentityServerCluster, clusterXM
 	}
 	if encryptionKeyHash != "" {
 		annotations["curity.io/encryption-key-hash"] = encryptionKeyHash
+	}
+	if configHash != "" {
+		annotations["curity.io/cluster-config-hash"] = configHash
 	}
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -426,8 +449,14 @@ func jobCompletionTime(job *batchv1.Job) *metav1.Time {
 }
 
 // buildClusterConfigJob creates the Job that runs genclust to generate cluster.xml.
-func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeName string) *batchv1.Job {
+// configHash is stamped as an annotation so step 4 of ensureClusterConfig can
+// detect input drift (spec change while a Job is in flight) and recreate.
+func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeName, configHash string) *batchv1.Job {
 	backoff := jobBackoffLimit
+	annotations := map[string]string{}
+	if configHash != "" {
+		annotations["curity.io/cluster-config-hash"] = configHash
+	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cluster.Name + clusterConfigJobSuffix,
@@ -437,6 +466,7 @@ func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeNam
 				"curity.io/cluster":            cluster.Name,
 				"curity.io/component":          "cluster-config",
 			},
+			Annotations: annotations,
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff,
@@ -519,6 +549,24 @@ func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeNam
 // ensureClusterConfig orchestrates cluster.xml generation via a genclust Job.
 // It creates a placeholder Secret, runs the Job, reads the output from pod logs,
 // and populates the Secret with the real cluster.xml content.
+//
+// Decision tree once the Secret has real cluster.xml data
+// (gated on isClusterConfigReady, evaluated in source order):
+//
+//   - Branch A      — encryption-key rotation. Stored key hash differs from
+//                     current. Full regen. Empty-guards tolerate the credentials-
+//                     Secret cache miss on first reconcile.
+//   - Steady state  — storedConfigHash matches current. Zero API calls.
+//   - Backfill      — storedConfigHash empty but storedAdmin matches. Pre-PR
+//                     Secret; stamp the new annotation without regen.
+//   - Branch B      — only adminNodeName changed. Rewrite <host> in XML
+//                     in-place; falls through to Branch C on malformed XML.
+//   - Branch C      — anything else (multi-input change). Full regen.
+//
+// When the Secret is in placeholder state (Job in flight or never ran), step 4
+// below ("input drift") detects spec changes that landed after Job creation
+// and recreates the Job against the latest spec. Branches A/B/C never run in
+// that state.
 func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Context, cluster *v1alpha1.IdentityServerCluster, childNodes []v1alpha1.IdentityServerNode) error {
 	log := ctrl.LoggerFrom(ctx)
 	secretName := clusterConfigSecretName(cluster.Name)
@@ -539,22 +587,54 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: cluster.Namespace}, &configSecret); err == nil {
 		secretExists = true
 		if isClusterConfigReady(&configSecret) {
-			// Check if admin node name changed (Scenario 5)
-			// Update the XML in-place — same key, new hostname — no Job needed.
-			if storedAdmin, ok := configSecret.Annotations["curity.io/admin-node"]; ok && storedAdmin != adminNodeName {
-				oldHost := ownedResourceName(cluster.Name, storedAdmin)
-				newHost := ownedResourceName(cluster.Name, adminNodeName)
-				log.Info("admin node changed, updating cluster config in-place",
-					"old", storedAdmin, "new", adminNodeName,
-					"oldHost", oldHost, "newHost", newHost)
-				oldXML := string(configSecret.Data[clusterConfigKey])
-				newXML := strings.Replace(oldXML,
-					"<host>"+oldHost+"</host>",
-					"<host>"+newHost+"</host>", 1)
-				configSecret.Data[clusterConfigKey] = []byte(newXML)
-				configSecret.Annotations["curity.io/admin-node"] = adminNodeName
+			currentKeyHash := r.computeEncryptionKeyHash(ctx, cluster)
+			currentConfigHash := computeClusterConfigHash(cluster, adminNodeName)
+			storedConfigHash := configSecret.Annotations["curity.io/cluster-config-hash"]
+			storedAdmin := configSecret.Annotations["curity.io/admin-node"]
+
+			// Branch A: encryption-key rotation. Empty-guards on both hashes
+			// tolerate the credentials-Secret cache miss on first reconcile.
+			if storedHash, ok := configSecret.Annotations["curity.io/encryption-key-hash"]; ok && storedHash != "" && currentKeyHash != "" && storedHash != currentKeyHash {
+				log.Info("encryption key changed, resetting cluster config for regeneration")
+
+				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
+					metav1.ConditionFalse, "Regenerating",
+					"Encryption key rotated; regenerating cluster.xml", cluster.Generation)
+				if err := r.Status().Update(ctx, cluster); err != nil {
+					return fmt.Errorf("failed to flip ClusterConfigReady=False for key rotation: %w", err)
+				}
+
+				configSecret.Data[clusterConfigKey] = []byte(clusterConfigPlaceholder)
+				configSecret.Annotations["curity.io/encryption-key-hash"] = currentKeyHash
+				configSecret.Annotations["curity.io/cluster-config-hash"] = currentConfigHash
 				if err := r.Update(ctx, &configSecret); err != nil {
-					return fmt.Errorf("failed to update cluster config for admin rename: %w", err)
+					return fmt.Errorf("failed to reset cluster config for key rotation: %w", err)
+				}
+				var oldJob batchv1.Job
+				if err := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: cluster.Namespace}, &oldJob); err == nil {
+					if delErr := r.Delete(ctx, &oldJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
+						return fmt.Errorf("failed to delete stale Job during key rotation: %w", delErr)
+					}
+				}
+				r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ClusterConfigRegenerating",
+					"Encryption key rotated; regenerating cluster.xml via genclust Job")
+				return nil
+			}
+
+			// Steady state — zero API calls.
+			if storedConfigHash != "" && storedConfigHash == currentConfigHash {
+				cluster.Status.ClusterConfigSecretName = secretName
+				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
+					metav1.ConditionTrue, "SecretReady",
+					"Cluster config secret is populated", cluster.Generation)
+				return nil
+			}
+
+			// Backfill — pre-PR Secret with admin match. Stamp without regen.
+			if storedConfigHash == "" && storedAdmin == adminNodeName {
+				configSecret.Annotations["curity.io/cluster-config-hash"] = currentConfigHash
+				if err := r.Update(ctx, &configSecret); err != nil {
+					return fmt.Errorf("failed to backfill cluster-config-hash: %w", err)
 				}
 				cluster.Status.ClusterConfigSecretName = secretName
 				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
@@ -563,27 +643,74 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 				return nil
 			}
 
-			// Check if encryption key changed (Scenario 11)
-			// Reset to placeholder so the Job flow regenerates with the new key.
-			// Only trigger regeneration when both hashes are non-empty — an empty
-			// stored hash means the config was generated without an encryption key.
-			currentKeyHash := r.computeEncryptionKeyHash(ctx, cluster)
-			if storedHash, ok := configSecret.Annotations["curity.io/encryption-key-hash"]; ok && storedHash != "" && currentKeyHash != "" && storedHash != currentKeyHash {
-				log.Info("encryption key changed, resetting cluster config for regeneration")
-				configSecret.Data[clusterConfigKey] = []byte(clusterConfigPlaceholder)
-				configSecret.Annotations["curity.io/encryption-key-hash"] = currentKeyHash
-				if err := r.Update(ctx, &configSecret); err != nil {
-					return fmt.Errorf("failed to reset cluster config for key rotation: %w", err)
+			// Branch B: cheap admin-rename. Contains-guard prevents
+			// strings.Replace from silently no-oping on malformed XML.
+			if storedConfigHash != "" && storedAdmin != "" && storedAdmin != adminNodeName {
+				hashWithOldAdmin := computeClusterConfigHash(cluster, storedAdmin)
+				if storedConfigHash == hashWithOldAdmin {
+					oldHost := ownedResourceName(cluster.Name, storedAdmin)
+					newHost := ownedResourceName(cluster.Name, adminNodeName)
+					oldXML := string(configSecret.Data[clusterConfigKey])
+					oldHostTag := "<host>" + oldHost + "</host>"
+					if !strings.Contains(oldXML, oldHostTag) {
+						log.Info("admin rename: XML missing expected <host> tag, falling through to full regen",
+							"old", storedAdmin, "new", adminNodeName)
+					} else {
+						log.Info("admin node changed, updating cluster config in-place",
+							"old", storedAdmin, "new", adminNodeName)
+						newXML := strings.Replace(oldXML, oldHostTag, "<host>"+newHost+"</host>", 1)
+						configSecret.Data[clusterConfigKey] = []byte(newXML)
+						configSecret.Annotations["curity.io/admin-node"] = adminNodeName
+						configSecret.Annotations["curity.io/cluster-config-hash"] = currentConfigHash
+						if err := r.Update(ctx, &configSecret); err != nil {
+							return fmt.Errorf("failed to update cluster config for admin rename: %w", err)
+						}
+						cluster.Status.ClusterConfigSecretName = secretName
+						setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
+							metav1.ConditionTrue, "SecretReady",
+							"Cluster config secret is populated", cluster.Generation)
+						return nil
+					}
 				}
-				// Fall through to Job creation below
-			} else {
-				// Secret is ready and up-to-date
-				cluster.Status.ClusterConfigSecretName = secretName
-				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
-					metav1.ConditionTrue, "SecretReady",
-					"Cluster config secret is populated", cluster.Generation)
-				return nil
+				// More than just admin changed — fall through to full regen.
 			}
+
+			// Branch C: full regen. Status flips to False BEFORE the Secret
+			// data reset — otherwise a concurrent node reconcile would stamp
+			// sha256("placeholder") onto Deployment templates.
+			log.Info("cluster.xml inputs changed, regenerating",
+				"stored", storedConfigHash, "current", currentConfigHash)
+
+			setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
+				metav1.ConditionFalse, "Regenerating",
+				"Cluster.xml inputs changed; regenerating", cluster.Generation)
+			if err := r.Status().Update(ctx, cluster); err != nil {
+				return fmt.Errorf("failed to flip ClusterConfigReady=False for regen: %w", err)
+			}
+
+			configSecret.Data[clusterConfigKey] = []byte(clusterConfigPlaceholder)
+			configSecret.Annotations["curity.io/cluster-config-hash"] = currentConfigHash
+			configSecret.Annotations["curity.io/admin-node"] = adminNodeName
+			if currentKeyHash != "" {
+				configSecret.Annotations["curity.io/encryption-key-hash"] = currentKeyHash
+			}
+			if err := r.Update(ctx, &configSecret); err != nil {
+				return fmt.Errorf("failed to reset cluster config for regen: %w", err)
+			}
+
+			var oldJob batchv1.Job
+			if err := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: cluster.Namespace}, &oldJob); err == nil {
+				if delErr := r.Delete(ctx, &oldJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
+					return fmt.Errorf("failed to delete stale Job during regen: %w", delErr)
+				}
+			} else if !apierrors.IsNotFound(err) {
+				log.Error(err, "stale Job lookup failed during regen; will retry")
+				return fmt.Errorf("failed to look up stale Job during regen: %w", err)
+			}
+
+			r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ClusterConfigRegenerating",
+				"Cluster.xml inputs changed; regenerating via genclust Job")
+			// Fall through to Job creation below.
 		}
 	} else if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("failed to get cluster config secret: %w", err)
@@ -591,7 +718,8 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 
 	// 3. Ensure placeholder Secret exists
 	if !secretExists {
-		placeholder := buildClusterConfigSecret(cluster, nil, adminNodeName, r.computeEncryptionKeyHash(ctx, cluster))
+		keyHash := r.computeEncryptionKeyHash(ctx, cluster)
+		placeholder := buildClusterConfigSecret(cluster, nil, adminNodeName, keyHash, computeClusterConfigHash(cluster, adminNodeName))
 		if err := r.Create(ctx, placeholder); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
 				return fmt.Errorf("failed to create placeholder cluster config secret: %w", err)
@@ -604,6 +732,28 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 	// 4. Check for existing Job
 	var job batchv1.Job
 	if err := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: cluster.Namespace}, &job); err == nil {
+		// Detect input drift: spec changed while a Job was already in flight.
+		// Branches A/B/C only run when the Secret has real data; in placeholder
+		// state, a stale Job would otherwise run to completion (or burn through
+		// BackoffLimit) with the old inputs. Done before the completion check
+		// so we never populate the Secret with cluster.xml from stale inputs
+		// (e.g. wrong admin host baked into <host>).
+		jobConfigHash := job.Annotations["curity.io/cluster-config-hash"]
+		currentConfigHash := computeClusterConfigHash(cluster, adminNodeName)
+		if jobConfigHash != "" && jobConfigHash != currentConfigHash {
+			log.Info("input drift detected on in-flight Job, deleting to recreate with current spec",
+				"jobHash", jobConfigHash, "currentHash", currentConfigHash)
+			if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("failed to delete drifted Job: %w", err)
+			}
+			r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ClusterConfigRegenerating",
+				"Cluster config inputs changed during Job execution; recreating Job")
+			setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
+				metav1.ConditionFalse, "Regenerating",
+				"Cluster config inputs changed; recreating Job", cluster.Generation)
+			return nil
+		}
+
 		// Check Job completion
 		for _, cond := range job.Status.Conditions {
 			if cond.Type == batchv1.JobComplete && cond.Status == corev1.ConditionTrue {
@@ -642,13 +792,21 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 				}
 
 				// Update Secret with real data
-				updatedSecret := buildClusterConfigSecret(cluster, clusterXML, adminNodeName, r.computeEncryptionKeyHash(ctx, cluster))
+				keyHash := r.computeEncryptionKeyHash(ctx, cluster)
+				updatedSecret := buildClusterConfigSecret(cluster, clusterXML, adminNodeName, keyHash, computeClusterConfigHash(cluster, adminNodeName))
 				var existing corev1.Secret
 				if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: cluster.Namespace}, &existing); err != nil {
 					return fmt.Errorf("failed to get cluster config secret for update: %w", err)
 				}
 				existing.Data = updatedSecret.Data
-				existing.Annotations = updatedSecret.Annotations
+				// Merge instead of replace, otherwise kubectl.kubernetes.io/last-applied-configuration
+				// and external tracking annotations get clobbered every Job completion.
+				if existing.Annotations == nil {
+					existing.Annotations = map[string]string{}
+				}
+				for k, v := range updatedSecret.Annotations {
+					existing.Annotations[k] = v
+				}
 				if err := r.Update(ctx, &existing); err != nil {
 					return fmt.Errorf("failed to update cluster config secret: %w", err)
 				}
@@ -692,9 +850,14 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 		return fmt.Errorf("failed to get cluster config Job: %w", err)
 	}
 
-	// 5. Create the Job (no existing Job found — we only reach here if Get returned NotFound)
+	// 5. Create the Job. Job has owner ref to cluster CR (GC on delete).
+	// cluster-config Secret intentionally does NOT — it outlives cluster
+	// deletion so a recreated cluster can re-use the existing keystore.
 	{
-		newJob := buildClusterConfigJob(cluster, adminNodeName)
+		newJob := buildClusterConfigJob(cluster, adminNodeName, computeClusterConfigHash(cluster, adminNodeName))
+		if err := controllerutil.SetControllerReference(cluster, newJob, r.Scheme); err != nil {
+			return fmt.Errorf("failed to set owner ref on genclust Job: %w", err)
+		}
 		if err := r.Create(ctx, newJob); err != nil {
 			if apierrors.IsAlreadyExists(err) {
 				return nil // Race condition: another reconcile created it
@@ -929,21 +1092,41 @@ func (r *IdentityServerClusterReconciler) findClusterForJob(ctx context.Context,
 	}
 }
 
-// findClusterForSecret maps a Secret change to a reconcile request for the
-// owning cluster. Only triggers for Secrets with the curity.io/cluster label
-// (operator-managed admin credentials and cluster config Secrets).
+// findClusterForSecret maps a Secret change to its owning cluster(s).
+// Operator-managed Secrets carry the curity.io/cluster label (fast path).
+// Externally-provided admin-credentials Secrets are matched by name against
+// every cluster's spec.adminCredentials.valueFrom.secretKeyRef.
 func (r *IdentityServerClusterReconciler) findClusterForSecret(ctx context.Context, obj client.Object) []ctrl.Request {
 	secret, ok := obj.(*corev1.Secret)
 	if !ok {
 		return nil
 	}
-	clusterName, exists := secret.Labels["curity.io/cluster"]
-	if !exists {
+	if clusterName, labeled := secret.Labels["curity.io/cluster"]; labeled {
+		return []ctrl.Request{
+			{NamespacedName: client.ObjectKey{Name: clusterName, Namespace: secret.Namespace}},
+		}
+	}
+	// Mapping functions can't return errors; log so RBAC/network failures
+	// don't silently break externally-provided admin-creds Secret watching.
+	var clusterList v1alpha1.IdentityServerClusterList
+	if err := r.List(ctx, &clusterList, client.InNamespace(secret.Namespace)); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "list clusters for Secret watch failed; admin-creds rotations may be missed until next resync",
+			"secret", client.ObjectKeyFromObject(secret).String())
 		return nil
 	}
-	return []ctrl.Request{
-		{NamespacedName: client.ObjectKey{Name: clusterName, Namespace: secret.Namespace}},
+	var requests []ctrl.Request
+	for i := range clusterList.Items {
+		c := &clusterList.Items[i]
+		if c.Spec.AdminCredentials == nil {
+			continue
+		}
+		if c.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name == secret.Name {
+			requests = append(requests, ctrl.Request{
+				NamespacedName: client.ObjectKey{Name: c.Name, Namespace: c.Namespace},
+			})
+		}
 	}
+	return requests
 }
 
 // emitScopeAnnotationEvents emits Warning Events on managed ConfigMaps/Secrets

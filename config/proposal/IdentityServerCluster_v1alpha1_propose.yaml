@@ -47,47 +47,78 @@ spec:
           - key: KEYSTORE_PASSWORD
             path: KEYSTORE_PASSWORD
 
-  # REMOVED: We use configmap/secret labels instead
-  # # XML configuration fragments mounted at startup; can combine ConfigMap and Secret refs (items define key→path mapping).
-  # # +kubebuilder:validation:Required
-  # configuration:
-  #   # +kubebuilder:validation:Required
-  #   valueFrom:
-  #     configMapRef:
-  #       name: curity-base-config
-  #       items:
-  #         - key: base-config.xml
-  #           path: base-config.xml
-  #     secretRef:
-  #       name: curity-datasource-config
-  #       items:
-  #         - key: base-config.xml
-  #           path: base-config.xml
+  # Remote packages (ZIP archives) to download and unpack into each node's container at startup.
+  # Supports public URLs, private GitHub releases, and any HTTP(S) endpoint requiring TLS customisation or credentials.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=20
+  packages:
+    - source:
+        # Full HTTPS URL of the ZIP archive to fetch.
+        # +kubebuilder:validation:Required
+        # +kubebuilder:validation:Pattern=`^https?://`
+        # +kubebuilder:validation:MaxLength=2048
+        url: https://github.com/curityio/testing/archive/refs/heads/main.zip
 
-  # REMOVED: We use configmap/secret labels instead
-  # # External database connection: driver/type and credentials supplied via Secret projection.
-  # # +kubebuilder:validation:Required
-  # dataSource:
-  #   # JDBC or datasource type (for example `postgres`) used when wiring the external database.
-  #   # +kubebuilder:validation:Required
-  #   # +kubebuilder:validation:MinLength=1
-  #   type: postgres
-  #   # +kubebuilder:validation:Required
-  #   valueFrom:
-  #     secretKeyRef:
-  #       # +kubebuilder:validation:Required
-  #       name: curity-datasource-secret
-  #       items:
-  #         - key: host
-  #           path: host
-  #         - key: port
-  #           path: port
-  #         - key: database
-  #           path: database
-  #         - key: username
-  #           path: username
-  #         - key: password
-  #           path: password
+        # TLS options for the download connection. Omit to accept the system trust store.
+        # +kubebuilder:validation:Optional
+        tls:
+          # When false (default), the server certificate is validated against the trust store or `ca` below.
+          # +kubebuilder:validation:Optional
+          enabled: true
+          # Set true only in non-production environments to disable certificate verification.
+          # +kubebuilder:validation:Optional
+          skipVerify: false
+          # Custom CA certificate for private or self-signed endpoints. Ignored when `skipVerify` is true.
+          # +kubebuilder:validation:Optional
+          ca:
+            secretRef:
+              # +kubebuilder:validation:Required
+              # +kubebuilder:validation:MaxLength=253
+              name: ca-secret
+              # +kubebuilder:validation:Required
+              key: ca.crt
+          # Client certificate and key for mutual TLS (mTLS). Secret must contain both tls.crt and tls.key.
+          # +kubebuilder:validation:Optional
+          clientCert:
+            secretRef:
+              # +kubebuilder:validation:Required
+              # +kubebuilder:validation:MaxLength=253
+              name: mtls-secret
+              # +kubebuilder:validation:Required
+              key: tls.crt
+
+        # Credentials for authenticated endpoints. Set exactly one of `basicAuth` or `bearerToken`.
+        # +kubebuilder:validation:Optional
+        auth:
+          # HTTP Basic Authentication. Suitable for endpoints that accept username/password pairs.
+          # +kubebuilder:validation:Optional
+          basicAuth:
+            secretRef:
+              # +kubebuilder:validation:Required
+              # +kubebuilder:validation:MaxLength=253
+              name: basic-auth-secret
+              # Key in the Secret holding the username.
+              # +kubebuilder:validation:Required
+              usernameKey: username
+              # Key in the Secret holding the password.
+              # +kubebuilder:validation:Required
+              passwordKey: password
+          # Bearer token authentication. Use for GitHub PATs, OAuth access tokens, or API keys sent as `Authorization: Bearer <token>`.
+          # +kubebuilder:validation:Optional
+          bearerToken:
+            secretRef:
+              # +kubebuilder:validation:Required
+              # +kubebuilder:validation:MaxLength=253
+              name: token-secret
+              # +kubebuilder:validation:Required
+              key: token
+
+      # Absolute path inside the container where the archive contents are unpacked.
+      # +kubebuilder:validation:Required
+      # +kubebuilder:validation:Pattern=`^/`
+      # +kubebuilder:validation:MaxLength=1024
+      mountPath: /etc/plugins/testing
+      
 
 # ------------------------------------------------------------
 # COMMON WORKLOAD CONFIGURATION FOR ALL NODES

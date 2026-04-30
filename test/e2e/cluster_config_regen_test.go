@@ -40,9 +40,10 @@ var _ = Describe("cluster.xml regeneration", func() {
 			utils.SimulateClusterConfigReady(ns, clusterName, e2eTimeout, e2eInterval)
 
 			By("snapshot — cluster CR status at SecretReady (initial)")
-			cluster := &v1alpha1.IdentityServerCluster{}
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+			}
 			utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
-			Expect(k().Get(ctx, client.ObjectKey{Name: clusterName, Namespace: ns}, cluster)).To(Succeed())
 			utils.MatchCRDResource(cluster, "regen-ver/01-secret-ready-initial")
 
 			By("capturing the pre-bump cluster-config-hash annotation")

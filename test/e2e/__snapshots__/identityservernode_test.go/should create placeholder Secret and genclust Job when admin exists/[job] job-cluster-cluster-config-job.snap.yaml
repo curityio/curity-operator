@@ -11,6 +11,8 @@ metadata:
     app.kubernetes.io/managed-by: curity-operator
     curity.io/cluster: job-cluster
     curity.io/component: cluster-config
+  annotations: <Any value>
+  ownerReferences: <Any value>
   managedFields: <Any value>
 spec:
   parallelism: 1

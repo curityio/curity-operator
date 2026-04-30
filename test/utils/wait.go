@@ -8,7 +8,6 @@ import (
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -19,6 +18,12 @@ import (
 // simulating genclust Job completion. The ISC reconciler then detects the ready
 // secret and sets ClusterConfigReady=True, unblocking the ISN Deployment gate.
 // Call this AFTER creating the admin node so the ISC reconciler can find it.
+//
+// This always patches an existing operator-created Secret rather than creating
+// one from scratch — the operator stamps cluster-config-hash, encryption-key-
+// hash, and admin-node annotations on first reconcile, and a bare test-created
+// Secret without those annotations would trigger Branch C in ensureClusterConfig
+// (full regen) on the next reconcile, resetting the data we just wrote.
 func SimulateClusterConfigReady(ns, clusterName string, timeArgs ...interface{}) {
 	ctx := context.Background()
 	k := TestEnvironment.K8sClient
@@ -27,25 +32,12 @@ func SimulateClusterConfigReady(ns, clusterName string, timeArgs ...interface{})
 		"cluster.xml": []byte("<config xmlns=\"http://tail-f.com/ns/config/1.0\"><test/></config>"),
 	}
 
-	// Create or update the secret with real data.
+	// Wait for the operator to create the placeholder Secret (with annotations),
+	// then patch in real data. Eventually retries on NotFound.
 	gomega.Eventually(func() error {
 		var existing corev1.Secret
 		if err := k.Get(ctx, client.ObjectKey{Name: secretName, Namespace: ns}, &existing); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return err
-			}
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: secretName, Namespace: ns,
-					Labels: map[string]string{
-						"app.kubernetes.io/managed-by": "curity-operator",
-						"curity.io/cluster":            clusterName,
-						"curity.io/component":          "cluster-config",
-					},
-				},
-				Data: realData,
-			}
-			return k.Create(ctx, secret)
+			return err
 		}
 		existing.Data = realData
 		return k.Update(ctx, &existing)

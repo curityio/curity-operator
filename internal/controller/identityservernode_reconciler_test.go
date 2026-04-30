@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
+	"github.com/curityio/curity-operator/internal/controller"
 )
 
 var nodeTestCounter atomic.Int64
@@ -128,20 +129,68 @@ func newUnstructuredNode(ns, name, role, clusterRef string) *unstructured.Unstru
 	}
 }
 
-// testSimulateClusterConfigReady populates the cluster-config secret with real
-// cluster.xml data, simulating the result of a genclust Job completion (by
-// writing directly to the Secret, bypassing the actual Job). If the cluster
-// reconciler already created a placeholder secret, this updates it; otherwise
-// it creates a new one. The cluster reconciler then detects the ready secret on
-// its next reconcile and sets ClusterConfigReady=True naturally — this helper
-// waits for that condition before returning.
-//
-// Call this AFTER creating the admin node so the ISC reconciler can find the
-// admin name and complete the ensureClusterConfig flow.
+// testSimulateClusterConfigReady simulates a genclust Job completion by
+// writing real data plus the annotations the operator would stamp, then
+// waits for ConditionClusterConfigReady=True. Call AFTER the admin node
+// exists so the cluster reconciler can resolve adminNodeName.
 func testSimulateClusterConfigReady(ns, clusterName string) {
 	secretName := clusterName + "-cluster-config"
 	realData := map[string][]byte{
 		"cluster.xml": []byte("<config xmlns=\"http://tail-f.com/ns/config/1.0\"><test/></config>"),
+	}
+
+	var cluster v1alpha1.IdentityServerCluster
+	Eventually(func() error {
+		return k8sClient.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: ns}, &cluster)
+	}, 10*time.Second, 250*time.Millisecond).Should(Succeed())
+
+	var nodeList v1alpha1.IdentityServerNodeList
+	Eventually(func() string {
+		_ = k8sClient.List(ctx, &nodeList, client.InNamespace(ns))
+		for i := range nodeList.Items {
+			n := &nodeList.Items[i]
+			if n.Spec.IdentityServerClusterRef.Name == clusterName && n.Spec.Type == v1alpha1.NodeTypeAdmin {
+				return n.Name
+			}
+		}
+		return ""
+	}, 10*time.Second, 250*time.Millisecond).ShouldNot(BeEmpty())
+	var adminNodeName string
+	for i := range nodeList.Items {
+		n := &nodeList.Items[i]
+		if n.Spec.IdentityServerClusterRef.Name == clusterName && n.Spec.Type == v1alpha1.NodeTypeAdmin {
+			adminNodeName = n.Name
+			break
+		}
+	}
+
+	// Mirror the operator's in-memory adminCredentials defaulting.
+	credName := clusterName + "-admin-creds"
+	if cluster.Spec.AdminCredentials != nil {
+		credName = cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
+	}
+	encryptionKeyHash := ""
+	Eventually(func() bool {
+		var credSecret corev1.Secret
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: credName, Namespace: ns}, &credSecret); err != nil {
+			return false
+		}
+		key, ok := credSecret.Data["CONFIG_ENCRYPTION_KEY"]
+		if !ok || len(key) == 0 {
+			return false
+		}
+		encryptionKeyHash = controller.EncryptionKeyHashForTest(key)
+		return true
+	}, 15*time.Second, 250*time.Millisecond).Should(BeTrue(), "credentials Secret %q must exist with CONFIG_ENCRYPTION_KEY", credName)
+	configHash := controller.ComputeClusterConfigHashForTest(&cluster, adminNodeName)
+
+	annotations := map[string]string{
+		"argocd.argoproj.io/compare-options": "IgnoreExtraneous",
+		"curity.io/admin-node":               adminNodeName,
+		"curity.io/cluster-config-hash":      configHash,
+	}
+	if encryptionKeyHash != "" {
+		annotations["curity.io/encryption-key-hash"] = encryptionKeyHash
 	}
 
 	// Create or update the secret with real data.
@@ -160,6 +209,7 @@ func testSimulateClusterConfigReady(ns, clusterName string) {
 						"curity.io/cluster":            clusterName,
 						"curity.io/component":          "cluster-config",
 					},
+					Annotations: annotations,
 				},
 				Data: realData,
 			}
@@ -167,6 +217,12 @@ func testSimulateClusterConfigReady(ns, clusterName string) {
 		}
 		// Secret exists (ISC created placeholder) — update with real data.
 		existing.Data = realData
+		if existing.Annotations == nil {
+			existing.Annotations = map[string]string{}
+		}
+		for k, v := range annotations {
+			existing.Annotations[k] = v
+		}
 		return k8sClient.Update(ctx, &existing)
 	}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
 
@@ -2466,8 +2522,24 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			}
 			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
 
-			// Verify operator deletes failed Job and creates a new one
-			// (the new Job will have a different UID)
+			// Assert via Event (persists), not condition (operator flips
+			// JobFailed → JobCreated within ms when it recreates the Job).
+			Eventually(func() bool {
+				events := &corev1.EventList{}
+				if err := k8sClient.List(ctx, events, client.InNamespace(ns)); err != nil {
+					return false
+				}
+				for _, e := range events.Items {
+					if e.InvolvedObject.Kind == "IdentityServerCluster" &&
+						e.InvolvedObject.Name == "fail-cluster" &&
+						e.Reason == "ClusterConfigJobFailed" &&
+						e.Type == corev1.EventTypeWarning {
+						return true
+					}
+				}
+				return false
+			}, timeout, interval).Should(BeTrue(), "expected Warning ClusterConfigJobFailed event")
+
 			Eventually(func() bool {
 				newJob := &batchv1.Job{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster-cluster-config-job", Namespace: ns}, newJob); err != nil {
@@ -2566,7 +2638,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(string(updatedSecret.Data["cluster.xml"])).To(ContainSubstring("<port>6789</port>"))
 		})
 
-		It("should preserve XML when admin rename host tag is missing (Scenario 5 edge)", func() {
+		It("should fall through to full regen when admin renames but XML lacks the expected <host> tag", func() {
 			testCreateCluster(ns, "rename-nohost-cluster")
 			testCreateNode(ns, "rename-nohost-admin", v1alpha1.NodeTypeAdmin, "rename-nohost-cluster")
 
@@ -2579,7 +2651,12 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				return secret.Annotations["curity.io/admin-node"]
 			}, timeout, interval).Should(Equal("rename-nohost-admin"))
 
-			// Pre-populate with XML that has no <host> tag (user-edited or malformed)
+			// Pre-populate with XML that has no <host> tag (user-edited or malformed).
+			// The cheap rename path's strings.Replace would silently no-op on this
+			// input — but the cluster-config-hash guard now refuses to take the
+			// cheap path when the expected tag is missing, falling through to full
+			// regen instead. That resets the Secret to placeholder and a fresh
+			// genclust Job runs with the new admin name.
 			originalXML := "<config><cluster><keystore>abc</keystore></cluster></config>"
 			secret.Data = map[string][]byte{"cluster.xml": []byte(originalXML)}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
@@ -2591,7 +2668,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			eventuallyDeleted(ns, "rename-nohost-admin", &v1alpha1.IdentityServerNode{})
 			testCreateNode(ns, "rename-nohost-admin-v2", v1alpha1.NodeTypeAdmin, "rename-nohost-cluster")
 
-			// Annotation updates, XML is unchanged (strings.Replace is a no-op)
+			// admin-node annotation eventually updates to the new name.
 			Eventually(func() string {
 				s := &corev1.Secret{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "rename-nohost-cluster-cluster-config", Namespace: ns}, s); err != nil {
@@ -2600,9 +2677,15 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				return s.Annotations["curity.io/admin-node"]
 			}, timeout, interval).Should(Equal("rename-nohost-admin-v2"))
 
-			updatedSecret := &corev1.Secret{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-nohost-cluster-cluster-config", Namespace: ns}, updatedSecret)).To(Succeed())
-			Expect(string(updatedSecret.Data["cluster.xml"])).To(Equal(originalXML))
+			// Data was reset to placeholder by the full-regen branch (the cheap
+			// rename was rejected because the original XML lacked <host>).
+			Eventually(func() string {
+				s := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "rename-nohost-cluster-cluster-config", Namespace: ns}, s); err != nil {
+					return ""
+				}
+				return string(s.Data["cluster.xml"])
+			}, timeout, interval).Should(Equal("placeholder"))
 		})
 
 		It("should reset to placeholder when encryption key changes (Scenario 11)", func() {
@@ -2851,20 +2934,14 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 	})
 
 	Context("Cluster config workflows", func() {
-		It("should complete full lifecycle: create → populate → version upgrade → reuse", func() {
+		It("should complete full lifecycle: create → populate → version upgrade → regenerate", func() {
 			testCreateCluster(ns, "lifecycle-cluster")
 			testCreateNode(ns, "lifecycle-admin", v1alpha1.NodeTypeAdmin, "lifecycle-cluster")
 
-			configSecret := &corev1.Secret{}
-			eventuallyGetResource(ns, "lifecycle-cluster-cluster-config", configSecret)
-
-			job := &batchv1.Job{}
-			eventuallyGetResource(ns, "lifecycle-cluster-cluster-config-job", job)
-
-			// Step 2: Simulate Job completion — pre-populate Secret with real data
-			configSecret.Data = map[string][]byte{"cluster.xml": []byte(
-				"<config><cluster><host>lifecycle-cluster-lifecycle-admin</host><port>6789</port></cluster></config>")}
-			Expect(k8sClient.Update(ctx, configSecret)).To(Succeed())
+			// Step 1+2: Simulate Job completion — populate Secret with real data
+			// AND the annotations the operator would have stamped, so the regen
+			// logic recognises the steady state.
+			testSimulateClusterConfigReady(ns, "lifecycle-cluster")
 
 			cluster := &v1alpha1.IdentityServerCluster{}
 			Eventually(func() bool {
@@ -2874,19 +2951,43 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				return hasCondition(cluster.Status.Conditions, "ClusterConfigReady", metav1.ConditionTrue)
 			}, timeout, interval).Should(BeTrue())
 
-			// Step 4: Version upgrade — cluster.xml should be reused
+			// Capture pre-upgrade hash so we can verify it changes after the version bump.
+			preUpgradeSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster-cluster-config", Namespace: ns}, preUpgradeSecret)).To(Succeed())
+			oldHash := preUpgradeSecret.Annotations["curity.io/cluster-config-hash"]
+			Expect(oldHash).NotTo(BeEmpty(), "expected cluster-config-hash annotation after simulated population")
+
+			// Step 4: Version upgrade — cluster.xml MUST regenerate.
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster", Namespace: ns}, cluster)).To(Succeed())
 			cluster.Spec.Version = "12.0"
 			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
 
-			// Verify Secret data is unchanged after version upgrade
-			Consistently(func() string {
+			// Secret data should be reset to placeholder (regen branch fired).
+			Eventually(func() string {
 				s := &corev1.Secret{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster-cluster-config", Namespace: ns}, s); err != nil {
 					return ""
 				}
 				return string(s.Data["cluster.xml"])
-			}, 3*time.Second, interval).Should(ContainSubstring("<host>lifecycle-cluster-lifecycle-admin</host>"))
+			}, timeout, interval).Should(Equal("placeholder"))
+
+			// Stored hash should differ from the pre-upgrade value.
+			Eventually(func() string {
+				s := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster-cluster-config", Namespace: ns}, s); err != nil {
+					return ""
+				}
+				return s.Annotations["curity.io/cluster-config-hash"]
+			}, timeout, interval).ShouldNot(Equal(oldHash))
+
+			// Condition should pass through Regenerating → JobCreated/JobRunning
+			// before settling. We don't strictly assert the brief Regenerating
+			// state here; that is covered by dedicated observability tests.
+			// Verify a fresh Job was created against the new spec.
+			job := &batchv1.Job{}
+			Eventually(func() error {
+				return k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster-cluster-config-job", Namespace: ns}, job)
+			}, timeout, interval).Should(Succeed())
 		})
 
 		It("should do admin rename workflow: rename → in-place update → condition stays ready", func() {

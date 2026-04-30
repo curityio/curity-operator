@@ -1,6 +1,7 @@
 package controller
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -115,6 +116,33 @@ func hasManagedLabel(obj client.Object) bool {
 		return false
 	}
 	return obj.GetLabels()[LabelManagedConfig] == "true"
+}
+
+// adminCredsCandidatePredicate filters Secret events down to Opaque type so
+// cert-manager TLS, SA tokens, and dockercfg Secrets don't trigger
+// findClusterForSecret's cluster List on every renewal.
+type adminCredsCandidatePredicate struct {
+	predicate.Funcs
+}
+
+func (p adminCredsCandidatePredicate) Create(e event.CreateEvent) bool {
+	return isAdminCredsCandidate(e.Object)
+}
+
+func (p adminCredsCandidatePredicate) Update(e event.UpdateEvent) bool {
+	return isAdminCredsCandidate(e.ObjectOld) || isAdminCredsCandidate(e.ObjectNew)
+}
+
+func (p adminCredsCandidatePredicate) Delete(e event.DeleteEvent) bool {
+	return isAdminCredsCandidate(e.Object)
+}
+
+func isAdminCredsCandidate(obj client.Object) bool {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok || secret == nil {
+		return false
+	}
+	return secret.Type == "" || secret.Type == corev1.SecretTypeOpaque
 }
 
 // clusterConditionStatus returns the Status field of the named condition, or

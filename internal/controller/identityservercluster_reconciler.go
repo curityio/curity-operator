@@ -554,13 +554,13 @@ func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeNam
 // (gated on isClusterConfigReady, evaluated in source order):
 //
 //   - Branch A      — encryption-key rotation. Stored key hash differs from
-//                     current. Full regen. Empty-guards tolerate the credentials-
-//                     Secret cache miss on first reconcile.
+//     current. Full regen. Empty-guards tolerate the credentials-
+//     Secret cache miss on first reconcile.
 //   - Steady state  — storedConfigHash matches current. Zero API calls.
 //   - Backfill      — storedConfigHash empty but storedAdmin matches. Pre-PR
-//                     Secret; stamp the new annotation without regen.
+//     Secret; stamp the new annotation without regen.
 //   - Branch B      — only adminNodeName changed. Rewrite <host> in XML
-//                     in-place; falls through to Branch C on malformed XML.
+//     in-place; falls through to Branch C on malformed XML.
 //   - Branch C      — anything else (multi-input change). Full regen.
 //
 // When the Secret is in placeholder state (Job in flight or never ran), step 4

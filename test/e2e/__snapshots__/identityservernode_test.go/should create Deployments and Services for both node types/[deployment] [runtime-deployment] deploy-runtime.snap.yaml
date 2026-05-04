@@ -1,7 +1,7 @@
 
 [IdentityServerNode deployment lifecycle Deploy admin + runtime nodes should create Deployments and Services for both node types - 1]
 metadata:
-  name: deploy-cluster-deploy-runtime
+  name: deploy-cluster-deploy-runtime-124bbdac
   namespace: e2e-deploy
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: deploy-cluster-deploy-runtime
+    app.kubernetes.io/instance: deploy-cluster-deploy-runtime-124bbdac
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: off-cluster-off-node
-  serviceName: off-cluster-off-node
+  deploymentName: off-cluster-off-node-1fd2d2ca
+  serviceName: off-cluster-off-node-1fd2d2ca
 
 ---

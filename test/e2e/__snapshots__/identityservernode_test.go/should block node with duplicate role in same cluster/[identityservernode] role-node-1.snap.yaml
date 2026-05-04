@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: role-cluster-role-node-1
-  serviceName: role-cluster-role-node-1
+  deploymentName: role-cluster-role-node-1-0ecddc67
+  serviceName: role-cluster-role-node-1-0ecddc67
 
 ---

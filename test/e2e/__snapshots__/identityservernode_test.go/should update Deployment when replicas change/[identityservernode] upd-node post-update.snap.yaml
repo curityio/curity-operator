@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 3
-  deploymentName: upd-cluster-upd-node
-  serviceName: upd-cluster-upd-node
+  deploymentName: upd-cluster-upd-node-b8e7c1dd
+  serviceName: upd-cluster-upd-node-b8e7c1dd
 
 ---

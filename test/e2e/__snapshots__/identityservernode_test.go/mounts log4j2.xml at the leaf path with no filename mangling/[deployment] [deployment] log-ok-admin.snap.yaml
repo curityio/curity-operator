@@ -1,7 +1,7 @@
 
 [IdentityServerNode configuration Label-based config discovery Logging config-type mounts log4j2.xml at the leaf path with no filename mangling - 1]
 metadata:
-  name: log-ok-cluster-log-ok-admin
+  name: log-ok-cluster-log-ok-admin-8fd9fc4f
   namespace: e2e-cfg-logging
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: admin
-    app.kubernetes.io/instance: log-ok-cluster-log-ok-admin
+    app.kubernetes.io/instance: log-ok-cluster-log-ok-admin-8fd9fc4f
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

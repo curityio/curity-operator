@@ -1,14 +1,14 @@
 
 [IdentityServerNode autoscaling HPA created for runtime with autoscaling enabled should create HPA for runtime node with autoscaling enabled - 1]
 metadata:
-  name: hpa-cluster-hpa-runtime
+  name: hpa-cluster-hpa-runtime-074918ce
   namespace: e2e-hpa
   uid: <Any value>
   resourceVersion: <Any value>
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: hpa-cluster-hpa-runtime
+    app.kubernetes.io/instance: hpa-cluster-hpa-runtime-074918ce
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"
@@ -19,7 +19,7 @@ metadata:
 spec:
   scaleTargetRef:
     kind: Deployment
-    name: hpa-cluster-hpa-runtime
+    name: hpa-cluster-hpa-runtime-074918ce
     apiVersion: apps/v1
   minReplicas: 2
   maxReplicas: 10

@@ -51,8 +51,8 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: cfg-ar-cluster-cfg-ar-admin
-  serviceName: cfg-ar-cluster-cfg-ar-admin
+  deploymentName: cfg-ar-cluster-cfg-ar-admin-df53110e
+  serviceName: cfg-ar-cluster-cfg-ar-admin-df53110e
   appliedManagedResources:
     - name: routing-config
       kind: ConfigMap

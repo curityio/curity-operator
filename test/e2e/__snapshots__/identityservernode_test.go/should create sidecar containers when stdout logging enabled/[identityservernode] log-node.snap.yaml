@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: log-cluster-log-node
-  serviceName: log-cluster-log-node
+  deploymentName: log-cluster-log-node-7072287a
+  serviceName: log-cluster-log-node-7072287a
 
 ---

@@ -32,7 +32,7 @@ spec:
             - /opt/idsvr/bin/genclust -c $CONFIG_SERVICE_HOST -p $CONFIG_SERVICE_PORT
           env:
             - name: CONFIG_SERVICE_HOST
-              value: job-cluster-job-admin
+              value: job-cluster-job-admin-7fa92c66
             - name: CONFIG_SERVICE_PORT
               value: "6789"
             - name: CONFIG_ENCRYPTION_KEY

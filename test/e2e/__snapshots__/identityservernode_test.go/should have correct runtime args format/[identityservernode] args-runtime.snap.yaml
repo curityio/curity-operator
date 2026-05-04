@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: rtargs-cluster-args-runtime
-  serviceName: rtargs-cluster-args-runtime
+  deploymentName: rtargs-cluster-args-runtime-65eccc86
+  serviceName: rtargs-cluster-args-runtime-65eccc86
 
 ---

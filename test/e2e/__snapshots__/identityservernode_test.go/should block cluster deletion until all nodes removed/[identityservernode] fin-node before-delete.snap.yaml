@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: fin-cluster-fin-node
-  serviceName: fin-cluster-fin-node
+  deploymentName: fin-cluster-fin-node-b9d706fd
+  serviceName: fin-cluster-fin-node-b9d706fd
 
 ---

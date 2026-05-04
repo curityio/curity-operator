@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: del-cluster-del-node
-  serviceName: del-cluster-del-node
+  deploymentName: del-cluster-del-node-237d0903
+  serviceName: del-cluster-del-node-237d0903
 
 ---

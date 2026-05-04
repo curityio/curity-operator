@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -36,12 +38,33 @@ const (
 	defaultProbeSuccess      = int32(3)
 )
 
-// ownedResourceName returns the child-resource name for Deployments, Services,
-// HPAs, and PDBs owned by a node. Prefixing with the cluster name prevents
-// collisions when two IdentityServerNode CRs in the same namespace share a
-// node name but reference different clusters.
-func ownedResourceName(clusterName, nodeName string) string {
-	return clusterName + "-" + nodeName
+// ownedResourceNameMaxLen caps the output of OwnedResourceName so that K8s's
+// own pod-template-hash (~10 chars) and pod random suffix (5 chars) can still
+// be appended without exceeding the 63-char DNS-1123 label limit on Pod names.
+const ownedResourceNameMaxLen = 47
+
+// OwnedResourceName returns the child-resource name for Deployments, Services,
+// HPAs, and PDBs owned by a node. The 8-character SHA-256 suffix disambiguates
+// (cluster, node) pairs that would otherwise produce the same name when the
+// hyphen separator interacts with hyphens inside cluster or node names —
+// without it, ("foo-bar","baz") and ("foo","bar-baz") both produce
+// "foo-bar-baz". The output is capped at 47 characters so derived Pod names
+// stay under the K8s 63-char DNS-1123 limit; the hash is computed over the
+// FULL inputs before any truncation, so distinct (cluster, node) pairs still
+// produce distinct names even when the human-readable prefix is truncated.
+//
+// Exported so test helpers in the controller_test and e2e packages compute
+// the same name the production code uses, instead of reimplementing the
+// algorithm.
+func OwnedResourceName(clusterName, nodeName string) string {
+	h := sha256.Sum256([]byte(clusterName + "\x00" + nodeName))
+	suffix := "-" + hex.EncodeToString(h[:4])
+
+	base := clusterName + "-" + nodeName
+	if len(base)+len(suffix) > ownedResourceNameMaxLen {
+		base = strings.TrimRight(base[:ownedResourceNameMaxLen-len(suffix)], "-")
+	}
+	return base + suffix
 }
 
 // buildDeployment constructs the desired Deployment for an IdentityServerNode.
@@ -112,7 +135,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ownedResourceName(cluster.Name, node.Name),
+			Name:      OwnedResourceName(cluster.Name, node.Name),
 			Namespace: node.Namespace,
 			Labels:    labels,
 		},
@@ -156,7 +179,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 func buildService(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ownedResourceName(cluster.Name, node.Name),
+			Name:      OwnedResourceName(cluster.Name, node.Name),
 			Namespace: node.Namespace,
 			Labels:    buildLabels(cluster, node),
 		},
@@ -406,7 +429,7 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 func buildLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "curity-identity-server",
-		"app.kubernetes.io/instance":   ownedResourceName(cluster.Name, node.Name),
+		"app.kubernetes.io/instance":   OwnedResourceName(cluster.Name, node.Name),
 		"app.kubernetes.io/managed-by": "curity-operator",
 		"app.kubernetes.io/component":  string(node.Spec.Type),
 		"app.kubernetes.io/version":    cluster.Spec.Version,
@@ -419,7 +442,7 @@ func buildLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identit
 func buildSelectorLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":     "curity-identity-server",
-		"app.kubernetes.io/instance": ownedResourceName(cluster.Name, node.Name),
+		"app.kubernetes.io/instance": OwnedResourceName(cluster.Name, node.Name),
 	}
 }
 
@@ -667,7 +690,7 @@ func buildHPA(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentitySe
 
 	metrics = append(metrics, as.CustomMetrics...)
 
-	owned := ownedResourceName(cluster.Name, node.Name)
+	owned := OwnedResourceName(cluster.Name, node.Name)
 	return &autoscalingv2.HorizontalPodAutoscaler{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      owned,
@@ -694,7 +717,7 @@ func buildPDB(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentitySe
 	pdb := resolvePDB(cluster, node)
 	return &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ownedResourceName(cluster.Name, node.Name),
+			Name:      OwnedResourceName(cluster.Name, node.Name),
 			Namespace: node.Namespace,
 			Labels:    buildLabels(cluster, node),
 		},

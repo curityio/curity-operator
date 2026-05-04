@@ -1,7 +1,7 @@
 
 [IdentityServerNode configuration Cluster config generation should mount cluster config volume on all node Deployments - 1]
 metadata:
-  name: cc-cluster-cc-admin
+  name: cc-cluster-cc-admin-814c869d
   namespace: e2e-clusterconfig
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: admin
-    app.kubernetes.io/instance: cc-cluster-cc-admin
+    app.kubernetes.io/instance: cc-cluster-cc-admin-814c869d
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

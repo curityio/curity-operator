@@ -1,7 +1,7 @@
 
 [IdentityServerNode configuration Label-based config discovery Unlabeled ConfigMap not mounted should not mount unlabeled ConfigMap - 1]
 metadata:
-  name: cfg-ul-cluster-cfg-ul-runtime
+  name: cfg-ul-cluster-cfg-ul-runtime-4d288a9a
   namespace: e2e-cfg-unlabeled
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: cfg-ul-cluster-cfg-ul-runtime
+    app.kubernetes.io/instance: cfg-ul-cluster-cfg-ul-runtime-4d288a9a
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

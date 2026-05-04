@@ -55,3 +55,60 @@ status:
   serviceName: move-b-move-admin
 
 ---
+
+[ClusterRef change admin move a→b cleans cluster-a orphan resources and flips ClusterConfigReady=False without mutating Secret - 1]
+metadata:
+  name: move-admin
+  namespace: e2e-move-admin
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: move-b
+  ownerReferences: <Any value>
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: admin
+  role: admin-role
+  ui:
+    enabled: true
+    secure: true
+  identityServerClusterRef:
+    name: move-b
+  replicas: 1
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: ClusterReady
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  deploymentName: move-b-move-admin-34e4be3f
+  serviceName: move-b-move-admin-34e4be3f
+
+---

@@ -289,7 +289,10 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 		For(&v1alpha1.IdentityServerCluster{}).
 		Watches(
 			&v1alpha1.IdentityServerNode{},
-			handler.EnqueueRequestsFromMapFunc(r.findClusterForNode),
+			// Union old+new clusterRef on Update events so the abandoned
+			// cluster reconciles when a node moves a→b — the bare
+			// EnqueueRequestsFromMapFunc would only see e.ObjectNew.
+			newUnionScopeHandler(r.findClusterForNode),
 			builder.WithPredicates(nodeStatusConditionsChangedPredicate{}),
 		).
 		Watches(
@@ -567,6 +570,99 @@ func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeNam
 // below ("input drift") detects spec changes that landed after Job creation
 // and recreates the Job against the latest spec. Branches A/B/C never run in
 // that state.
+// resetAbandonedClusterConfig resets the cluster-config Secret to placeholder
+// state when the cluster's admin has moved to a different cluster. Preserves
+// the Secret object so existing pods' mounted files keep working and so the
+// curity.io/encryption-key-hash annotation survives for future Branch A
+// rotation detection. Idempotent: no-op when the Secret is missing, already
+// in placeholder state, or when the move signal is absent.
+//
+// The "admin moved" signal is: the IdentityServerNode named in the Secret's
+// curity.io/admin-node annotation still exists in the namespace, but its
+// clusterRef now points elsewhere. This explicitly excludes the brief
+// admin-rename window (delete-old-then-create-new within the same cluster)
+// where the node CR named in the annotation has gone away — Branch B handles
+// that case cheaply once the new admin appears, and resetting eagerly would
+// force an unnecessary full regen.
+func (r *IdentityServerClusterReconciler) resetAbandonedClusterConfig(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) error {
+	log := ctrl.LoggerFrom(ctx)
+	secretName := clusterConfigSecretName(cluster.Name)
+	jobName := cluster.Name + clusterConfigJobSuffix
+
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: cluster.Namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("getting cluster-config secret for abandoned-cluster reset: %w", err)
+	}
+	if !isClusterConfigReady(&secret) {
+		return nil
+	}
+
+	storedAdmin := secret.Annotations["curity.io/admin-node"]
+	if storedAdmin == "" {
+		return nil
+	}
+	var priorAdmin v1alpha1.IdentityServerNode
+	err := r.Get(ctx, client.ObjectKey{Name: storedAdmin, Namespace: cluster.Namespace}, &priorAdmin)
+	if apierrors.IsNotFound(err) {
+		// Prior admin CR is gone — could be a rename in progress (delete-old
+		// then create-new within this cluster) or a permanent delete.
+		// Either way, hold the Secret as-is: Branch B handles the rename
+		// case once the new admin appears, and the user has done nothing
+		// that should obviously trigger a regen.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("looking up prior admin node %q for abandoned-cluster reset: %w", storedAdmin, err)
+	}
+	if priorAdmin.Spec.IdentityServerClusterRef.Name == cluster.Name &&
+		priorAdmin.Spec.Type == v1alpha1.NodeTypeAdmin {
+		// Cache lag — prior admin still appears to point at this cluster
+		// AND is still spec.type=admin even though listChildNodes didn't
+		// return it. Don't reset; the next reconcile will re-evaluate
+		// against fresh state. (If the type changed away from admin while
+		// staying in this cluster, that IS a legitimate "lost admin"
+		// signal and we fall through to the reset below.)
+		return nil
+	}
+
+	movedAway := priorAdmin.Spec.IdentityServerClusterRef.Name != cluster.Name
+	log.Info("prior admin no longer admins this cluster; resetting cluster-config Secret to placeholder",
+		"cluster", cluster.Name, "priorAdmin", storedAdmin,
+		"priorAdminClusterRef", priorAdmin.Spec.IdentityServerClusterRef.Name,
+		"priorAdminType", priorAdmin.Spec.Type, "movedAway", movedAway, "secret", secretName)
+
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
+	}
+	secret.Data[clusterConfigKey] = []byte(clusterConfigPlaceholder)
+	delete(secret.Annotations, "curity.io/admin-node")
+	delete(secret.Annotations, "curity.io/cluster-config-hash")
+	if err := r.Update(ctx, &secret); err != nil {
+		return fmt.Errorf("resetting cluster-config secret to placeholder: %w", err)
+	}
+
+	var oldJob batchv1.Job
+	if err := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: cluster.Namespace}, &oldJob); err == nil {
+		if delErr := r.Delete(ctx, &oldJob, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
+			return fmt.Errorf("deleting in-flight genclust Job during abandoned-cluster reset: %w", delErr)
+		}
+	}
+
+	if movedAway {
+		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "AdminDeparted",
+			"Admin node %q moved to cluster %q; cluster-config Secret reset to placeholder",
+			storedAdmin, priorAdmin.Spec.IdentityServerClusterRef.Name)
+	} else {
+		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "AdminDeparted",
+			"Admin node %q is no longer of type=admin; cluster-config Secret reset to placeholder",
+			storedAdmin)
+	}
+	return nil
+}
+
 func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Context, cluster *v1alpha1.IdentityServerCluster, childNodes []v1alpha1.IdentityServerNode) error {
 	log := ctrl.LoggerFrom(ctx)
 	secretName := clusterConfigSecretName(cluster.Name)
@@ -575,6 +671,15 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 	// 1. Find admin node
 	adminNodeName := findAdminNodeName(childNodes)
 	if adminNodeName == "" {
+		// No admin: either the cluster never had one, or its admin moved
+		// to another cluster. In the latter case the Secret still holds
+		// real cluster.xml referencing the now-orphaned admin Service —
+		// reset to placeholder so a returning admin triggers a fresh
+		// genclust run via the standard create-on-empty path. Idempotent:
+		// no-op when the Secret doesn't exist or is already placeholder.
+		if err := r.resetAbandonedClusterConfig(ctx, cluster); err != nil {
+			return err
+		}
 		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
 			metav1.ConditionFalse, "WaitingForAdmin",
 			"No admin node found for this cluster", cluster.Generation)

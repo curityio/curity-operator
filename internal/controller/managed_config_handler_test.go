@@ -18,11 +18,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// mapByName returns a managedConfigMapFunc that looks up each object's Name in
+// mapByName returns a scopeMapFunc that looks up each object's Name in
 // a map and returns the associated []ctrl.Request. This lets each test declare
 // exactly which clusters an object should enqueue, independent of the real
 // scope-matching logic.
-func mapByName(routing map[string][]ctrl.Request) managedConfigMapFunc {
+func mapByName(routing map[string][]ctrl.Request) scopeMapFunc {
 	return func(_ context.Context, obj client.Object) []ctrl.Request {
 		if obj == nil {
 			return nil
@@ -67,7 +67,7 @@ func TestManagedConfigHandler_UpdateUnionsOldAndNew_ClusterLeavingScope(t *testi
 	// (annotation removed or changed), the old mapping returns [cluster-a] but
 	// the new mapping returns nothing. Without the union the cluster would
 	// silently stop reconciling on this change.
-	h := newManagedConfigHandler(mapByName(map[string][]ctrl.Request{
+	h := newUnionScopeHandler(mapByName(map[string][]ctrl.Request{
 		"old": {req("ns", "cluster-a")},
 		"new": nil,
 	}))
@@ -82,7 +82,7 @@ func TestManagedConfigHandler_UpdateUnionsOldAndNew_ClusterLeavingScope(t *testi
 }
 
 func TestManagedConfigHandler_UpdateUnionsOldAndNew_ClusterEnteringScope(t *testing.T) {
-	h := newManagedConfigHandler(mapByName(map[string][]ctrl.Request{
+	h := newUnionScopeHandler(mapByName(map[string][]ctrl.Request{
 		"old": nil,
 		"new": {req("ns", "cluster-a")},
 	}))
@@ -98,7 +98,7 @@ func TestManagedConfigHandler_UpdateUnionsOldAndNew_ClusterEnteringScope(t *test
 
 func TestManagedConfigHandler_UpdateUnionsOldAndNew_DisjointSets(t *testing.T) {
 	// Both "moved from" and "moved to" clusters must reconcile in one cycle.
-	h := newManagedConfigHandler(mapByName(map[string][]ctrl.Request{
+	h := newUnionScopeHandler(mapByName(map[string][]ctrl.Request{
 		"old": {req("ns", "cluster-a")},
 		"new": {req("ns", "cluster-b")},
 	}))
@@ -113,7 +113,7 @@ func TestManagedConfigHandler_UpdateUnionsOldAndNew_DisjointSets(t *testing.T) {
 }
 
 func TestManagedConfigHandler_UpdateUnionsOldAndNew_OverlappingSets(t *testing.T) {
-	h := newManagedConfigHandler(mapByName(map[string][]ctrl.Request{
+	h := newUnionScopeHandler(mapByName(map[string][]ctrl.Request{
 		"old": {req("ns", "cluster-a"), req("ns", "cluster-b")},
 		"new": {req("ns", "cluster-b"), req("ns", "cluster-c")},
 	}))
@@ -136,7 +136,7 @@ func TestManagedConfigHandler_UpdateDeduplicatesIdenticalSets(t *testing.T) {
 	// accidentally — the handler itself must union via a set so the no-op
 	// case behaves correctly even if the queue semantics ever change.
 	reqs := []ctrl.Request{req("ns", "cluster-a")}
-	h := newManagedConfigHandler(mapByName(map[string][]ctrl.Request{
+	h := newUnionScopeHandler(mapByName(map[string][]ctrl.Request{
 		"old": reqs,
 		"new": reqs,
 	}))
@@ -151,7 +151,7 @@ func TestManagedConfigHandler_UpdateDeduplicatesIdenticalSets(t *testing.T) {
 }
 
 func TestManagedConfigHandler_CreateEnqueuesMappedRequests(t *testing.T) {
-	h := newManagedConfigHandler(mapByName(map[string][]ctrl.Request{
+	h := newUnionScopeHandler(mapByName(map[string][]ctrl.Request{
 		"obj": {req("ns", "cluster-a"), req("ns", "cluster-b")},
 	}))
 	q := newTestQueue()
@@ -165,7 +165,7 @@ func TestManagedConfigHandler_CreateEnqueuesMappedRequests(t *testing.T) {
 }
 
 func TestManagedConfigHandler_DeleteEnqueuesMappedRequests(t *testing.T) {
-	h := newManagedConfigHandler(mapByName(map[string][]ctrl.Request{
+	h := newUnionScopeHandler(mapByName(map[string][]ctrl.Request{
 		"obj": {req("ns", "cluster-a")},
 	}))
 	q := newTestQueue()
@@ -179,7 +179,7 @@ func TestManagedConfigHandler_DeleteEnqueuesMappedRequests(t *testing.T) {
 }
 
 func TestManagedConfigHandler_GenericEnqueuesMappedRequests(t *testing.T) {
-	h := newManagedConfigHandler(mapByName(map[string][]ctrl.Request{
+	h := newUnionScopeHandler(mapByName(map[string][]ctrl.Request{
 		"obj": {req("ns", "cluster-a")},
 	}))
 	q := newTestQueue()
@@ -195,7 +195,7 @@ func TestManagedConfigHandler_GenericEnqueuesMappedRequests(t *testing.T) {
 func TestManagedConfigHandler_UpdateEmptyBoth(t *testing.T) {
 	// Neither object maps to any cluster (e.g. label/annotation missing) —
 	// nothing should be enqueued.
-	h := newManagedConfigHandler(mapByName(map[string][]ctrl.Request{}))
+	h := newUnionScopeHandler(mapByName(map[string][]ctrl.Request{}))
 	q := newTestQueue()
 	h.Update(context.Background(), event.UpdateEvent{ObjectOld: cm("old"), ObjectNew: cm("new")}, q)
 

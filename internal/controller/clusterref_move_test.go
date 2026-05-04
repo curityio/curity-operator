@@ -7,7 +7,6 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -85,29 +84,26 @@ var _ = Describe("ClusterRef change cleanup", func() {
 			eventuallyGetResource(ns, ownedName("cluster-b", "admin"), &corev1.Service{})
 		})
 
-		It("resets cluster-a's Secret to placeholder and flips ClusterConfigReady=False", func() {
+		It("flips ClusterConfigReady=False and preserves Secret data so surviving runtime pods stay healthy", func() {
 			testCreateCluster(ns, "cluster-a")
 			testCreateCluster(ns, "cluster-b")
 			testCreateNode(ns, "admin", v1alpha1.NodeTypeAdmin, "cluster-a")
 			simulateConfigReady("cluster-a", "admin")
 
+			// Capture the Secret state before the move so we can prove
+			// the operator does not mutate it on admin departure.
+			before := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a-cluster-config", Namespace: ns}, before)).To(Succeed())
+			beforeData := string(before.Data["cluster.xml"])
+			beforeAdmin := before.Annotations["curity.io/admin-node"]
+			beforeHash := before.Annotations["curity.io/cluster-config-hash"]
+			Expect(beforeData).NotTo(Equal("placeholder"))
+			Expect(beforeAdmin).To(Equal("admin"))
+
 			patchClusterRef("admin", "cluster-b")
 
-			// Cluster-a Secret should be reset to placeholder.
-			Eventually(func() string {
-				s := &corev1.Secret{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a-cluster-config", Namespace: ns}, s); err != nil {
-					return ""
-				}
-				return string(s.Data["cluster.xml"])
-			}, timeout, interval).Should(Equal("placeholder"))
-
-			// Cluster-a's admin-node annotation cleared.
-			s := &corev1.Secret{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a-cluster-config", Namespace: ns}, s)).To(Succeed())
-			Expect(s.Annotations).NotTo(HaveKey("curity.io/admin-node"))
-
-			// Cluster-a's ClusterConfigReady condition flips to False.
+			// Cluster-a's ClusterConfigReady condition flips to False —
+			// our user-visible signal that the cluster has lost its admin.
 			Eventually(func() string {
 				var c v1alpha1.IdentityServerCluster
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a", Namespace: ns}, &c); err != nil {
@@ -115,6 +111,21 @@ var _ = Describe("ClusterRef change cleanup", func() {
 				}
 				return conditionReason(c.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
 			}, timeout, interval).Should(Equal("WaitingForAdmin"))
+
+			// CRITICAL: Secret data + annotations must NOT change. Mutating
+			// them would cause the operator's config-hash recompute at
+			// identityservernode_reconciler.go:401 to flip the value on
+			// every surviving runtime node's Deployment template, forcing
+			// a rolling restart whose new pod boots with stale/placeholder
+			// data and crashloops. Holding the Secret keeps subPath-mounted
+			// runtime pods healthy until the user resolves the move.
+			Consistently(func(g Gomega) {
+				s := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a-cluster-config", Namespace: ns}, s)).To(Succeed())
+				g.Expect(string(s.Data["cluster.xml"])).To(Equal(beforeData))
+				g.Expect(s.Annotations["curity.io/admin-node"]).To(Equal(beforeAdmin))
+				g.Expect(s.Annotations["curity.io/cluster-config-hash"]).To(Equal(beforeHash))
+			}, 2*time.Second, 250*time.Millisecond).Should(Succeed())
 		})
 	})
 
@@ -323,13 +334,14 @@ var _ = Describe("ClusterRef change cleanup", func() {
 	})
 
 	Context("a→b→a bounce", func() {
-		It("re-runs genclust for the source cluster when admin returns", func() {
-			// Smoke test S9: after admin moves a→b, source-a's Secret is
-			// reset to placeholder. When admin moves back a, source-a
-			// reconcile sees secretExists=true with isClusterConfigReady=false,
-			// falls through Branches A/B/C, reaches the placeholder/Job
-			// creation path at identityservercluster_reconciler.go:732,
-			// and a fresh genclust Job runs.
+		It("flips ClusterConfigReady False on departure and back to True on return without touching Secret data", func() {
+			// Smoke test S9: when admin returns to its source cluster
+			// under the same name, the steady-state branch in
+			// ensureClusterConfig recognizes storedConfigHash ==
+			// currentConfigHash and flips the condition back to True
+			// without any genclust run. Critical: the Secret data is
+			// never mutated across the bounce, so any surviving runtime
+			// pods on s9-a stay healthy throughout.
 			testCreateCluster(ns, "s9-a")
 			testCreateCluster(ns, "s9-b")
 			testCreateNode(ns, "bouncer", v1alpha1.NodeTypeAdmin, "s9-a")
@@ -337,42 +349,47 @@ var _ = Describe("ClusterRef change cleanup", func() {
 
 			eventuallyGetResource(ns, ownedName("s9-a", "bouncer"), &appsv1.Deployment{})
 
-			// First bounce: a→b. Source-a's Secret should be reset.
+			before := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "s9-a-cluster-config", Namespace: ns}, before)).To(Succeed())
+			beforeData := string(before.Data["cluster.xml"])
+			beforeAdmin := before.Annotations["curity.io/admin-node"]
+
+			// First bounce: a→b. cluster-a's ClusterConfigReady flips to
+			// False but Secret data must stay intact.
 			patchClusterRef("bouncer", "s9-b")
 			Eventually(func() string {
-				s := &corev1.Secret{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "s9-a-cluster-config", Namespace: ns}, s); err != nil {
+				var c v1alpha1.IdentityServerCluster
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "s9-a", Namespace: ns}, &c); err != nil {
 					return ""
 				}
-				return string(s.Data["cluster.xml"])
-			}, timeout, interval).Should(Equal("placeholder"))
+				return conditionReason(c.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+			}, timeout, interval).Should(Equal("WaitingForAdmin"))
 
-			// Second bounce: b→a. Source-a is now ready for a fresh genclust.
+			Consistently(func(g Gomega) {
+				s := &corev1.Secret{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "s9-a-cluster-config", Namespace: ns}, s)).To(Succeed())
+				g.Expect(string(s.Data["cluster.xml"])).To(Equal(beforeData))
+				g.Expect(s.Annotations["curity.io/admin-node"]).To(Equal(beforeAdmin))
+			}, 2*time.Second, 250*time.Millisecond).Should(Succeed())
+
+			// Second bounce: b→a. cluster-a sees the admin back under the
+			// same name and hash; steady-state branch flips condition to
+			// True without any Secret mutation or Job creation.
 			simulateConfigReady("s9-b", "bouncer")
 			patchClusterRef("bouncer", "s9-a")
 
-			// After the bounce back, source-a's reconcile flow should
-			// fall through Branches A/B/C (all gated on isClusterConfigReady),
-			// skip placeholder creation (Secret already exists), and reach
-			// the Job-creation path. We can't run genclust in envtest, but
-			// we CAN observe that a fresh Job was created for cluster-a
-			// with the returning admin's name.
 			Eventually(func() string {
-				job := &batchv1.Job{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "s9-a-cluster-config-job", Namespace: ns}, job); err != nil {
+				var c v1alpha1.IdentityServerCluster
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "s9-a", Namespace: ns}, &c); err != nil {
 					return ""
 				}
-				if len(job.Spec.Template.Spec.Containers) == 0 {
-					return ""
-				}
-				for _, e := range job.Spec.Template.Spec.Containers[0].Env {
-					if e.Name == "CONFIG_SERVICE_HOST" {
-						return e.Value
-					}
-				}
-				return ""
-			}, timeout, interval).Should(Equal("s9-a-bouncer"),
-				"a fresh genclust Job should be created with CONFIG_SERVICE_HOST pointing at the returning admin")
+				return conditionReason(c.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+			}, timeout, interval).Should(Equal("SecretReady"))
+
+			s := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "s9-a-cluster-config", Namespace: ns}, s)).To(Succeed())
+			Expect(string(s.Data["cluster.xml"])).To(Equal(beforeData))
+			Expect(s.Annotations["curity.io/admin-node"]).To(Equal(beforeAdmin))
 		})
 	})
 
@@ -537,10 +554,10 @@ var _ = Describe("ClusterRef change cleanup", func() {
 	})
 })
 
-// resetAbandonedClusterConfig is exercised by the integration tests above.
-// This block adds direct probes for the helper's edge cases that are awkward
-// to drive from a full reconcile.
-var _ = Describe("Abandoned-cluster Secret reset edge cases", func() {
+// announceAdminDeparted is exercised by the integration tests above. This
+// block adds direct probes for the helper's edge cases that are awkward to
+// drive from a full reconcile.
+var _ = Describe("Admin-departed announcement edge cases", func() {
 	const timeout = 30 * time.Second
 	const interval = 250 * time.Millisecond
 
@@ -554,17 +571,17 @@ var _ = Describe("Abandoned-cluster Secret reset edge cases", func() {
 		Expect(k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
 	})
 
-	It("resets Secret when admin's spec.type changes from admin to runtime in same cluster", func() {
+	It("flips ClusterConfigReady=False without mutating Secret when admin's spec.type changes from admin to runtime in same cluster", func() {
 		// Regression guard for the S14 finding during smoke testing on
-		// 2026-05-04. Before the fix, resetAbandonedClusterConfig's
-		// cache-lag guard returned early whenever the prior admin's CR
-		// existed and pointed at this cluster — without checking that
-		// it was still spec.type=admin. The result: a user changing an
-		// admin to a runtime within the same cluster would lose the
-		// admin's role, but the cluster-config Secret would keep its
-		// real cluster.xml with the now-stale <host>cluster-admin</host>
-		// reference, and downstream runtime nodes would dial into
-		// nothing useful.
+		// 2026-05-04. The cache-lag guard now also requires
+		// priorAdmin.Spec.Type == NodeTypeAdmin: a user changing an
+		// admin to a runtime within the same cluster legitimately
+		// signals "this cluster lost its admin" and we surface that via
+		// the AdminDeparted event + ClusterConfigReady condition flip.
+		// We do NOT mutate the Secret data because that would force a
+		// rolling restart of any runtime pods on this cluster (their
+		// pod-template config-hash would flip), and they'd boot reading
+		// stale data from kubelet's subPath cache and crashloop.
 		testCreateCluster(ns, "tc-cluster")
 		testCreateNode(ns, "tc-admin", v1alpha1.NodeTypeAdmin, "tc-cluster")
 
@@ -577,9 +594,8 @@ var _ = Describe("Abandoned-cluster Secret reset edge cases", func() {
 		}, timeout, interval).Should(Equal("tc-admin"))
 
 		// Pre-populate Secret with real XML referencing the admin host.
-		secret.Data = map[string][]byte{
-			"cluster.xml": []byte("<config><host>tc-cluster-tc-admin</host></config>"),
-		}
+		realXML := []byte("<config><host>tc-cluster-tc-admin</host></config>")
+		secret.Data = map[string][]byte{"cluster.xml": realXML}
 		Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
 		// Flip spec.type from admin to runtime — same name, same clusterRef.
@@ -588,23 +604,27 @@ var _ = Describe("Abandoned-cluster Secret reset edge cases", func() {
 		node.Spec.Type = v1alpha1.NodeTypeRuntime
 		Expect(k8sClient.Update(ctx, node)).To(Succeed())
 
-		// Secret data must be reset to placeholder (cluster lost its admin
-		// even though the CR still exists in this cluster).
+		// Cluster's ClusterConfigReady must flip to False, reason WaitingForAdmin.
 		Eventually(func() string {
-			s := &corev1.Secret{}
-			if err := k8sClient.Get(ctx, types.NamespacedName{Name: "tc-cluster-cluster-config", Namespace: ns}, s); err != nil {
+			var c v1alpha1.IdentityServerCluster
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: "tc-cluster", Namespace: ns}, &c); err != nil {
 				return ""
 			}
-			return string(s.Data["cluster.xml"])
-		}, timeout, interval).Should(Equal("placeholder"))
+			return conditionReason(c.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+		}, timeout, interval).Should(Equal("WaitingForAdmin"))
 
-		// admin-node annotation must be cleared.
-		s := &corev1.Secret{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "tc-cluster-cluster-config", Namespace: ns}, s)).To(Succeed())
-		Expect(s.Annotations).NotTo(HaveKey("curity.io/admin-node"))
+		// Secret data + admin-node annotation must NOT change. Kubelet's
+		// subPath mount keeps surviving runtime pods alive only if we
+		// don't touch this Secret.
+		Consistently(func(g Gomega) {
+			s := &corev1.Secret{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "tc-cluster-cluster-config", Namespace: ns}, s)).To(Succeed())
+			g.Expect(s.Data["cluster.xml"]).To(Equal(realXML))
+			g.Expect(s.Annotations["curity.io/admin-node"]).To(Equal("tc-admin"))
+		}, 2*time.Second, 250*time.Millisecond).Should(Succeed())
 	})
 
-	It("does not reset when Secret is already in placeholder state", func() {
+	It("stays a no-op when Secret is already in placeholder state", func() {
 		testCreateCluster(ns, "ph-cluster")
 		// No admin created — Secret is created by the cluster reconciler
 		// in placeholder state and stays that way.

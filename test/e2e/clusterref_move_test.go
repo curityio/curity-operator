@@ -31,7 +31,7 @@ var _ = Describe("ClusterRef change", func() {
 		BeforeAll(func() { createNS(ns) })
 		AfterAll(func() { deleteNS(ns) })
 
-		It("cleans cluster-a orphan resources and resets cluster-a Secret to placeholder", func() {
+		It("cleans cluster-a orphan resources and flips ClusterConfigReady=False without mutating Secret", func() {
 			ctx := context.Background()
 
 			By("creating two clusters and an admin on cluster-a")
@@ -66,6 +66,14 @@ var _ = Describe("ClusterRef change", func() {
 				return k().Update(ctx, node)
 			}, e2eTimeout, e2eInterval).Should(Succeed())
 
+			By("capturing cluster-a Secret state before the move")
+			secBefore := &corev1.Secret{}
+			Expect(k().Get(ctx, client.ObjectKey{Name: clusterA + "-cluster-config", Namespace: ns}, secBefore)).To(Succeed())
+			beforeXML := string(secBefore.Data["cluster.xml"])
+			beforeAdminAnno := secBefore.Annotations["curity.io/admin-node"]
+			Expect(beforeXML).NotTo(Equal("placeholder"))
+			Expect(beforeAdminAnno).To(Equal(adminName))
+
 			By("waiting for cluster-a's admin Deployment to be cleaned up")
 			Eventually(func() bool {
 				return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: ownedName(clusterA, adminName), Namespace: ns}, &appsv1.Deployment{}))
@@ -73,15 +81,6 @@ var _ = Describe("ClusterRef change", func() {
 			Eventually(func() bool {
 				return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: ownedName(clusterA, adminName), Namespace: ns}, &corev1.Service{}))
 			}, e2eTimeout, e2eInterval).Should(BeTrue())
-
-			By("waiting for cluster-a's Secret to be reset to placeholder")
-			Eventually(func() string {
-				s := &corev1.Secret{}
-				if err := k().Get(ctx, client.ObjectKey{Name: clusterA + "-cluster-config", Namespace: ns}, s); err != nil {
-					return ""
-				}
-				return string(s.Data["cluster.xml"])
-			}, e2eTimeout, e2eInterval).Should(Equal("placeholder"))
 
 			By("waiting for cluster-a ClusterConfigReady=False, reason=WaitingForAdmin")
 			Eventually(func() string {
@@ -95,6 +94,18 @@ var _ = Describe("ClusterRef change", func() {
 				}
 				return ""
 			}, e2eTimeout, e2eInterval).Should(Equal("WaitingForAdmin"))
+
+			By("verifying cluster-a's Secret data + admin-node annotation were NOT mutated")
+			// Critical: keeping the Secret intact lets surviving runtime
+			// pods (mounted via subPath) keep their valid in-memory config.
+			// Mutating it would force a rolling restart that crashloops on
+			// any new pod reading the placeholder data.
+			Consistently(func(g Gomega) {
+				s := &corev1.Secret{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: clusterA + "-cluster-config", Namespace: ns}, s)).To(Succeed())
+				g.Expect(string(s.Data["cluster.xml"])).To(Equal(beforeXML))
+				g.Expect(s.Annotations["curity.io/admin-node"]).To(Equal(beforeAdminAnno))
+			}, "3s", e2eInterval).Should(Succeed())
 
 			By("simulating cluster-b's config readiness so the new admin Deployment can be created")
 			utils.SimulateClusterConfigReady(ns, clusterB, e2eTimeout, e2eInterval)

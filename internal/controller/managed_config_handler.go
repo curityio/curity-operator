@@ -29,11 +29,11 @@ func logImplicitConfigTypeIfNeeded(ctx context.Context, obj client.Object) {
 		"kind", kind, "name", obj.GetName(), "namespace", obj.GetNamespace())
 }
 
-// newClusterManagedConfigHandler wraps newManagedConfigHandler so the
+// newClusterManagedConfigHandler wraps newUnionScopeHandler so the
 // implicit-default log fires once per Create/Update event — never on Delete
 // or on the pre-Update snapshot.
-func newClusterManagedConfigHandler(list managedConfigMapFunc) handler.EventHandler {
-	inner := newManagedConfigHandler(list)
+func newClusterManagedConfigHandler(list scopeMapFunc) handler.EventHandler {
+	inner := newUnionScopeHandler(list)
 	return handler.Funcs{
 		CreateFunc: func(ctx context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 			logImplicitConfigTypeIfNeeded(ctx, e.Object)
@@ -52,14 +52,17 @@ func newClusterManagedConfigHandler(list managedConfigMapFunc) handler.EventHand
 	}
 }
 
-// managedConfigMapFunc lists reconcile requests for the clusters/nodes that
-// an object's managed-config label + curity.io/cluster annotation designate.
-type managedConfigMapFunc func(ctx context.Context, obj client.Object) []ctrl.Request
+// scopeMapFunc lists reconcile requests for the targets affected by an
+// object's current state. Used by both the managed-config watches (where
+// scope is derived from labels and curity.io/cluster annotations) and the
+// node-clusterRef watch (where scope is the referenced cluster).
+type scopeMapFunc func(ctx context.Context, obj client.Object) []ctrl.Request
 
-// newManagedConfigHandler returns an EventHandler that unions the old and new
-// scope sets on Update events so clusters both leaving and entering scope
-// reconcile in one cycle.
-func newManagedConfigHandler(list managedConfigMapFunc) handler.EventHandler {
+// newUnionScopeHandler returns an EventHandler that unions the old and new
+// map results on Update events so all reconcile targets affected by either
+// the prior or new state fire in one cycle. Used both for managed-config
+// label/annotation changes and for IdentityServerNode clusterRef edits.
+func newUnionScopeHandler(list scopeMapFunc) handler.EventHandler {
 	enqueue := func(q workqueue.TypedRateLimitingInterface[reconcile.Request], reqs []ctrl.Request) {
 		for _, r := range reqs {
 			q.Add(r)

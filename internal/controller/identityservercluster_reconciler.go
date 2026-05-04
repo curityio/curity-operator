@@ -289,7 +289,10 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 		For(&v1alpha1.IdentityServerCluster{}).
 		Watches(
 			&v1alpha1.IdentityServerNode{},
-			handler.EnqueueRequestsFromMapFunc(r.findClusterForNode),
+			// Union old+new clusterRef on Update events so the abandoned
+			// cluster reconciles when a node moves a→b — the bare
+			// EnqueueRequestsFromMapFunc would only see e.ObjectNew.
+			newUnionScopeHandler(r.findClusterForNode),
 			builder.WithPredicates(nodeStatusConditionsChangedPredicate{}),
 		).
 		Watches(
@@ -575,6 +578,9 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 	// 1. Find admin node
 	adminNodeName := findAdminNodeName(childNodes)
 	if adminNodeName == "" {
+		if err := r.announceAdminDeparted(ctx, cluster); err != nil {
+			return err
+		}
 		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
 			metav1.ConditionFalse, "WaitingForAdmin",
 			"No admin node found for this cluster", cluster.Generation)
@@ -872,6 +878,69 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 			"genclust Job created, waiting for completion", cluster.Generation)
 	}
 
+	return nil
+}
+
+// announceAdminDeparted emits an AdminDeparted event when the prior admin
+// has moved to a different cluster or changed away from spec.type=admin.
+//
+// Deliberately does NOT mutate Data["cluster.xml"] or its annotations:
+// identityservernode_reconciler.go's config-hash injector stamps a SHA256 of
+// this Secret onto every node's Deployment pod template, so any data change
+// would force a rolling restart of surviving runtime pods. Their existing
+// pods boot reading "placeholder" content and crashloop. Holding the data
+// keeps subPath-mounted runtimes alive; Branch B handles XML rewrite when a
+// new admin returns under any name.
+//
+// The cache-lag guard (clusterRef==here AND type==admin) excludes the
+// in-cluster admin-rename window where listChildNodes hasn't caught up yet.
+func (r *IdentityServerClusterReconciler) announceAdminDeparted(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) error {
+	log := ctrl.LoggerFrom(ctx)
+	secretName := clusterConfigSecretName(cluster.Name)
+
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: cluster.Namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("getting cluster-config secret to announce admin-departed: %w", err)
+	}
+	if !isClusterConfigReady(&secret) {
+		return nil
+	}
+
+	storedAdmin := secret.Annotations["curity.io/admin-node"]
+	if storedAdmin == "" {
+		return nil
+	}
+	var priorAdmin v1alpha1.IdentityServerNode
+	err := r.Get(ctx, client.ObjectKey{Name: storedAdmin, Namespace: cluster.Namespace}, &priorAdmin)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("looking up prior admin node %q to announce admin-departed: %w", storedAdmin, err)
+	}
+	if priorAdmin.Spec.IdentityServerClusterRef.Name == cluster.Name &&
+		priorAdmin.Spec.Type == v1alpha1.NodeTypeAdmin {
+		return nil
+	}
+
+	movedAway := priorAdmin.Spec.IdentityServerClusterRef.Name != cluster.Name
+	log.Info("prior admin no longer admins this cluster",
+		"cluster", cluster.Name, "priorAdmin", storedAdmin,
+		"priorAdminClusterRef", priorAdmin.Spec.IdentityServerClusterRef.Name,
+		"priorAdminType", priorAdmin.Spec.Type, "movedAway", movedAway)
+
+	if movedAway {
+		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "AdminDeparted",
+			"Admin node %q moved to cluster %q; cluster-config Secret retained so surviving runtime nodes keep working",
+			storedAdmin, priorAdmin.Spec.IdentityServerClusterRef.Name)
+	} else {
+		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "AdminDeparted",
+			"Admin node %q is no longer of type=admin; cluster-config Secret retained so surviving runtime nodes keep working",
+			storedAdmin)
+	}
 	return nil
 }
 

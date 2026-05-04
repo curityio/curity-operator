@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -104,6 +105,14 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, fmt.Errorf("failed to update node metadata: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// 3.5. Cleanup orphan children from a prior clusterRef. Runs before the
+	// destination cluster fetch and any validation so orphans are removed in
+	// every code path: successful move, destination missing, duplicate-admin
+	// reject, owned-name collision. Idempotent (no-op when no orphans exist).
+	if err := r.cleanupOrphanChildren(ctx, &node); err != nil {
+		return ctrl.Result{}, fmt.Errorf("cleaning up orphan children: %w", err)
 	}
 
 	// 4. Fetch the referenced IdentityServerCluster
@@ -632,12 +641,12 @@ func (r *IdentityServerNodeReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		).
 		Watches(
 			&corev1.ConfigMap{},
-			newManagedConfigHandler(r.findNodesForManagedConfig),
+			newUnionScopeHandler(r.findNodesForManagedConfig),
 			builder.WithPredicates(managedConfigPredicate{}),
 		).
 		Watches(
 			&corev1.Secret{},
-			newManagedConfigHandler(r.findNodesForManagedConfig),
+			newUnionScopeHandler(r.findNodesForManagedConfig),
 			builder.WithPredicates(managedConfigPredicate{}),
 		).
 		Complete(r)
@@ -788,4 +797,95 @@ func (r *IdentityServerNodeReconciler) findNodesForManagedConfig(ctx context.Con
 		})
 	}
 	return requests
+}
+
+// cleanupOrphanChildren deletes child resources owned by this node whose names
+// don't match the current ownedResourceName(clusterRef, node). This handles the
+// case where a node's IdentityServerClusterRef has changed since prior children
+// were created — e.g. an admin moves from cluster-a to cluster-b, leaving
+// <cluster-a>-<node> resources that the standard CreateOrUpdate path no longer
+// looks at because it operates on the new <cluster-b>-<node> name.
+//
+// Filtered by both managed-by label (skip foreign workloads in the namespace)
+// and metav1.IsControlledBy (UID match — skip peer clusters' resources, even if
+// a peer node shares this node's name). Idempotent: a steady-state reconcile
+// with no orphans does four cache-backed Lists and exits without mutations.
+//
+// Deletes use Background propagation so cascade GC runs async; the order in
+// which we issue the four kinds doesn't affect the actual deletion order.
+func (r *IdentityServerNodeReconciler) cleanupOrphanChildren(
+	ctx context.Context,
+	node *v1alpha1.IdentityServerNode,
+) error {
+	log := ctrl.LoggerFrom(ctx)
+	keep := ownedResourceName(node.Spec.IdentityServerClusterRef.Name, node.Name)
+	listOpts := []client.ListOption{
+		client.InNamespace(node.Namespace),
+		client.MatchingLabels{"app.kubernetes.io/managed-by": "curity-operator"},
+	}
+	var cleaned []string
+
+	deleteIfOrphan := func(obj client.Object, kind string) error {
+		if obj.GetName() == keep {
+			return nil
+		}
+		if !metav1.IsControlledBy(obj, node) {
+			return nil
+		}
+		if err := r.Delete(ctx, obj, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("delete orphan %s %q: %w", kind, obj.GetName(), err)
+		}
+		cleaned = append(cleaned, fmt.Sprintf("%s/%s", kind, obj.GetName()))
+		return nil
+	}
+
+	var hpas autoscalingv2.HorizontalPodAutoscalerList
+	if err := r.List(ctx, &hpas, listOpts...); err != nil {
+		return fmt.Errorf("list HPAs for orphan cleanup: %w", err)
+	}
+	for i := range hpas.Items {
+		if err := deleteIfOrphan(&hpas.Items[i], "HorizontalPodAutoscaler"); err != nil {
+			return err
+		}
+	}
+
+	var pdbs policyv1.PodDisruptionBudgetList
+	if err := r.List(ctx, &pdbs, listOpts...); err != nil {
+		return fmt.Errorf("list PDBs for orphan cleanup: %w", err)
+	}
+	for i := range pdbs.Items {
+		if err := deleteIfOrphan(&pdbs.Items[i], "PodDisruptionBudget"); err != nil {
+			return err
+		}
+	}
+
+	var deploys appsv1.DeploymentList
+	if err := r.List(ctx, &deploys, listOpts...); err != nil {
+		return fmt.Errorf("list Deployments for orphan cleanup: %w", err)
+	}
+	for i := range deploys.Items {
+		if err := deleteIfOrphan(&deploys.Items[i], "Deployment"); err != nil {
+			return err
+		}
+	}
+
+	var svcs corev1.ServiceList
+	if err := r.List(ctx, &svcs, listOpts...); err != nil {
+		return fmt.Errorf("list Services for orphan cleanup: %w", err)
+	}
+	for i := range svcs.Items {
+		if err := deleteIfOrphan(&svcs.Items[i], "Service"); err != nil {
+			return err
+		}
+	}
+
+	if len(cleaned) > 0 {
+		log.Info("orphan children cleaned", "node", node.Name, "currentName", keep, "removed", cleaned)
+		r.Recorder.Eventf(node, corev1.EventTypeNormal, "OrphansCleaned",
+			"Removed stale child resources from previous cluster reference: %s", strings.Join(cleaned, ", "))
+	}
+	return nil
 }

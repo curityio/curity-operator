@@ -50,7 +50,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: lbl-cluster-lbl-node
-  serviceName: lbl-cluster-lbl-node
+  deploymentName: lbl-cluster-lbl-node-efd09cf2
+  serviceName: lbl-cluster-lbl-node-efd09cf2
 
 ---

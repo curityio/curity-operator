@@ -1,7 +1,7 @@
 
 [IdentityServerNode configuration Label-based config discovery Admin routing — config mounts only on admin should mount base ConfigMap only on admin when admin exists - 1]
 metadata:
-  name: cfg-ar-cluster-cfg-ar-runtime
+  name: cfg-ar-cluster-cfg-ar-runtime-690ebb0e
   namespace: e2e-cfg-admin-routing
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: cfg-ar-cluster-cfg-ar-runtime
+    app.kubernetes.io/instance: cfg-ar-cluster-cfg-ar-runtime-690ebb0e
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

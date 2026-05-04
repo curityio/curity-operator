@@ -1,7 +1,7 @@
 
 [IdentityServerNode podDisruptionBudget PDB with percentage minAvailable should create PDB with percentage minAvailable - 1]
 metadata:
-  name: pdb-pct-cluster-pdb-pct-node
+  name: pdb-pct-cluster-pdb-pct-node-f9c1c434
   namespace: e2e-pdb-pct
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: pdb-pct-cluster-pdb-pct-node
+    app.kubernetes.io/instance: pdb-pct-cluster-pdb-pct-node-f9c1c434
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

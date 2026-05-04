@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: sched-cluster-sched-runtime
-  serviceName: sched-cluster-sched-runtime
+  deploymentName: sched-cluster-sched-runtime-1795603c
+  serviceName: sched-cluster-sched-runtime-1795603c
 
 ---

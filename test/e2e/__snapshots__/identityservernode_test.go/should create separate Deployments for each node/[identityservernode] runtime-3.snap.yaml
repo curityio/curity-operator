@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: multi-cluster-runtime-3
-  serviceName: multi-cluster-runtime-3
+  deploymentName: multi-cluster-runtime-3-5b7dd315
+  serviceName: multi-cluster-runtime-3-5b7dd315
 
 ---

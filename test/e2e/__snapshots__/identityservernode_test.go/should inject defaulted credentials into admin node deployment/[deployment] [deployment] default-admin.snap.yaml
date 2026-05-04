@@ -1,7 +1,7 @@
 
 [IdentityServerNode credentials Default admin credentials should inject defaulted credentials into admin node deployment - 1]
 metadata:
-  name: default-creds-default-admin
+  name: default-creds-default-admin-d4fcb9d8
   namespace: e2e-default-creds
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: admin
-    app.kubernetes.io/instance: default-creds-default-admin
+    app.kubernetes.io/instance: default-creds-default-admin-d4fcb9d8
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

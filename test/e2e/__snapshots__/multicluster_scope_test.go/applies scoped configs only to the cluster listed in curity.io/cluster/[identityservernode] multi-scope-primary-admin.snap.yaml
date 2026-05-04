@@ -51,8 +51,8 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: primary-pri-admin
-  serviceName: primary-pri-admin
+  deploymentName: primary-pri-admin-0af4864f
+  serviceName: primary-pri-admin-0af4864f
   appliedManagedResources:
     - name: base-primary
       kind: ConfigMap

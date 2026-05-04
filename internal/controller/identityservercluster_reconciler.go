@@ -497,7 +497,7 @@ func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeNam
 								"/opt/idsvr/bin/genclust -c $CONFIG_SERVICE_HOST -p $CONFIG_SERVICE_PORT",
 							},
 							Env: []corev1.EnvVar{
-								{Name: "CONFIG_SERVICE_HOST", Value: ownedResourceName(cluster.Name, adminNodeName)},
+								{Name: "CONFIG_SERVICE_HOST", Value: OwnedResourceName(cluster.Name, adminNodeName)},
 								{Name: "CONFIG_SERVICE_PORT", Value: fmt.Sprintf("%d", portConfig)},
 							},
 						},
@@ -654,8 +654,8 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 			if storedConfigHash != "" && storedAdmin != "" && storedAdmin != adminNodeName {
 				hashWithOldAdmin := computeClusterConfigHash(cluster, storedAdmin)
 				if storedConfigHash == hashWithOldAdmin {
-					oldHost := ownedResourceName(cluster.Name, storedAdmin)
-					newHost := ownedResourceName(cluster.Name, adminNodeName)
+					oldHost := OwnedResourceName(cluster.Name, storedAdmin)
+					newHost := OwnedResourceName(cluster.Name, adminNodeName)
 					oldXML := string(configSecret.Data[clusterConfigKey])
 					oldHostTag := "<host>" + oldHost + "</host>"
 					if !strings.Contains(oldXML, oldHostTag) {

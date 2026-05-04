@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
+	"github.com/curityio/curity-operator/internal/controller"
 	"github.com/curityio/curity-operator/test/utils"
 )
 
@@ -46,10 +47,10 @@ func deleteNS(name string) {
 
 func k() client.Client { return utils.TestEnvironment.K8sClient }
 
-// ownedName mirrors internal/controller.ownedResourceName — the operator names
-// node-owned Deployments/Services/HPAs/PDBs as {clusterName}-{nodeName}.
+// ownedName delegates to the production OwnedResourceName so test assertions
+// look up child resources by exactly the name the operator computed.
 func ownedName(clusterName, nodeName string) string {
-	return clusterName + "-" + nodeName
+	return controller.OwnedResourceName(clusterName, nodeName)
 }
 
 // e2eHasCfgVolume checks if a Deployment has a volume with the given prefix.
@@ -675,77 +676,57 @@ var _ = Describe("IdentityServerNode", func() {
 			})
 		})
 
-		Describe("Owned resource name collision", Ordered, func() {
-			const ns = "e2e-name-collision"
+		Describe("Ambiguous-name pair across clusters", Ordered, func() {
+			// Regression guard for the cross-cluster ownedResourceName
+			// ambiguity that the old code defended against with a runtime
+			// collision check. With the SHA-256 suffix, ("foo-bar","baz")
+			// and ("foo","bar-baz") produce distinct names; both nodes
+			// run successfully end-to-end with no collision events.
+			const ns = "e2e-name-ambiguity"
 			BeforeAll(func() { createNS(ns) })
 			AfterAll(func() { deleteNS(ns) })
 
-			It("should block newer node when ownedResourceName collides across clusters", func() {
-				// ownedResourceName = clusterName + "-" + nodeName. Separator
-				// is ambiguous: ("foo-bar","baz") and ("foo","bar-baz") both
-				// yield "foo-bar-baz". Without the guard, two nodes would
-				// fight over one Deployment/Service via CreateOrUpdate.
+			It("should give both ambiguous pairs their own Deployments and Services", func() {
 				ctx := context.Background()
 
-				By("creating winner cluster and node")
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
 					map[string]interface{}{"name": "foo-bar", "namespace": ns})
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
 					map[string]interface{}{"name": "foo", "namespace": ns})
 
-				winner := &v1alpha1.IdentityServerNode{
+				nodeA := &v1alpha1.IdentityServerNode{
 					ObjectMeta: metav1.ObjectMeta{Name: "baz", Namespace: ns},
 					Spec: v1alpha1.IdentityServerNodeSpec{
-						Type: v1alpha1.NodeTypeRuntime, Role: "winner-role",
+						Type: v1alpha1.NodeTypeRuntime, Role: "role-a",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "foo-bar"},
 						Replicas:                 ptr.To(int32(1)),
 					},
 				}
-				Expect(k().Create(ctx, winner)).To(Succeed())
+				Expect(k().Create(ctx, nodeA)).To(Succeed())
 
-				winnerDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("foo-bar", "baz"), Namespace: ns}}
-				utils.WaitForResource(winnerDeploy, e2eTimeout, e2eInterval)
-
-				// metav1.Time has 1-second resolution; sleep to guarantee
-				// winner and loser get distinct CreationTimestamps so the
-				// older-wins rule fires deterministically (otherwise the
-				// reconciler falls back to UID tie-break).
-				time.Sleep(1100 * time.Millisecond)
-
-				By("creating loser node whose ownedResourceName collides")
-				loser := &v1alpha1.IdentityServerNode{
+				nodeB := &v1alpha1.IdentityServerNode{
 					ObjectMeta: metav1.ObjectMeta{Name: "bar-baz", Namespace: ns},
 					Spec: v1alpha1.IdentityServerNodeSpec{
-						Type: v1alpha1.NodeTypeRuntime, Role: "loser-role",
+						Type: v1alpha1.NodeTypeRuntime, Role: "role-b",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "foo"},
 						Replicas:                 ptr.To(int32(1)),
 					},
 				}
-				Expect(k().Create(ctx, loser)).To(Succeed())
+				Expect(k().Create(ctx, nodeB)).To(Succeed())
 
-				Eventually(func(g Gomega) string {
-					g.Expect(k().Get(ctx, client.ObjectKey{Name: "bar-baz", Namespace: ns}, loser)).To(Succeed())
-					for _, c := range loser.Status.Conditions {
-						if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
-							return c.Reason
-						}
-					}
-					return ""
-				}, e2eTimeout, e2eInterval).Should(Equal(v1alpha1.ReasonOwnedNameCollision))
+				nameA := ownedName("foo-bar", "baz")
+				nameB := ownedName("foo", "bar-baz")
+				Expect(nameA).NotTo(Equal(nameB), "ambiguous (cluster, node) pairs must hash to distinct names")
 
-				By("verifying winner's Deployment is still owned by the winner")
-				Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("foo-bar", "baz"), Namespace: ns}, winnerDeploy)).To(Succeed())
-				controller := metav1.GetControllerOf(winnerDeploy)
-				Expect(controller).NotTo(BeNil())
-				Expect(controller.Name).To(Equal("baz"))
+				deployA := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: nameA, Namespace: ns}}
+				deployB := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: nameB, Namespace: ns}}
+				utils.WaitForResource(deployA, e2eTimeout, e2eInterval)
+				utils.WaitForResource(deployB, e2eTimeout, e2eInterval)
 
-				By("snapshotting loser status")
-				Expect(k().Get(ctx, client.ObjectKey{Name: "baz", Namespace: ns}, winner)).To(Succeed())
-				utils.WaitForConditions(winner, e2eTimeout, e2eInterval)
-				Expect(k().Get(ctx, client.ObjectKey{Name: "baz", Namespace: ns}, winner)).To(Succeed())
-				Expect(k().Get(ctx, client.ObjectKey{Name: "bar-baz", Namespace: ns}, loser)).To(Succeed())
-				utils.MatchCRDResource(winner, "collision-winner")
-				utils.MatchCRDResource(loser, "collision-loser")
+				svcA := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: nameA, Namespace: ns}}
+				svcB := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: nameB, Namespace: ns}}
+				utils.WaitForResource(svcA, e2eTimeout, e2eInterval)
+				utils.WaitForResource(svcB, e2eTimeout, e2eInterval)
 			})
 		})
 
@@ -1337,11 +1318,12 @@ var _ = Describe("IdentityServerNode", func() {
 				container := job.Spec.Template.Spec.Containers[0]
 				Expect(container.Name).To(Equal("genclust"))
 				Expect(container.Image).To(ContainSubstring("curity"))
+				expectedHost := ownedName("job-cluster", "job-admin")
 				Expect(container.Env).To(ContainElement(
 					Satisfy(func(e corev1.EnvVar) bool {
-						return e.Name == "CONFIG_SERVICE_HOST" && e.Value == "job-cluster-job-admin"
+						return e.Name == "CONFIG_SERVICE_HOST" && e.Value == expectedHost
 					}),
-				), "Job should have CONFIG_SERVICE_HOST=job-cluster-job-admin (the admin Service name)")
+				), "Job should have CONFIG_SERVICE_HOST=%s (the admin Service name)", expectedHost)
 
 				utils.MatchResource(job, "job", "job-cluster-cluster-config-job")
 

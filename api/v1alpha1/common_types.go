@@ -39,13 +39,6 @@ const (
 	// and Ready while the orphan state persists.
 	ReasonClusterFound    = "ClusterFound"
 	ReasonClusterNotFound = "ClusterNotFound"
-	// ReasonOwnedNameCollision is set on ConditionDegraded and ConditionReady
-	// (IdentityServerNode) when its ownedResourceName (clusterName + "-" +
-	// nodeName) collides with another node in the same namespace. The "-"
-	// separator is ambiguous — ("foo-bar","baz") and ("foo","bar-baz") both
-	// resolve to "foo-bar-baz" — so two nodes would otherwise fight over
-	// one Deployment/Service.
-	ReasonOwnedNameCollision = "OwnedResourceNameCollision"
 )
 
 // Finalizer names.

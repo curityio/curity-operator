@@ -1,6 +1,7 @@
 package controller_test
 
 import (
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -430,58 +431,60 @@ var _ = Describe("ClusterRef change cleanup", func() {
 		})
 	})
 
-	Context("owned-name collision triggered by a move", func() {
-		It("degrades the loser and cleans its prior-generation orphan; winner untouched", func() {
-			// Smoke test S12: owned-name collision check at
-			// identityservernode_reconciler.go:214-262 fires when a move
-			// causes two nodes to compute the same ownedResourceName.
-			// Cleanup must run before the collision check (so the loser's
-			// stale orphan is gone), and must NOT touch the winner's
-			// resource (UID isolation).
-			testCreateCluster(ns, "foo-bar")
-			testCreateCluster(ns, "foo")
-			testCreateCluster(ns, "stage")
+	Context("selector-immutability guard on clusterRef move", func() {
+		It("delete-and-recreates Deployment and PDB (rather than Update) so immutable selectors aren't violated", func() {
+			// Deployment and PDB have spec.selector.matchLabels that include
+			// app.kubernetes.io/instance: OwnedResourceName(...). When the
+			// node's clusterRef changes, ownedResourceName changes, so the
+			// selector value would have to change too. K8s rejects spec.selector
+			// updates on Deployment and PDB with "selector is immutable", so
+			// cleanupOrphanChildren MUST Delete the old resource (new UID on
+			// the recreated one) rather than Update in place.
+			testCreateCluster(ns, "imm-a")
+			testCreateCluster(ns, "imm-b")
+			testCreateNode(ns, "imm-node", v1alpha1.NodeTypeRuntime, "imm-a")
 
-			// Winner: cluster=foo-bar, node=baz → ownedName foo-bar-baz.
-			// Sleep BEFORE creating the loser so its CreationTimestamp is
-			// strictly later (1s metav1.Time resolution); the older-wins
-			// tiebreak in nodeIsNewer must fire deterministically in CI
-			// where envtest setup may reach both creates within 1s.
-			testCreateNode(ns, "baz", v1alpha1.NodeTypeRuntime, "foo-bar")
-			eventuallyGetResource(ns, ownedName("foo-bar", "baz"), &appsv1.Deployment{})
-			winner := &appsv1.Deployment{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("foo-bar", "baz"), Namespace: ns}, winner)).To(Succeed())
-			winnerUID := winner.UID
+			oldDeploy := &appsv1.Deployment{}
+			eventuallyGetResource(ns, ownedName("imm-a", "imm-node"), oldDeploy)
+			oldDeployUID := oldDeploy.UID
 
-			time.Sleep(1100 * time.Millisecond)
+			// PDB only created when MinAvailable is set; force it.
+			node := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "imm-node", Namespace: ns}, node)).To(Succeed())
+			node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{
+				MinAvailable: ptr.To(intstr.FromInt(1)),
+			}
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
 
-			// Loser: cluster=stage initially, will move to cluster=foo
-			// where ownedName foo-bar-baz collides with the winner.
-			testCreateNode(ns, "bar-baz", v1alpha1.NodeTypeRuntime, "stage")
-			eventuallyGetResource(ns, ownedName("stage", "bar-baz"), &appsv1.Deployment{})
+			oldPDB := &policyv1.PodDisruptionBudget{}
+			eventuallyGetResource(ns, ownedName("imm-a", "imm-node"), oldPDB)
+			oldPDBUID := oldPDB.UID
 
-			patchClusterRef("bar-baz", "foo")
+			// Move the node to a different cluster — ownedResourceName changes,
+			// so the selector value on Deployment and PDB must change.
+			patchClusterRef("imm-node", "imm-b")
 
-			// Loser must go Degraded with OwnedNameCollision reason.
-			Eventually(func() string {
-				n := &v1alpha1.IdentityServerNode{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "bar-baz", Namespace: ns}, n); err != nil {
-					return ""
-				}
-				return conditionReason(n.Status.Conditions, v1alpha1.ConditionDegraded)
-			}, timeout, interval).Should(Equal(v1alpha1.ReasonOwnedNameCollision))
+			// New-named resources appear; old ones go away.
+			eventuallyGetResource(ns, ownedName("imm-b", "imm-node"), &appsv1.Deployment{})
+			eventuallyGetResource(ns, ownedName("imm-b", "imm-node"), &policyv1.PodDisruptionBudget{})
+			eventuallyDeleted(ns, ownedName("imm-a", "imm-node"), &appsv1.Deployment{})
+			eventuallyDeleted(ns, ownedName("imm-a", "imm-node"), &policyv1.PodDisruptionBudget{})
 
-			// Loser's old (stage-bar-baz) Deployment must be cleaned.
-			eventuallyDeleted(ns, ownedName("stage", "bar-baz"), &appsv1.Deployment{})
+			// New resources must have NEW UIDs — proves the operator went
+			// through Delete+Create, not Update. If it had tried Update,
+			// the K8s API would have rejected it with "selector is immutable"
+			// and the move would have stuck.
+			newDeploy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("imm-b", "imm-node"), Namespace: ns}, newDeploy)).To(Succeed())
+			Expect(newDeploy.UID).NotTo(Equal(oldDeployUID), "Deployment must be recreated, not updated, to honor immutable selector")
 
-			// Winner's Deployment must still exist with the same UID.
-			Consistently(func() (string, error) {
-				d := &appsv1.Deployment{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("foo-bar", "baz"), Namespace: ns}, d); err != nil {
-					return "", err
-				}
-				return string(d.UID), nil
-			}, 2*time.Second, 250*time.Millisecond).Should(Equal(string(winnerUID)))
+			newPDB := &policyv1.PodDisruptionBudget{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("imm-b", "imm-node"), Namespace: ns}, newPDB)).To(Succeed())
+			Expect(newPDB.UID).NotTo(Equal(oldPDBUID), "PDB must be recreated, not updated, to honor immutable selector")
+
+			// And the new resources' selectors must reference the new ownedResourceName.
+			Expect(newDeploy.Spec.Selector.MatchLabels["app.kubernetes.io/instance"]).To(Equal(ownedName("imm-b", "imm-node")))
+			Expect(newPDB.Spec.Selector.MatchLabels["app.kubernetes.io/instance"]).To(Equal(ownedName("imm-b", "imm-node")))
 		})
 	})
 
@@ -532,7 +535,8 @@ var _ = Describe("ClusterRef change cleanup", func() {
 				return secret.Annotations["curity.io/admin-node"]
 			}, timeout, interval).Should(Equal("del-admin"))
 			secret.Data = map[string][]byte{
-				"cluster.xml": []byte("<config><host>del-cluster-del-admin</host></config>"),
+				"cluster.xml": []byte(
+					fmt.Sprintf("<config><host>%s</host></config>", ownedName("del-cluster", "del-admin"))),
 			}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
@@ -551,7 +555,7 @@ var _ = Describe("ClusterRef change cleanup", func() {
 					return "<error>"
 				}
 				return string(s.Data["cluster.xml"])
-			}, 2*time.Second, 250*time.Millisecond).Should(ContainSubstring("<host>del-cluster-del-admin</host>"))
+			}, 2*time.Second, 250*time.Millisecond).Should(ContainSubstring(fmt.Sprintf("<host>%s</host>", ownedName("del-cluster", "del-admin"))))
 		})
 	})
 })
@@ -596,7 +600,7 @@ var _ = Describe("Admin-departed announcement edge cases", func() {
 		}, timeout, interval).Should(Equal("tc-admin"))
 
 		// Pre-populate Secret with real XML referencing the admin host.
-		realXML := []byte("<config><host>tc-cluster-tc-admin</host></config>")
+		realXML := []byte(fmt.Sprintf("<config><host>%s</host></config>", ownedName("tc-cluster", "tc-admin")))
 		secret.Data = map[string][]byte{"cluster.xml": realXML}
 		Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 

@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: deploy-cluster-deploy-runtime
-  serviceName: deploy-cluster-deploy-runtime
+  deploymentName: deploy-cluster-deploy-runtime-124bbdac
+  serviceName: deploy-cluster-deploy-runtime-124bbdac
 
 ---

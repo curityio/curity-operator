@@ -83,10 +83,10 @@ func eventuallyDeleted(ns, name string, obj client.Object) {
 	}, 30*time.Second, 250*time.Millisecond).Should(BeTrue())
 }
 
-// ownedName mirrors internal/controller.ownedResourceName — the operator
-// names node-owned Deployments/Services/HPAs/PDBs as {clusterName}-{nodeName}.
+// ownedName delegates to the production OwnedResourceName so test assertions
+// look up child resources by exactly the name the operator computed.
 func ownedName(clusterName, nodeName string) string {
-	return clusterName + "-" + nodeName
+	return controller.OwnedResourceName(clusterName, nodeName)
 }
 
 func hasEnvFromSecret(envVars []corev1.EnvVar, envName, secretName, secretKey string) bool {
@@ -636,168 +636,34 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cluster-1", "role-node-dup"), Namespace: ns}, &appsv1.Deployment{}))).To(BeTrue())
 		})
 
-		It("should block newer node when ownedResourceName collides across clusters", func() {
-			// ownedResourceName = clusterName + "-" + nodeName. Separator is
-			// ambiguous: ("foo-bar","baz") and ("foo","bar-baz") both resolve
-			// to "foo-bar-baz". Without the guard, both nodes would fight over
-			// one Deployment/Service via CreateOrUpdate.
-			testCreateCluster(ns, "foo-bar")
-			testCreateCluster(ns, "foo")
-
-			// Winner created first.
-			testCreateNode(ns, "baz", v1alpha1.NodeTypeRuntime, "foo-bar")
-			eventuallyGetResource(ns, "foo-bar-baz", &appsv1.Deployment{})
-
-			// metav1.Time truncates to 1-second resolution, so if winner and
-			// loser are created in the same second the reconciler falls back
-			// to a UID tie-break — either node can be selected as "newer".
-			// Sleep just over 1s to guarantee a timestamp gap so the test
-			// deterministically sees the loser (not the winner) Degraded.
-			time.Sleep(1100 * time.Millisecond)
-
-			// Loser: distinct role to isolate from the DuplicateRole check.
-			loser := &v1alpha1.IdentityServerNode{
-				ObjectMeta: metav1.ObjectMeta{Name: "bar-baz", Namespace: ns},
-				Spec: v1alpha1.IdentityServerNodeSpec{
-					Type:                     v1alpha1.NodeTypeRuntime,
-					Role:                     "loser-role",
-					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "foo"},
-					Replicas:                 ptr.To(int32(1)),
-				},
-			}
-			Expect(k8sClient.Create(ctx, loser)).To(Succeed())
-
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "bar-baz", Namespace: ns}, loser); err != nil {
-					return ""
-				}
-				return conditionReason(loser.Status.Conditions, v1alpha1.ConditionDegraded)
-			}, timeout, interval).Should(Equal(v1alpha1.ReasonOwnedNameCollision))
-
-			Expect(hasCondition(loser.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse)).To(BeTrue())
-
-			// Winner's Deployment must still be controlled by the winner, not
-			// adopted or mutated by the loser.
-			deploy := &appsv1.Deployment{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "foo-bar-baz", Namespace: ns}, deploy)).To(Succeed())
-			controller := metav1.GetControllerOf(deploy)
-			Expect(controller).NotTo(BeNil())
-			Expect(controller.Name).To(Equal("baz"))
-		})
-
-		It("should clear OwnedResourceNameCollision Degraded and create Deployment after winner is deleted and loser is re-reconciled", func() {
-			// Recovery path: with the winner gone, a re-reconciled loser no
-			// longer finds a colliding node, falls through to Deployment
-			// reconciliation, and computeNodeConditions rebuilds Degraded from
-			// Deployment health (clearing the stale OwnedResourceNameCollision
-			// reason). There is no cross-node watch, so loser recovery only
-			// happens on the next reconcile trigger — mirrors the PDBNotOwned
-			// recovery test: delete the collider, nudge the loser.
+		It("should give two ambiguous-name nodes their own Deployments without collision", func() {
+			// Regression guard for the cross-cluster ownedResourceName
+			// ambiguity that the old code defended against with a runtime
+			// collision check. With the SHA-256 suffix, ("foo-bar","baz")
+			// and ("foo","bar-baz") produce distinct names — both nodes
+			// run successfully, no Degraded condition, no events.
 			testCreateCluster(ns, "foo-bar")
 			testCreateCluster(ns, "foo")
 
 			testCreateNode(ns, "baz", v1alpha1.NodeTypeRuntime, "foo-bar")
-			eventuallyGetResource(ns, "foo-bar-baz", &appsv1.Deployment{})
+			testCreateNode(ns, "bar-baz", v1alpha1.NodeTypeRuntime, "foo")
 
-			// Same 1s-creation-timestamp resolution concern as the collision
-			// test above — sleep to guarantee a deterministic loser.
-			time.Sleep(1100 * time.Millisecond)
+			nameA := ownedName("foo-bar", "baz")
+			nameB := ownedName("foo", "bar-baz")
+			Expect(nameA).NotTo(Equal(nameB), "ambiguous pair must hash to distinct names")
 
-			loser := &v1alpha1.IdentityServerNode{
-				ObjectMeta: metav1.ObjectMeta{Name: "bar-baz", Namespace: ns},
-				Spec: v1alpha1.IdentityServerNodeSpec{
-					Type:                     v1alpha1.NodeTypeRuntime,
-					Role:                     "loser-recovery-role",
-					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "foo"},
-					Replicas:                 ptr.To(int32(1)),
-				},
-			}
-			Expect(k8sClient.Create(ctx, loser)).To(Succeed())
+			eventuallyGetResource(ns, nameA, &appsv1.Deployment{})
+			eventuallyGetResource(ns, nameB, &appsv1.Deployment{})
 
-			By("waiting for loser Degraded with OwnedResourceNameCollision")
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "bar-baz", Namespace: ns}, loser); err != nil {
-					return ""
-				}
-				return conditionReason(loser.Status.Conditions, v1alpha1.ConditionDegraded)
-			}, timeout, interval).Should(Equal(v1alpha1.ReasonOwnedNameCollision))
-
-			// Loser must not have a Deployment yet — the reconciler returned
-			// early at the collision check.
-			Expect(apierrors.IsNotFound(
-				k8sClient.Get(ctx, types.NamespacedName{Name: "foo-bar-baz", Namespace: ns}, &appsv1.Deployment{}),
-			)).To(BeFalse(), "winner's Deployment should still exist")
-
-			By("deleting the winner so the collision is gone")
-			winner := &v1alpha1.IdentityServerNode{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "baz", Namespace: ns}, winner)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, winner)).To(Succeed())
-			Eventually(func() bool {
-				return apierrors.IsNotFound(
-					k8sClient.Get(ctx, types.NamespacedName{Name: "baz", Namespace: ns}, &v1alpha1.IdentityServerNode{}),
-				)
-			}, timeout, interval).Should(BeTrue())
-
-			// envtest does not run the kube-controller-manager garbage
-			// collector, so winner's Deployment/Service survive the owner
-			// deletion. In real K8s, GC cascades via OwnerReference. Delete
-			// them manually to simulate GC — without this, the loser fails
-			// its CreateOrUpdate with "already owned by another controller".
-			for _, obj := range []client.Object{
-				&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "foo-bar-baz", Namespace: ns}},
-				&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "foo-bar-baz", Namespace: ns}},
-			} {
-				Expect(k8sClient.Delete(ctx, obj)).To(Succeed())
-			}
-
-			By("nudging the loser to trigger a reconcile (no cross-node watch exists)")
-			Eventually(func() error {
-				var fresh v1alpha1.IdentityServerNode
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "bar-baz", Namespace: ns}, &fresh); err != nil {
-					return err
-				}
-				if fresh.Annotations == nil {
-					fresh.Annotations = map[string]string{}
-				}
-				fresh.Annotations["test.curity.io/nudge"] = "winner-deleted"
-				return k8sClient.Update(ctx, &fresh)
-			}, timeout, interval).Should(Succeed())
-
-			By("expecting Degraded reason to no longer be OwnedResourceNameCollision")
-			Eventually(func() string {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "bar-baz", Namespace: ns}, loser); err != nil {
-					return ""
-				}
-				return conditionReason(loser.Status.Conditions, v1alpha1.ConditionDegraded)
-			}, timeout, interval).ShouldNot(Equal(v1alpha1.ReasonOwnedNameCollision))
-
-			By("expecting the loser's Deployment to be created under its own cluster")
-			// ownedResourceName = "foo-bar-baz" — same name as winner had.
-			// Winner's Deployment is gone (OwnerReference garbage collection),
-			// so CreateOrUpdate creates a fresh one owned by the loser.
-			loserDeploy := &appsv1.Deployment{}
-			Eventually(func() error {
-				return k8sClient.Get(ctx, types.NamespacedName{Name: "foo-bar-baz", Namespace: ns}, loserDeploy)
-			}, timeout, interval).Should(Succeed())
-			loserController := metav1.GetControllerOf(loserDeploy)
-			Expect(loserController).NotTo(BeNil())
-			Expect(loserController.Name).To(Equal("bar-baz"), "Deployment must be controlled by the recovered loser")
-
-			By("expecting a ResolvedOwnedNameCollision Normal event paired with the earlier Warning")
-			Eventually(func() bool {
-				var events corev1.EventList
-				if err := k8sClient.List(ctx, &events, client.InNamespace(ns)); err != nil {
-					return false
-				}
-				for _, e := range events.Items {
-					if e.Reason == "ResolvedOwnedNameCollision" &&
-						e.InvolvedObject.Name == "bar-baz" &&
-						e.Type == corev1.EventTypeNormal {
-						return true
-					}
-				}
-				return false
-			}, timeout, interval).Should(BeTrue(), "expected ResolvedOwnedNameCollision Normal event on loser")
+			// Neither node ends up Degraded for collision. (DuplicateRole
+			// is scoped per-cluster, so two nodes in different clusters
+			// never collide on role regardless of the role string used.)
+			nodeA := &v1alpha1.IdentityServerNode{}
+			nodeB := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "baz", Namespace: ns}, nodeA)).To(Succeed())
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "bar-baz", Namespace: ns}, nodeB)).To(Succeed())
+			Expect(conditionReason(nodeA.Status.Conditions, v1alpha1.ConditionDegraded)).NotTo(Equal("OwnedResourceNameCollision"))
+			Expect(conditionReason(nodeB.Status.Conditions, v1alpha1.ConditionDegraded)).NotTo(Equal("OwnedResourceNameCollision"))
 		})
 
 		It("should allow same role in different clusters", func() {
@@ -2609,7 +2475,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 
 			// Pre-populate Secret with XML containing the admin hostname (prefixed Service name).
 			secret.Data = map[string][]byte{"cluster.xml": []byte(
-				"<config><cluster><host>rename-cluster-rename-admin</host><port>6789</port></cluster></config>")}
+				fmt.Sprintf("<config><cluster><host>%s</host><port>6789</port></cluster></config>",
+					ownedName("rename-cluster", "rename-admin")))}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
 			// Delete old admin node, create new one with different name
@@ -2632,8 +2499,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			// Verify the XML was updated in-place with new hostname
 			updatedSecret := &corev1.Secret{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rename-cluster-cluster-config", Namespace: ns}, updatedSecret)).To(Succeed())
-			Expect(string(updatedSecret.Data["cluster.xml"])).To(ContainSubstring("<host>rename-cluster-rename-admin-v2</host>"))
-			Expect(string(updatedSecret.Data["cluster.xml"])).NotTo(ContainSubstring("<host>rename-cluster-rename-admin</host>"))
+			Expect(string(updatedSecret.Data["cluster.xml"])).To(ContainSubstring(fmt.Sprintf("<host>%s</host>", ownedName("rename-cluster", "rename-admin-v2"))))
+			Expect(string(updatedSecret.Data["cluster.xml"])).NotTo(ContainSubstring(fmt.Sprintf("<host>%s</host>", ownedName("rename-cluster", "rename-admin"))))
 			// Rest of XML preserved
 			Expect(string(updatedSecret.Data["cluster.xml"])).To(ContainSubstring("<port>6789</port>"))
 		})
@@ -3004,7 +2871,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			}, timeout, interval).Should(Equal("wf-rename-admin"))
 
 			secret.Data = map[string][]byte{"cluster.xml": []byte(
-				"<config><cluster><keystore>abc123</keystore><host>wf-rename-cluster-wf-rename-admin</host><port>6789</port></cluster></config>")}
+				fmt.Sprintf("<config><cluster><keystore>abc123</keystore><host>%s</host><port>6789</port></cluster></config>",
+					ownedName("wf-rename-cluster", "wf-rename-admin")))}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
 			cluster := &v1alpha1.IdentityServerCluster{}
@@ -3030,9 +2898,9 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				}
 				return string(s.Data["cluster.xml"])
 			}, timeout, interval).Should(And(
-				ContainSubstring("<host>wf-rename-cluster-wf-rename-admin-v2</host>"),
+				ContainSubstring(fmt.Sprintf("<host>%s</host>", ownedName("wf-rename-cluster", "wf-rename-admin-v2"))),
 				ContainSubstring("<keystore>abc123</keystore>"),
-				Not(ContainSubstring("<host>wf-rename-cluster-wf-rename-admin</host>")),
+				Not(ContainSubstring(fmt.Sprintf("<host>%s</host>", ownedName("wf-rename-cluster", "wf-rename-admin")))),
 			))
 
 			// ClusterConfigReady should still be True (not reset)
@@ -3117,7 +2985,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			secret := &corev1.Secret{}
 			eventuallyGetResource(ns, "wf-delsecret-cluster-cluster-config", secret)
 
-			secret.Data = map[string][]byte{"cluster.xml": []byte("<config><host>wf-delsecret-cluster-wf-delsecret-admin</host></config>")}
+			secret.Data = map[string][]byte{"cluster.xml": []byte(
+				fmt.Sprintf("<config><host>%s</host></config>", ownedName("wf-delsecret-cluster", "wf-delsecret-admin")))}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
 			Eventually(func() bool {
@@ -3146,7 +3015,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			secret := &corev1.Secret{}
 			eventuallyGetResource(ns, "wf-delcr-cluster-cluster-config", secret)
 
-			secret.Data = map[string][]byte{"cluster.xml": []byte("<config><host>wf-delcr-cluster-wf-delcr-admin</host></config>")}
+			secret.Data = map[string][]byte{"cluster.xml": []byte(
+				fmt.Sprintf("<config><host>%s</host></config>", ownedName("wf-delcr-cluster", "wf-delcr-admin")))}
 			Expect(k8sClient.Update(ctx, secret)).To(Succeed())
 
 			// Delete the Node first (finalizer requires this)
@@ -3164,7 +3034,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			// Secret should still exist (no OwnerReference on Cluster CR)
 			survivedSecret := &corev1.Secret{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "wf-delcr-cluster-cluster-config", Namespace: ns}, survivedSecret)).To(Succeed())
-			Expect(string(survivedSecret.Data["cluster.xml"])).To(Equal("<config><host>wf-delcr-cluster-wf-delcr-admin</host></config>"))
+			Expect(string(survivedSecret.Data["cluster.xml"])).To(Equal(
+				fmt.Sprintf("<config><host>%s</host></config>", ownedName("wf-delcr-cluster", "wf-delcr-admin"))))
 		})
 
 		It("should accept user-edited Secret without regenerating (Scenario 6)", func() {
@@ -3185,7 +3056,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 						"app.kubernetes.io/managed-by": "curity-operator",
 					},
 				},
-				Data: map[string][]byte{"cluster.xml": []byte("<config><host>wf-useredit-cluster-wf-useredit-admin</host></config>")},
+				Data: map[string][]byte{"cluster.xml": []byte(
+					fmt.Sprintf("<config><host>%s</host></config>", ownedName("wf-useredit-cluster", "wf-useredit-admin")))},
 			}
 			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
 

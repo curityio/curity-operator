@@ -54,7 +54,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 2
-  deploymentName: custom-cluster-custom-node
-  serviceName: custom-cluster-custom-node
+  deploymentName: custom-cluster-custom-node-d3b9430a
+  serviceName: custom-cluster-custom-node-d3b9430a
 
 ---

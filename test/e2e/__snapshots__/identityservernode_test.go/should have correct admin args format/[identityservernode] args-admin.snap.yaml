@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: args-cluster-args-admin
-  serviceName: args-cluster-args-admin
+  deploymentName: args-cluster-args-admin-29d28849
+  serviceName: args-cluster-args-admin-29d28849
 
 ---

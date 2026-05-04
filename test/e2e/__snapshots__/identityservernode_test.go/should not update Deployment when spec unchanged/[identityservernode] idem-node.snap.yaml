@@ -49,7 +49,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: idem-cluster-idem-node
-  serviceName: idem-cluster-idem-node
+  deploymentName: idem-cluster-idem-node-855e1cd7
+  serviceName: idem-cluster-idem-node-855e1cd7
 
 ---

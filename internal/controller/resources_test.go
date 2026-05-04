@@ -590,7 +590,7 @@ func TestBuildService_SameName(t *testing.T) {
 
 	svc := buildService(cluster, node)
 
-	want := ownedResourceName(cluster.Name, node.Name)
+	want := OwnedResourceName(cluster.Name, node.Name)
 	if svc.Name != want {
 		t.Errorf("expected service name %q, got %q", want, svc.Name)
 	}
@@ -1009,9 +1009,9 @@ func TestBuildClusterConfigJob_BasicSpec(t *testing.T) {
 	}
 
 	// Env vars
-	// CONFIG_SERVICE_HOST must equal the admin Service name (cluster-prefixed),
-	// not the bare CR name — runtime pods resolve this hostname via cluster DNS.
-	assertEnvVar(t, container.Env, "CONFIG_SERVICE_HOST", "cluster-1-admin-1")
+	// CONFIG_SERVICE_HOST must equal the admin Service name produced by
+	// ownedResourceName — runtime pods resolve this hostname via cluster DNS.
+	assertEnvVar(t, container.Env, "CONFIG_SERVICE_HOST", OwnedResourceName("cluster-1", "admin-1"))
 	assertEnvVar(t, container.Env, "CONFIG_SERVICE_PORT", "6789")
 
 	// Security context
@@ -1040,7 +1040,7 @@ func TestBuildClusterConfigJob_HostUsesPrefixedNameWithHyphens(t *testing.T) {
 	job := buildClusterConfigJob(cluster, "primary-admin", "")
 
 	container := job.Spec.Template.Spec.Containers[0]
-	assertEnvVar(t, container.Env, "CONFIG_SERVICE_HOST", "prod-east-primary-admin")
+	assertEnvVar(t, container.Env, "CONFIG_SERVICE_HOST", OwnedResourceName("prod-east", "primary-admin"))
 
 	// DNS-1123 label: lowercase alphanumerics and '-', must start/end with alphanumeric, max 63 chars.
 	dns1123 := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
@@ -1930,7 +1930,7 @@ func TestBuildHPA_BasicCPU(t *testing.T) {
 		TargetCPUUtilizationPercentage: 80,
 	}
 	hpa := buildHPA(cluster, node, resolveAutoscaling(cluster, node))
-	want := ownedResourceName(cluster.Name, node.Name)
+	want := OwnedResourceName(cluster.Name, node.Name)
 	if hpa.Name != want {
 		t.Errorf("expected name %s, got %q", want, hpa.Name)
 	}
@@ -2022,7 +2022,7 @@ func TestBuildHPA_Labels(t *testing.T) {
 	hpa := buildHPA(cluster, node, resolveAutoscaling(cluster, node))
 	expectedLabels := map[string]string{
 		"app.kubernetes.io/name":       "curity-identity-server",
-		"app.kubernetes.io/instance":   "cluster-1-node-1",
+		"app.kubernetes.io/instance":   OwnedResourceName("cluster-1", "node-1"),
 		"app.kubernetes.io/managed-by": "curity-operator",
 		"app.kubernetes.io/component":  "runtime",
 		"app.kubernetes.io/version":    "11.0",
@@ -2239,7 +2239,7 @@ func TestBuildPDB_Name(t *testing.T) {
 	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: &min}
 
 	pdb := buildPDB(cluster, node)
-	want := ownedResourceName(cluster.Name, node.Name)
+	want := OwnedResourceName(cluster.Name, node.Name)
 	if pdb.Name != want {
 		t.Errorf("expected name %q, got %q", want, pdb.Name)
 	}
@@ -2497,5 +2497,135 @@ func TestEncryptionKeyHashForTest(t *testing.T) {
 
 	if EncryptionKeyHashForTest([]byte("a")) == EncryptionKeyHashForTest([]byte("b")) {
 		t.Error("different keys must produce different hashes")
+	}
+}
+
+// dns1123LabelRegex is the K8s constraint applied to Service / Deployment /
+// HPA / PDB names: lowercase alphanumeric plus hyphens, no leading or trailing
+// hyphen, length 1-63.
+var dns1123LabelRegex = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+func TestOwnedResourceName_Deterministic(t *testing.T) {
+	first := OwnedResourceName("prod", "admin")
+	for i := 0; i < 100; i++ {
+		if got := OwnedResourceName("prod", "admin"); got != first {
+			t.Fatalf("ownedResourceName drifted on iteration %d: %q != %q", i, got, first)
+		}
+	}
+}
+
+func TestOwnedResourceName_AmbiguousPair_NoCollision(t *testing.T) {
+	a := OwnedResourceName("foo-bar", "baz")
+	b := OwnedResourceName("foo", "bar-baz")
+	if a == b {
+		t.Errorf("ambiguous pairs must produce distinct names; got %q == %q", a, b)
+	}
+}
+
+func TestOwnedResourceName_FormatValid(t *testing.T) {
+	cases := []struct {
+		cluster, node string
+	}{
+		{"prod", "admin"},
+		{"prod", "runtime"},
+		{"foo-bar", "baz"},
+		{"foo", "bar-baz"},
+		{"acme-prod", "admin"},
+		{"stage-eu", "runtime-1"},
+		{"a", "b"},
+		{"123", "456"},
+		{"long-cluster-name-with-many-hyphens", "node"},
+		{"c", "long-node-name-with-many-hyphens-too"},
+	}
+	for _, tc := range cases {
+		got := OwnedResourceName(tc.cluster, tc.node)
+		if !dns1123LabelRegex.MatchString(got) {
+			t.Errorf("OwnedResourceName(%q, %q) = %q does not match DNS-1123 label regex", tc.cluster, tc.node, got)
+		}
+		if len(got) > 63 {
+			t.Errorf("OwnedResourceName(%q, %q) = %q exceeds 63 chars (got %d)", tc.cluster, tc.node, got, len(got))
+		}
+	}
+}
+
+func TestOwnedResourceName_LengthCap47(t *testing.T) {
+	// Inputs whose combined length exceeds the cap should produce a truncated
+	// output ending with the 9-char hash suffix.
+	long := strings.Repeat("a", 30) // very long cluster name
+	got := OwnedResourceName(long, "node")
+	if len(got) > ownedResourceNameMaxLen {
+		t.Errorf("output exceeds %d-char cap: got %q (len %d)", ownedResourceNameMaxLen, got, len(got))
+	}
+	// Hash suffix is the trailing 9 chars (`-<8hex>`); must always be present.
+	if len(got) < 9 {
+		t.Fatalf("output too short to contain hash suffix: %q", got)
+	}
+	suffix := got[len(got)-9:]
+	if suffix[0] != '-' {
+		t.Errorf("expected suffix to start with '-', got %q", suffix)
+	}
+}
+
+func TestOwnedResourceName_HashOverFullInputs(t *testing.T) {
+	// Two pairs whose 47-char-truncated prefix would coincide must still
+	// produce different hashes (and therefore different full names) because
+	// the hash is computed over the FULL inputs, not the truncated prefix.
+	a := OwnedResourceName("very-long-cluster-name-aaaaa", "differing-suffix-one")
+	b := OwnedResourceName("very-long-cluster-name-aaaaa", "differing-suffix-two")
+	if a == b {
+		t.Errorf("hash-over-full-inputs must differentiate: got %q == %q", a, b)
+	}
+}
+
+func TestOwnedResourceName_HashStable(t *testing.T) {
+	// Locks the algorithm + encoding choice. If this fails, someone changed
+	// the hashing recipe and existing deployments would see resource renames.
+	want := "prod-admin-65e81f35"
+	if got := OwnedResourceName("prod", "admin"); got != want {
+		t.Errorf("OwnedResourceName(\"prod\", \"admin\") = %q, want %q", got, want)
+	}
+}
+
+func TestOwnedResourceName_NullByteSeparator(t *testing.T) {
+	// The null byte inside the hash input ensures ("a","bc") and ("ab","c")
+	// hash differently — defensive against future format changes that might
+	// otherwise let two distinct pairs share a hash input.
+	a := OwnedResourceName("a", "bc")
+	b := OwnedResourceName("ab", "c")
+	// Visible names also differ (different prefixes), but the hash portion
+	// must independently differ to prove the null-byte separator works.
+	hashA := a[len(a)-8:]
+	hashB := b[len(b)-8:]
+	if hashA == hashB {
+		t.Errorf("hashes for ambiguous pairs must differ: %q vs %q", hashA, hashB)
+	}
+	// And the actual SHA digests should reflect the null-byte input.
+	rawA := sha256.Sum256([]byte("a\x00bc"))
+	rawB := sha256.Sum256([]byte("ab\x00c"))
+	if hex.EncodeToString(rawA[:4]) != hashA || hex.EncodeToString(rawB[:4]) != hashB {
+		t.Errorf("hash inputs do not include null-byte separator")
+	}
+}
+
+func TestOwnedResourceName_NoTrailingDash(t *testing.T) {
+	// Truncation must never leave a trailing '-' before the hash suffix.
+	// Construct an input whose truncated prefix would naturally end in '-':
+	// 30 chars of "a" + "-" + many "x" → after slicing to 38 chars, the
+	// boundary may land mid-separator.
+	cases := [][2]string{
+		{strings.Repeat("a", 30), strings.Repeat("x", 30)},
+		{strings.Repeat("a", 38), "y"},
+		{strings.Repeat("a", 37) + "-", "z"},
+	}
+	for _, tc := range cases {
+		got := OwnedResourceName(tc[0], tc[1])
+		if !dns1123LabelRegex.MatchString(got) {
+			t.Errorf("invalid DNS-1123 label for (%q, %q): %q", tc[0], tc[1], got)
+		}
+		// The hash suffix is the last 9 chars; the char immediately before it
+		// must not be '-' (that would mean we have "--<hash>" mid-name).
+		if len(got) >= 10 && got[len(got)-10] == '-' {
+			t.Errorf("found double dash before hash suffix in (%q, %q) = %q", tc[0], tc[1], got)
+		}
 	}
 }

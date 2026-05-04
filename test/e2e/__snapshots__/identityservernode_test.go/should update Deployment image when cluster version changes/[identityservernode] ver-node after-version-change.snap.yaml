@@ -48,7 +48,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: ver-cluster-ver-node
-  serviceName: ver-cluster-ver-node
+  deploymentName: ver-cluster-ver-node-fe4a8f66
+  serviceName: ver-cluster-ver-node-fe4a8f66
 
 ---

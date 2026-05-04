@@ -220,61 +220,6 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	// 5.1. Cross-cluster ownedResourceName collision check.
-	// ownedResourceName joins clusterName and nodeName with "-", which is
-	// ambiguous: ("foo-bar","baz") and ("foo","bar-baz") both yield
-	// "foo-bar-baz". Without this guard, two nodes would fight over one
-	// Deployment/Service/HPA/PDB via CreateOrUpdate. Tie-break: the older
-	// node wins (CreationTimestamp, UID); the newer goes Degraded.
-	// Shares the same TOCTOU caveat as the duplicate-admin/role checks above.
-	candidateOwned := ownedResourceName(clusterRef.Name, node.Name)
-	// Capture whether the previous reconcile saw this node as colliding, so
-	// we can emit a ResolvedOwnedNameCollision Normal event once we fall
-	// through the check cleanly. Without the matched pair, operators see
-	// "it broke" via Warning but never "it unbroke".
-	priorDegraded := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionDegraded)
-	priorWasCollision := priorDegraded != nil &&
-		priorDegraded.Status == metav1.ConditionTrue &&
-		priorDegraded.Reason == v1alpha1.ReasonOwnedNameCollision
-	var allNodes v1alpha1.IdentityServerNodeList
-	if err := r.List(ctx, &allNodes, client.InNamespace(node.Namespace)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to list nodes for name-collision check: %w", err)
-	}
-	for i := range allNodes.Items {
-		other := &allNodes.Items[i]
-		if other.UID == node.UID {
-			continue
-		}
-		if ownedResourceName(other.Spec.IdentityServerClusterRef.Name, other.Name) != candidateOwned {
-			continue
-		}
-		if !nodeIsNewer(&node, other) {
-			continue
-		}
-		msg := fmt.Sprintf(
-			"Child resource name %q collides with IdentityServerNode %q in cluster %q",
-			candidateOwned, other.Name, other.Spec.IdentityServerClusterRef.Name)
-		log.Info("owned resource name collision", "name", candidateOwned, "collidesWith", other.Name)
-		setCondition(&node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
-			v1alpha1.ReasonOwnedNameCollision, msg, node.Generation)
-		setCondition(&node.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
-			v1alpha1.ReasonOwnedNameCollision, msg, node.Generation)
-		node.Status.ObservedGeneration = node.Generation
-		if statusErr := r.Status().Update(ctx, &node); statusErr != nil {
-			if apierrors.IsConflict(statusErr) {
-				return ctrl.Result{Requeue: true}, nil
-			}
-			return ctrl.Result{}, fmt.Errorf("failed to update status: %w", statusErr)
-		}
-		r.Recorder.Eventf(&node, corev1.EventTypeWarning, v1alpha1.ReasonOwnedNameCollision, "%s", msg)
-		return ctrl.Result{}, nil
-	}
-	if priorWasCollision {
-		r.Recorder.Eventf(&node, corev1.EventTypeNormal, "ResolvedOwnedNameCollision",
-			"ownedResourceName %q no longer collides with any peer; previous conflict resolved",
-			candidateOwned)
-	}
-
 	// Default admin credentials when not specified (matches cluster reconciler behavior)
 	if cluster.Spec.AdminCredentials == nil {
 		cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
@@ -350,7 +295,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		configReady := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
 		if configReady == nil || configReady.Status != metav1.ConditionTrue {
 			var existingDeploy appsv1.Deployment
-			deployName := ownedResourceName(cluster.Name, node.Name)
+			deployName := OwnedResourceName(cluster.Name, node.Name)
 			err := r.Get(ctx, client.ObjectKey{Name: deployName, Namespace: node.Namespace}, &existingDeploy)
 			if err != nil && !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("checking existing deployment for config gate: %w", err)
@@ -475,7 +420,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// HPA not needed (admin node, autoscaling disabled, or nil) — clean up if stale.
 		var existingHPA autoscalingv2.HorizontalPodAutoscaler
 		if err := r.Get(ctx, client.ObjectKey{
-			Name: ownedResourceName(cluster.Name, node.Name), Namespace: node.Namespace,
+			Name: OwnedResourceName(cluster.Name, node.Name), Namespace: node.Namespace,
 		}, &existingHPA); err == nil {
 			if !metav1.IsControlledBy(&existingHPA, &node) {
 				log.Info("skipping HPA deletion, not owned by this node", "name", existingHPA.Name)
@@ -563,7 +508,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// Delete a stale operator-owned PDB if one exists; refuse to delete one we
 		// don't own (surface it via a Degraded condition so users see the collision).
 		var existingPDB policyv1.PodDisruptionBudget
-		err := r.Get(ctx, client.ObjectKey{Name: ownedResourceName(cluster.Name, node.Name), Namespace: node.Namespace}, &existingPDB)
+		err := r.Get(ctx, client.ObjectKey{Name: OwnedResourceName(cluster.Name, node.Name), Namespace: node.Namespace}, &existingPDB)
 		if err == nil {
 			if !metav1.IsControlledBy(&existingPDB, &node) {
 				log.Info("skipping PDB deletion, not owned by this node", "name", existingPDB.Name)
@@ -650,18 +595,6 @@ func (r *IdentityServerNodeReconciler) SetupWithManager(mgr ctrl.Manager) error 
 			builder.WithPredicates(managedConfigPredicate{}),
 		).
 		Complete(r)
-}
-
-// nodeIsNewer reports whether a sorts after b under (CreationTimestamp, UID)
-// ASC ordering. Both sides of a collision compute the same result, so the
-// Degraded verdict is symmetric: only one of the two nodes marks itself the
-// loser. UID is the tie-break because CreationTimestamp has 1-second
-// resolution and two CRs created in the same reconcile tick can share it.
-func nodeIsNewer(a, b *v1alpha1.IdentityServerNode) bool {
-	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
-		return a.CreationTimestamp.After(b.CreationTimestamp.Time)
-	}
-	return string(a.UID) > string(b.UID)
 }
 
 // ensureClusterOwnerRef returns true if it mutated node.OwnerReferences.
@@ -800,7 +733,7 @@ func (r *IdentityServerNodeReconciler) findNodesForManagedConfig(ctx context.Con
 }
 
 // cleanupOrphanChildren deletes child resources owned by this node whose names
-// don't match the current ownedResourceName(clusterRef, node). This handles the
+// don't match the current OwnedResourceName(clusterRef, node). This handles the
 // case where a node's IdentityServerClusterRef has changed since prior children
 // were created — e.g. an admin moves from cluster-a to cluster-b, leaving
 // <cluster-a>-<node> resources that the standard CreateOrUpdate path no longer
@@ -818,7 +751,7 @@ func (r *IdentityServerNodeReconciler) cleanupOrphanChildren(
 	node *v1alpha1.IdentityServerNode,
 ) error {
 	log := ctrl.LoggerFrom(ctx)
-	keep := ownedResourceName(node.Spec.IdentityServerClusterRef.Name, node.Name)
+	keep := OwnedResourceName(node.Spec.IdentityServerClusterRef.Name, node.Name)
 	listOpts := []client.ListOption{
 		client.InNamespace(node.Namespace),
 		client.MatchingLabels{"app.kubernetes.io/managed-by": "curity-operator"},

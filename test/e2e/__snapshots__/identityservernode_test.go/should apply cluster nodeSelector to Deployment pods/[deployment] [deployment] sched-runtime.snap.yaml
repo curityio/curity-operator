@@ -1,7 +1,7 @@
 
 [IdentityServerNode scheduling Scheduling from cluster to Deployment should apply cluster nodeSelector to Deployment pods - 1]
 metadata:
-  name: sched-cluster-sched-runtime
+  name: sched-cluster-sched-runtime-1795603c
   namespace: e2e-scheduling
   uid: <Any value>
   resourceVersion: <Any value>
@@ -9,7 +9,7 @@ metadata:
   creationTimestamp: <Any value>
   labels:
     app.kubernetes.io/component: runtime
-    app.kubernetes.io/instance: sched-cluster-sched-runtime
+    app.kubernetes.io/instance: sched-cluster-sched-runtime-1795603c
     app.kubernetes.io/managed-by: curity-operator
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"

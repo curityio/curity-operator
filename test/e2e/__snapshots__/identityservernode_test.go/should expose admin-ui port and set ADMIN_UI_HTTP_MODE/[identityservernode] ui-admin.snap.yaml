@@ -51,7 +51,7 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: ui-cluster-ui-admin
-  serviceName: ui-cluster-ui-admin
+  deploymentName: ui-cluster-ui-admin-14a363c0
+  serviceName: ui-cluster-ui-admin-14a363c0
 
 ---

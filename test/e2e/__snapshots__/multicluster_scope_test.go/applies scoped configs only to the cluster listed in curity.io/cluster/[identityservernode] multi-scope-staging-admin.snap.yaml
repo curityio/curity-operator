@@ -51,8 +51,8 @@ status:
       message: ""
   observedGeneration: <Any value>
   replicas: 1
-  deploymentName: staging-stg-admin
-  serviceName: staging-stg-admin
+  deploymentName: staging-stg-admin-693767fe
+  serviceName: staging-stg-admin-693767fe
   appliedManagedResources:
     - name: base-staging
       kind: ConfigMap

@@ -443,20 +443,22 @@ var _ = Describe("ClusterRef change cleanup", func() {
 			testCreateCluster(ns, "stage")
 
 			// Winner: cluster=foo-bar, node=baz → ownedName foo-bar-baz.
+			// Sleep BEFORE creating the loser so its CreationTimestamp is
+			// strictly later (1s metav1.Time resolution); the older-wins
+			// tiebreak in nodeIsNewer must fire deterministically in CI
+			// where envtest setup may reach both creates within 1s.
 			testCreateNode(ns, "baz", v1alpha1.NodeTypeRuntime, "foo-bar")
 			eventuallyGetResource(ns, ownedName("foo-bar", "baz"), &appsv1.Deployment{})
 			winner := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("foo-bar", "baz"), Namespace: ns}, winner)).To(Succeed())
 			winnerUID := winner.UID
 
+			time.Sleep(1100 * time.Millisecond)
+
 			// Loser: cluster=stage initially, will move to cluster=foo
 			// where ownedName foo-bar-baz collides with the winner.
 			testCreateNode(ns, "bar-baz", v1alpha1.NodeTypeRuntime, "stage")
 			eventuallyGetResource(ns, ownedName("stage", "bar-baz"), &appsv1.Deployment{})
-
-			// Sleep long enough that creationTimestamp differs (1s
-			// granularity) so the older-wins tiebreak is deterministic.
-			time.Sleep(1100 * time.Millisecond)
 
 			patchClusterRef("bar-baz", "foo")
 

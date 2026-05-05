@@ -636,6 +636,84 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("cluster-1", "role-node-dup"), Namespace: ns}, &appsv1.Deployment{}))).To(BeTrue())
 		})
 
+		It("should clear DuplicateRole on the originally-stuck node after the conflicting peer's role is changed", func() {
+			// Both nodes end up Degraded once the duplicate exists (whichever
+			// reconciles second sets itself Degraded; the cluster reconciler's
+			// NodeCount bump then re-queues the first via the existing
+			// clusterSpecOrNodeCountChangedPredicate, which also goes
+			// Degraded). After the conflicting peer mutates its role, only
+			// that peer auto-reconciles via its Generation bump; the
+			// originally-stuck peer needs the validation-branch RequeueAfter
+			// to recover, since a peer's spec mutation does not change
+			// NodeCount.
+			testCreateCluster(ns, "recovery-cluster")
+			testCreateNode(ns, "stuck-node", v1alpha1.NodeTypeRuntime, "recovery-cluster")
+			eventuallyGetResource(ns, ownedName("recovery-cluster", "stuck-node"), &appsv1.Deployment{})
+
+			dupNode := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "peer-node", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeRuntime,
+					Role:                     "stuck-node-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "recovery-cluster"},
+					Replicas:                 ptr.To(int32(1)),
+				},
+			}
+			Expect(k8sClient.Create(ctx, dupNode)).To(Succeed())
+
+			Eventually(func() string {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "stuck-node", Namespace: ns}, node); err != nil {
+					return ""
+				}
+				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
+			}, timeout, interval).Should(Equal("DuplicateRole"))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "peer-node", Namespace: ns}, dupNode)).To(Succeed())
+			dupNode.Spec.Role = "stuck-node-role-w"
+			Expect(k8sClient.Update(ctx, dupNode)).To(Succeed())
+
+			// 60s allows for one full RequeueAfter cycle (30s) plus reconcile time.
+			Eventually(func() string {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "stuck-node", Namespace: ns}, node); err != nil {
+					return ""
+				}
+				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
+			}, 60*time.Second, interval).ShouldNot(Equal("DuplicateRole"))
+		})
+
+		It("should clear DuplicateAdmin on the originally-stuck admin after the conflicting peer's type is changed", func() {
+			testCreateCluster(ns, "admin-recovery-cluster")
+			testCreateNode(ns, "stuck-admin", v1alpha1.NodeTypeAdmin, "admin-recovery-cluster")
+			testSimulateClusterConfigReady(ns, "admin-recovery-cluster")
+			eventuallyGetResource(ns, ownedName("admin-recovery-cluster", "stuck-admin"), &appsv1.Deployment{})
+
+			testCreateNode(ns, "peer-admin", v1alpha1.NodeTypeAdmin, "admin-recovery-cluster")
+
+			Eventually(func() string {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "stuck-admin", Namespace: ns}, node); err != nil {
+					return ""
+				}
+				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
+			}, timeout, interval).Should(Equal("DuplicateAdmin"))
+
+			peer := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "peer-admin", Namespace: ns}, peer)).To(Succeed())
+			peer.Spec.Type = v1alpha1.NodeTypeRuntime
+			peer.Spec.Role = "peer-admin-runtime-role"
+			Expect(k8sClient.Update(ctx, peer)).To(Succeed())
+
+			Eventually(func() string {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "stuck-admin", Namespace: ns}, node); err != nil {
+					return ""
+				}
+				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
+			}, 60*time.Second, interval).ShouldNot(Equal("DuplicateAdmin"))
+		})
+
 		It("should give two ambiguous-name nodes their own Deployments without collision", func() {
 			// Regression guard for the cross-cluster ownedResourceName
 			// ambiguity that the old code defended against with a runtime

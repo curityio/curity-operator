@@ -674,6 +674,70 @@ var _ = Describe("IdentityServerNode", func() {
 				utils.MatchCRDResource(nodeA, "cross-a")
 				utils.MatchCRDResource(nodeB, "cross-b")
 			})
+
+			It("should clear DuplicateRole on every previously-degraded node after the conflicting peer's role is changed", func() {
+				ctx := context.Background()
+
+				By("creating cluster and first runtime node")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "recover-cluster", "namespace": ns})
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+					map[string]interface{}{"name": "stuck-node-1", "namespace": ns, "clusterName": "recover-cluster"})
+				deploy1 := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("recover-cluster", "stuck-node-1"), Namespace: ns}}
+				utils.WaitForResource(deploy1, e2eTimeout, e2eInterval)
+
+				By("creating second runtime node with the same role")
+				peer := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "peer-node-2", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "recover-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+					},
+				}
+				Expect(k().Create(ctx, peer)).To(Succeed())
+
+				By("waiting for the peer to be Degraded with DuplicateRole")
+				Eventually(func(g Gomega) string {
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: "peer-node-2", Namespace: ns}, peer)).To(Succeed())
+					for _, c := range peer.Status.Conditions {
+						if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
+							return c.Reason
+						}
+					}
+					return ""
+				}, e2eTimeout, e2eInterval).Should(Equal("DuplicateRole"))
+
+				By("changing peer role to resolve the conflict")
+				Expect(k().Get(ctx, client.ObjectKey{Name: "peer-node-2", Namespace: ns}, peer)).To(Succeed())
+				peer.Spec.Role = "runtime-role-w"
+				Expect(k().Update(ctx, peer)).To(Succeed())
+
+				// 90s allows for one full RequeueAfter cycle (30s) plus reconcile
+				// + Deployment readiness time. Pre-fix, stuck-node-1 — if it
+				// went Degraded via the cluster's NodeCount trigger — would
+				// stay Degraded forever because a peer's spec mutation does
+				// not change NodeCount.
+				By("verifying neither node remains Degraded with DuplicateRole")
+				stuckNodeKey := client.ObjectKey{Name: "stuck-node-1", Namespace: ns}
+				peerKey := client.ObjectKey{Name: "peer-node-2", Namespace: ns}
+				Eventually(func(g Gomega) {
+					stuck := &v1alpha1.IdentityServerNode{}
+					g.Expect(k().Get(ctx, stuckNodeKey, stuck)).To(Succeed())
+					for _, c := range stuck.Status.Conditions {
+						if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
+							g.Expect(c.Reason).NotTo(Equal("DuplicateRole"), "stuck-node-1 still Degraded=DuplicateRole after peer's role was changed")
+						}
+					}
+					p := &v1alpha1.IdentityServerNode{}
+					g.Expect(k().Get(ctx, peerKey, p)).To(Succeed())
+					for _, c := range p.Status.Conditions {
+						if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
+							g.Expect(c.Reason).NotTo(Equal("DuplicateRole"), "peer-node-2 still Degraded=DuplicateRole after role change")
+						}
+					}
+				}, 90*time.Second, e2eInterval).Should(Succeed())
+			})
 		})
 
 		Describe("Ambiguous-name pair across clusters", Ordered, func() {

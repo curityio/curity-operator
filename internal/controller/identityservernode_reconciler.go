@@ -197,7 +197,12 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "DuplicateAdmin",
 				"Another admin node %q already exists for cluster %q", other.Name, clusterRef.Name)
-			return ctrl.Result{}, nil
+			// Self-poll so a stuck node recovers without watching siblings:
+			// a peer's spec mutation that resolves the conflict does not
+			// change cluster.Status.NodeCount and so does not trigger our
+			// watch. The 30s tick re-runs the validation; idempotent if the
+			// conflict persists.
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 
 		// Role uniqueness: each role must be unique per cluster
@@ -216,7 +221,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "DuplicateRole",
 				"Role %q is already used by node %q in cluster %q", node.Spec.Role, other.Name, clusterRef.Name)
-			return ctrl.Result{}, nil
+			// Self-poll so a stuck node recovers without watching siblings.
+			// See DuplicateAdmin branch above for the full rationale.
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 	}
 

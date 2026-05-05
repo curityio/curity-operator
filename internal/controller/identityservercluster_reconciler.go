@@ -184,11 +184,20 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 	return ctrl.Result{}, nil
 }
 
-// listChildNodes returns all IdentityServerNodes that reference this cluster.
-// Uses spec-based filtering (not label-based) to guarantee correctness for
-// deletion blocking — a newly created node may not have the curity.io/cluster
-// label yet if it hasn't been reconciled. The node reconciler sets the label
-// on first reconcile, enabling server-side filtering in other call sites.
+// listChildNodes returns all IdentityServerNodes that reference this cluster
+// by spec OR by controller-ownerRef.UID. The dual-leg filter prevents a
+// cascade-deletion race where the user concurrently deletes this cluster and
+// patches a child node's spec.identityServerClusterRef to a peer: the spec
+// leg returns 0 (spec already moved), but the UID leg keeps the node counted
+// until the node reconciler migrates the ownerRef to the new cluster — so
+// the finalizer holds long enough for the migration to complete and K8s GC
+// does not cascade-delete the node via stale ownerRef.UID.
+//
+// The spec leg is retained as a fallback for newly created nodes that have
+// not yet been reconciled and therefore have no ownerRef.
+//
+// See Tekton GHSA-w2h3-vvvq-3m53 for the same bug class fixed via UID-based
+// child matching; Cluster API's MachineSet controller uses the same pattern.
 func (r *IdentityServerClusterReconciler) listChildNodes(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) ([]v1alpha1.IdentityServerNode, error) {
 	var nodeList v1alpha1.IdentityServerNodeList
 	if err := r.List(ctx, &nodeList, client.InNamespace(cluster.Namespace)); err != nil {
@@ -197,8 +206,9 @@ func (r *IdentityServerClusterReconciler) listChildNodes(ctx context.Context, cl
 
 	var children []v1alpha1.IdentityServerNode
 	for i := range nodeList.Items {
-		if nodeList.Items[i].Spec.IdentityServerClusterRef.Name == cluster.Name {
-			children = append(children, nodeList.Items[i])
+		node := &nodeList.Items[i]
+		if node.Spec.IdentityServerClusterRef.Name == cluster.Name || metav1.IsControlledBy(node, cluster) {
+			children = append(children, *node)
 		}
 	}
 	return children, nil
@@ -317,8 +327,12 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Complete(r)
 }
 
-// findClusterForNode maps an IdentityServerNode change to a reconcile request
-// for the referenced IdentityServerCluster.
+// findClusterForNode maps an IdentityServerNode change to reconcile requests
+// for the cluster pointed at by spec.identityServerClusterRef and (when set
+// and different) the cluster pointed at by the controller-ownerRef. The
+// ownerRef leg is what wakes an abandoned cluster up when the node reconciler
+// migrates a child node's ownerRef to a peer — the union scope handler then
+// has the abandoned cluster in its old/new union so the deletion gate runs.
 func (r *IdentityServerClusterReconciler) findClusterForNode(ctx context.Context, obj client.Object) []ctrl.Request {
 	node, ok := obj.(*v1alpha1.IdentityServerNode)
 	if !ok {
@@ -331,9 +345,20 @@ func (r *IdentityServerClusterReconciler) findClusterForNode(ctx context.Context
 		ns = node.Namespace
 	}
 
-	return []ctrl.Request{
+	requests := []ctrl.Request{
 		{NamespacedName: client.ObjectKey{Name: clusterRef.Name, Namespace: ns}},
 	}
+
+	if owner := metav1.GetControllerOf(node); owner != nil &&
+		owner.APIVersion == v1alpha1.GroupVersion.String() &&
+		owner.Kind == "IdentityServerCluster" &&
+		owner.Name != clusterRef.Name {
+		requests = append(requests, ctrl.Request{
+			NamespacedName: client.ObjectKey{Name: owner.Name, Namespace: node.Namespace},
+		})
+	}
+
+	return requests
 }
 
 // --- Cluster config (cluster.xml) generation via genclust Job ---

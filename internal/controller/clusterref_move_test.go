@@ -521,6 +521,119 @@ var _ = Describe("ClusterRef change cleanup", func() {
 		})
 	})
 
+	// Cascade-deletion race: deleting cluster A while concurrently re-parenting
+	// a child node N to cluster B must not let K8s GC delete N via stale
+	// ownerRef.UID. The cluster reconciler's deletion gate counts children by
+	// spec OR controller-ownerRef.UID, so A's finalizer holds until the node
+	// reconciler migrates N's ownerRef to B.
+	Context("cluster deletion during clusterRef move", func() {
+		controllerOwnerUID := func(name string) types.UID {
+			n := &v1alpha1.IdentityServerNode{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, n); err != nil {
+				return ""
+			}
+			if ref := metav1.GetControllerOf(n); ref != nil {
+				return ref.UID
+			}
+			return ""
+		}
+
+		It("blocks A's finalizer until the moved node's ownerRef migrates to B, and N survives", func() {
+			testCreateCluster(ns, "cluster-a")
+			testCreateCluster(ns, "cluster-b")
+			testCreateNode(ns, "rt-node", v1alpha1.NodeTypeRuntime, "cluster-a")
+
+			var clusterA v1alpha1.IdentityServerCluster
+			Eventually(func() types.UID {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a", Namespace: ns}, &clusterA); err != nil {
+					return ""
+				}
+				return controllerOwnerUID("rt-node")
+			}, timeout, interval).Should(Equal(clusterA.UID), "node should be controller-owned by cluster-a before the race")
+
+			var clusterB v1alpha1.IdentityServerCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-b", Namespace: ns}, &clusterB)).To(Succeed())
+
+			// Trigger the race: delete A, then patch N's clusterRef. The
+			// finalizer is in place, so A enters Terminating; the patch
+			// must not let GC cascade-delete N via stale ownerRef.UID.
+			Expect(k8sClient.Delete(ctx, &clusterA)).To(Succeed())
+			patchClusterRef("rt-node", "cluster-b")
+
+			// A's finalizer must hold through the migration window.
+			Eventually(func() types.UID {
+				return controllerOwnerUID("rt-node")
+			}, timeout, interval).Should(Equal(clusterB.UID), "node ownerRef should migrate to cluster-b")
+
+			// After migration, A is no longer counted as owning N (neither
+			// spec nor UID matches), so the finalizer releases.
+			eventuallyDeleted(ns, "cluster-a", &v1alpha1.IdentityServerCluster{})
+
+			// N must survive the cascade-GC window.
+			survivor := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rt-node", Namespace: ns}, survivor)).To(Succeed())
+			Expect(survivor.DeletionTimestamp).To(BeNil(), "rt-node must not be cascade-deleted by GC")
+		})
+
+		It("holds A's finalizer when node moves to a missing cluster, until N is removed", func() {
+			testCreateCluster(ns, "cluster-a")
+			testCreateNode(ns, "rt-node", v1alpha1.NodeTypeRuntime, "cluster-a")
+
+			var clusterA v1alpha1.IdentityServerCluster
+			Eventually(func() types.UID {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a", Namespace: ns}, &clusterA); err != nil {
+					return ""
+				}
+				return controllerOwnerUID("rt-node")
+			}, timeout, interval).Should(Equal(clusterA.UID))
+
+			Expect(k8sClient.Delete(ctx, &clusterA)).To(Succeed())
+			patchClusterRef("rt-node", "missing-cluster")
+
+			// A stays in Terminating because UID leg keeps N counted (the
+			// node reconciler can't migrate ownerRef when destination is
+			// missing). N persists because spec.clusterRef points at a
+			// missing cluster — orphan, but not deleted by GC.
+			Consistently(func() bool {
+				c := &v1alpha1.IdentityServerCluster{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a", Namespace: ns}, c)
+				return err == nil && c.DeletionTimestamp != nil
+			}, 3*time.Second, interval).Should(BeTrue(), "cluster-a should stay in Terminating while N retains ownerRef.UID")
+
+			// Once user removes N, A's finalizer releases.
+			n := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rt-node", Namespace: ns}, n)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, n)).To(Succeed())
+			eventuallyDeleted(ns, "rt-node", &v1alpha1.IdentityServerNode{})
+			eventuallyDeleted(ns, "cluster-a", &v1alpha1.IdentityServerCluster{})
+		})
+
+		It("regression: delete cluster with no concurrent move blocks until node is removed", func() {
+			testCreateCluster(ns, "cluster-a")
+			testCreateNode(ns, "rt-node", v1alpha1.NodeTypeRuntime, "cluster-a")
+
+			Eventually(func() types.UID {
+				return controllerOwnerUID("rt-node")
+			}, timeout, interval).ShouldNot(BeEmpty())
+
+			c := &v1alpha1.IdentityServerCluster{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a", Namespace: ns}, c)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, c)).To(Succeed())
+
+			Consistently(func() bool {
+				cur := &v1alpha1.IdentityServerCluster{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a", Namespace: ns}, cur)
+				return err == nil && cur.DeletionTimestamp != nil
+			}, 2*time.Second, interval).Should(BeTrue(), "cluster-a should remain Terminating while the node still references it")
+
+			n := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "rt-node", Namespace: ns}, n)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, n)).To(Succeed())
+			eventuallyDeleted(ns, "rt-node", &v1alpha1.IdentityServerNode{})
+			eventuallyDeleted(ns, "cluster-a", &v1alpha1.IdentityServerCluster{})
+		})
+	})
+
 	Context("admin deleted within cluster (no move)", func() {
 		It("preserves cluster-config Secret when admin CR is deleted permanently", func() {
 			testCreateCluster(ns, "del-cluster")

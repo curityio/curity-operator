@@ -2825,9 +2825,17 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(oldHash).NotTo(BeEmpty(), "expected cluster-config-hash annotation after simulated population")
 
 			// Step 4: Version upgrade — cluster.xml MUST regenerate.
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster", Namespace: ns}, cluster)).To(Succeed())
-			cluster.Spec.Version = "12.0"
-			Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+			// Retry on optimistic-concurrency conflicts: the cluster reconciler
+			// writes to status concurrently and may bump resourceVersion between
+			// our Get and Update.
+			Eventually(func() error {
+				fresh := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lifecycle-cluster", Namespace: ns}, fresh); err != nil {
+					return err
+				}
+				fresh.Spec.Version = "12.0"
+				return k8sClient.Update(ctx, fresh)
+			}, timeout, interval).Should(Succeed())
 
 			// Secret data should be reset to placeholder (regen branch fired).
 			Eventually(func() string {

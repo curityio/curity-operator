@@ -6,6 +6,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
@@ -139,6 +141,103 @@ func TestNodePredicate_UpdateNoMaterialChange(t *testing.T) {
 	)
 	if p.Update(e) {
 		t.Error("expected block when nothing material changed")
+	}
+}
+
+func TestNodePredicate_UpdateControllerOwnerRefChanged(t *testing.T) {
+	p := nodeStatusConditionsChangedPredicate{}
+	conds := []metav1.Condition{
+		{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "R"},
+	}
+	e := updateEvent(
+		nodeWithOwnerUID(1, conds, "uid-a"),
+		nodeWithOwnerUID(1, conds, "uid-b"),
+	)
+	if !p.Update(e) {
+		t.Error("expected pass when controller-ownerRef UID changed")
+	}
+}
+
+func TestNodePredicate_UpdateControllerOwnerRefAddedFromNil(t *testing.T) {
+	p := nodeStatusConditionsChangedPredicate{}
+	conds := []metav1.Condition{
+		{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "R"},
+	}
+	e := updateEvent(
+		nodeWithOwnerUID(1, conds, ""),
+		nodeWithOwnerUID(1, conds, "uid-a"),
+	)
+	if !p.Update(e) {
+		t.Error("expected pass when controller-ownerRef appeared on the node")
+	}
+}
+
+func TestNodePredicate_UpdateOwnerRefSameUIDIsBlocked(t *testing.T) {
+	p := nodeStatusConditionsChangedPredicate{}
+	conds := []metav1.Condition{
+		{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "R"},
+	}
+	e := updateEvent(
+		nodeWithOwnerUID(1, conds, "uid-a"),
+		nodeWithOwnerUID(1, conds, "uid-a"),
+	)
+	if p.Update(e) {
+		t.Error("expected block when ownerRef UID is unchanged and nothing else material changed")
+	}
+}
+
+func TestNodePredicate_UpdateOwnerRefRemoved(t *testing.T) {
+	p := nodeStatusConditionsChangedPredicate{}
+	conds := []metav1.Condition{
+		{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "R"},
+	}
+	e := updateEvent(
+		nodeWithOwnerUID(1, conds, "uid-a"),
+		nodeWithOwnerUID(1, conds, ""),
+	)
+	if !p.Update(e) {
+		t.Error("expected pass when controller-ownerRef was removed (non-nil → nil)")
+	}
+}
+
+func TestNodePredicate_UpdateNonControllerOwnerRefIsIgnored(t *testing.T) {
+	// Adding/changing a *non-controller* ownerRef must not wake the cluster up.
+	// metav1.GetControllerOf only returns the controller ref, so a stray
+	// non-controller ref change should be invisible to the predicate.
+	p := nodeStatusConditionsChangedPredicate{}
+	conds := []metav1.Condition{
+		{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "R"},
+	}
+	old := nodeWithOwnerUID(1, conds, "uid-a")
+	new := nodeWithOwnerUID(1, conds, "uid-a")
+	new.OwnerReferences = append(new.OwnerReferences, metav1.OwnerReference{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       "some-deploy",
+		UID:        "uid-deploy",
+		// no Controller flag → non-controller
+	})
+	if p.Update(updateEvent(old, new)) {
+		t.Error("expected block when only a non-controller ownerRef changed")
+	}
+}
+
+func TestControllerOwnerRefChanged_BothNil(t *testing.T) {
+	old := node(1, nil)
+	new := node(1, nil)
+	if controllerOwnerRefChanged(old, new) {
+		t.Error("expected false when both controller refs are nil")
+	}
+}
+
+func TestControllerOwnerRefChanged_SameUIDDifferentName(t *testing.T) {
+	// Same UID, different Name in the OwnerRef. Defensive: UID is the
+	// canonical identity for cascade purposes, so this should NOT trigger.
+	old := nodeWithOwnerUID(1, nil, "uid-a")
+	new := nodeWithOwnerUID(1, nil, "uid-a")
+	new.OwnerReferences[0].Name = "renamed-cluster"
+	if controllerOwnerRefChanged(old, new) {
+		t.Error("expected false: same UID but different Name should not register as a controller change")
 	}
 }
 
@@ -345,6 +444,20 @@ func node(generation int64, conditions []metav1.Condition) *v1alpha1.IdentitySer
 		ObjectMeta: metav1.ObjectMeta{Generation: generation},
 		Status:     v1alpha1.IdentityServerNodeStatus{Conditions: conditions},
 	}
+}
+
+func nodeWithOwnerUID(generation int64, conditions []metav1.Condition, ownerUID string) *v1alpha1.IdentityServerNode {
+	n := node(generation, conditions)
+	if ownerUID != "" {
+		n.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: v1alpha1.GroupVersion.String(),
+			Kind:       "IdentityServerCluster",
+			Name:       "owner",
+			UID:        types.UID(ownerUID),
+			Controller: ptr.To(true),
+		}}
+	}
+	return n
 }
 
 func updateEvent(old, new *v1alpha1.IdentityServerNode) event.UpdateEvent {

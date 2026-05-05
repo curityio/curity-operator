@@ -12,7 +12,8 @@ import (
 
 // nodeStatusConditionsChangedPredicate passes update events when either:
 //   - the object's generation changed (spec was modified), or
-//   - the object's status conditions changed (Type, Status, Reason, or Message).
+//   - the object's status conditions changed (Type, Status, Reason, or Message), or
+//   - the object's controller-ownerRef changed (UID flip from old cluster to new).
 //
 // Create, Delete, and Generic events always pass through.
 //
@@ -20,6 +21,11 @@ import (
 // where the cluster needs to react to node spec changes AND node status condition
 // changes (for aggregating cluster-level health), but should ignore updates that
 // only change non-material fields like resourceVersion or LastTransitionTime.
+//
+// The controller-ownerRef leg ensures that an abandoned cluster wakes up after
+// the node reconciler migrates the ownerRef to a peer cluster — without it, the
+// abandoned cluster's deletion gate (which counts nodes by ownerRef.UID via
+// listChildNodes) would not see the migration until the next resync.
 type nodeStatusConditionsChangedPredicate struct {
 	predicate.Funcs
 }
@@ -31,6 +37,12 @@ func (p nodeStatusConditionsChangedPredicate) Update(e event.UpdateEvent) bool {
 
 	// Always pass through generation changes (spec was modified).
 	if e.ObjectNew.GetGeneration() != e.ObjectOld.GetGeneration() {
+		return true
+	}
+
+	// Pass through controller-ownerRef changes so the abandoned cluster wakes
+	// up after the node reconciler migrates the ownerRef.UID to a peer.
+	if controllerOwnerRefChanged(e.ObjectOld, e.ObjectNew) {
 		return true
 	}
 
@@ -155,6 +167,19 @@ func clusterConditionStatus(c *v1alpha1.IdentityServerCluster, condType string) 
 		}
 	}
 	return ""
+}
+
+// controllerOwnerRefChanged returns true if the controller-ownerRef differs
+// between old and new — including transitions to/from nil. UID is the only
+// field compared because it uniquely identifies the parent object; Name and
+// Kind cannot shift independently of UID for a controller reference.
+func controllerOwnerRefChanged(oldObj, newObj client.Object) bool {
+	oldRef := metav1.GetControllerOf(oldObj)
+	newRef := metav1.GetControllerOf(newObj)
+	if oldRef == nil || newRef == nil {
+		return oldRef != newRef
+	}
+	return oldRef.UID != newRef.UID
 }
 
 // conditionsEqual returns true if two condition slices are semantically equal.

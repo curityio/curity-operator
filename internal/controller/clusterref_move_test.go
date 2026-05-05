@@ -544,15 +544,13 @@ var _ = Describe("ClusterRef change cleanup", func() {
 			testCreateNode(ns, "rt-node", v1alpha1.NodeTypeRuntime, "cluster-a")
 
 			var clusterA v1alpha1.IdentityServerCluster
-			Eventually(func() types.UID {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a", Namespace: ns}, &clusterA); err != nil {
-					return ""
-				}
-				return controllerOwnerUID("rt-node")
-			}, timeout, interval).Should(Equal(clusterA.UID), "node should be controller-owned by cluster-a before the race")
-
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a", Namespace: ns}, &clusterA)).To(Succeed())
 			var clusterB v1alpha1.IdentityServerCluster
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-b", Namespace: ns}, &clusterB)).To(Succeed())
+
+			Eventually(func() types.UID {
+				return controllerOwnerUID("rt-node")
+			}, timeout, interval).Should(Equal(clusterA.UID), "node should be controller-owned by cluster-a before the race")
 
 			// Trigger the race: delete A, then patch N's clusterRef. The
 			// finalizer is in place, so A enters Terminating; the patch
@@ -580,10 +578,9 @@ var _ = Describe("ClusterRef change cleanup", func() {
 			testCreateNode(ns, "rt-node", v1alpha1.NodeTypeRuntime, "cluster-a")
 
 			var clusterA v1alpha1.IdentityServerCluster
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a", Namespace: ns}, &clusterA)).To(Succeed())
+
 			Eventually(func() types.UID {
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-a", Namespace: ns}, &clusterA); err != nil {
-					return ""
-				}
 				return controllerOwnerUID("rt-node")
 			}, timeout, interval).Should(Equal(clusterA.UID))
 

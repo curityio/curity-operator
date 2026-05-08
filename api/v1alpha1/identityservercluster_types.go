@@ -28,6 +28,17 @@ type IdentityServerClusterSpec struct {
 	// the secret with random values if it does not exist.
 	AdminCredentials *CredentialsSource `json:"adminCredentials,omitempty"`
 
+	// Packages declares remote ZIP archives the operator downloads at
+	// pod start and unpacks into every Curity container of every node
+	// referencing this cluster. Each entry produces one init container
+	// per pod. Removing an entry removes its init container and mount
+	// on the next reconcile (which triggers a rolling restart).
+	// MountPaths must be unique across the list — duplicates are
+	// rejected at admission via CEL.
+	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:XValidation:rule="self.all(p1, self.exists_one(p2, p2.mountPath == p1.mountPath))",message="each package mountPath must be unique"
+	Packages []PackageSpec `json:"packages,omitempty"`
+
 	// Logging configures logging behavior.
 	Logging *LoggingSpec `json:"logging,omitempty"`
 

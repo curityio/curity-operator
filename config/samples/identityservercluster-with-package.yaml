@@ -1,0 +1,14 @@
+# Example: IdentityServerCluster declaring one public ZIP package.
+# The operator downloads the archive at pod start (init container) and
+# unpacks it at /etc/plugins/example inside every Curity container.
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: demo-with-package
+  namespace: curity
+spec:
+  version: "11.0"
+  packages:
+    - source:
+        url: https://example.com/plugin.zip
+      mountPath: /etc/plugins/example

@@ -43,7 +43,7 @@ func TestBuildDeployment_AdminArgs(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	args := deploy.Spec.Template.Spec.Containers[0].Args
 	assertContains(t, args, "--admin")
@@ -56,7 +56,7 @@ func TestBuildDeployment_RuntimeArgs(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	args := deploy.Spec.Template.Spec.Containers[0].Args
 	assertContains(t, args, "--no-admin")
@@ -69,7 +69,7 @@ func TestBuildDeployment_AdminPorts(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
 
 	assertPortExists(t, ports, "config", portConfig)
@@ -84,7 +84,7 @@ func TestBuildDeployment_RuntimePorts(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
 
 	assertPortExists(t, ports, "http", portHTTP)
@@ -100,7 +100,7 @@ func TestBuildDeployment_AdminReplicasForcedTo1(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.Replicas = ptr.To(int32(5))
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	if *deploy.Spec.Replicas != 1 {
 		t.Errorf("expected admin replicas to be 1, got %d", *deploy.Spec.Replicas)
@@ -112,7 +112,7 @@ func TestBuildDeployment_RuntimeReplicasFromSpec(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Replicas = ptr.To(int32(3))
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	if *deploy.Spec.Replicas != 3 {
 		t.Errorf("expected runtime replicas to be 3, got %d", *deploy.Spec.Replicas)
@@ -123,7 +123,7 @@ func TestBuildDeployment_DefaultImage(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	image := deploy.Spec.Template.Spec.Containers[0].Image
 
 	expected := "curity.azurecr.io/curity/idsvr:11.0"
@@ -137,7 +137,7 @@ func TestBuildDeployment_ImageOverride(t *testing.T) {
 	cluster.Spec.Image = "my-registry/curity:custom"
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	image := deploy.Spec.Template.Spec.Containers[0].Image
 
 	if image != "my-registry/curity:custom" {
@@ -150,7 +150,7 @@ func TestBuildDeployment_ImagePullSecret(t *testing.T) {
 	cluster.Spec.ImagePullSecret = "my-secret"
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	if len(deploy.Spec.Template.Spec.ImagePullSecrets) != 1 {
 		t.Fatalf("expected 1 image pull secret, got %d", len(deploy.Spec.Template.Spec.ImagePullSecrets))
@@ -164,7 +164,7 @@ func TestBuildDeployment_SecurityContext(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	podSC := deploy.Spec.Template.Spec.SecurityContext
 
 	if *podSC.RunAsUser != 10001 {
@@ -184,7 +184,7 @@ func TestBuildDeployment_LabelMerging(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.PodLabels = map[string]string{"shared": "node-val", "custom": "true"}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	labels := deploy.Spec.Template.Labels
 
 	if labels["team"] != "platform" {
@@ -204,7 +204,7 @@ func TestBuildDeployment_AnnotationMerging(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.PodAnnotations = map[string]string{"team": "identity"}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	annotations := deploy.Spec.Template.Annotations
 
 	if annotations["prometheus.io/scrape"] != "true" {
@@ -225,7 +225,7 @@ func TestBuildDeployment_NodeResourcesOverrideCluster(t *testing.T) {
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	cpu := deploy.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 
 	if cpu.String() != "2" {
@@ -240,7 +240,7 @@ func TestBuildDeployment_ClusterResourcesUsedWhenNodeNil(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	cpu := deploy.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 
 	if cpu.String() != "500m" {
@@ -252,7 +252,7 @@ func TestBuildDeployment_ProbeDefaults(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	liveness := deploy.Spec.Template.Spec.Containers[0].LivenessProbe
 	readiness := deploy.Spec.Template.Spec.Containers[0].ReadinessProbe
 
@@ -273,7 +273,7 @@ func TestBuildDeployment_ProbeOverrides(t *testing.T) {
 		},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	liveness := deploy.Spec.Template.Spec.Containers[0].LivenessProbe
 
 	if liveness.InitialDelaySeconds != 60 {
@@ -290,7 +290,7 @@ func TestBuildDeployment_UIEnabled(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(false)}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
@@ -303,7 +303,7 @@ func TestBuildDeployment_UIDisabled(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: false}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
 
 	assertPortNotExists(t, ports, "admin-ui")
@@ -316,7 +316,7 @@ func TestBuildDeployment_EnvironmentVariables(t *testing.T) {
 		{Name: "CUSTOM_VAR", Value: "custom-value"},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertEnvVar(t, envVars, "STATUS_CMD_PORT", "4465")
@@ -328,7 +328,7 @@ func TestBuildDeployment_LoggingLevelDefault(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "INFO")
 }
 
@@ -337,7 +337,7 @@ func TestBuildDeployment_LoggingLevelFromCluster(t *testing.T) {
 	cluster.Spec.Logging = &v1alpha1.LoggingSpec{Level: "DEBUG"}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "DEBUG")
 }
 
@@ -347,7 +347,7 @@ func TestBuildDeployment_LoggingLevelNodeOverridesCluster(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "TRACE"}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "TRACE")
 }
 
@@ -356,7 +356,7 @@ func TestBuildDeployment_LoggingLevelOff(t *testing.T) {
 	cluster.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF"}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "OFF")
 }
 
@@ -365,7 +365,7 @@ func TestBuildDeployment_LoggingOffSuppressesSidecars(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF", Stdout: true, Logs: []string{"audit"}}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
 		t.Errorf("expected 1 container (no sidecars when OFF), got %d", len(deploy.Spec.Template.Spec.Containers))
@@ -386,7 +386,7 @@ func TestBuildDeployment_LoggingOffClusterNodeStdoutOverride(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{"audit"}}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	assertEnvVar(t, deploy.Spec.Template.Spec.Containers[0].Env, "LOGGING_LEVEL", "OFF")
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
@@ -403,7 +403,7 @@ func TestBuildDeployment_LoggingStdoutDisabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	// stdout=false (default) → no log volume, no sidecars
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
 		t.Errorf("expected 1 container (no sidecars), got %d", len(deploy.Spec.Template.Spec.Containers))
@@ -420,7 +420,7 @@ func TestBuildDeployment_LoggingStdoutEnabledNoLogs(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{}}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	// Volume should exist (stdout=true) but no sidecars (logs=[])
 	foundLogVol := false
@@ -445,7 +445,7 @@ func TestBuildDeployment_LoggingSidecars(t *testing.T) {
 		Logs:   []string{"audit", "request"},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	// 1 main + 2 sidecars
 	if len(deploy.Spec.Template.Spec.Containers) != 3 {
@@ -487,7 +487,7 @@ func TestBuildDeployment_LoggingCustomImage(t *testing.T) {
 		Image:  "alpine:3.19",
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	sidecar := deploy.Spec.Template.Spec.Containers[1]
 	if sidecar.Image != "alpine:3.19" {
 		t.Errorf("expected custom image alpine:3.19, got %q", sidecar.Image)
@@ -507,7 +507,7 @@ func TestBuildDeployment_LoggingResources(t *testing.T) {
 		},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	sidecar := deploy.Spec.Template.Spec.Containers[1]
 	cpu := sidecar.Resources.Requests[corev1.ResourceCPU]
 	if cpu.String() != "10m" {
@@ -527,7 +527,7 @@ func TestBuildDeployment_LoggingNodeOverridesCluster(t *testing.T) {
 		Logs:   []string{"cluster"},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	// Node overrides entirely: only 1 sidecar (cluster), not 2 (audit, request)
 	if len(deploy.Spec.Template.Spec.Containers) != 2 {
@@ -641,7 +641,7 @@ func TestBuildDeployment_AdminCredentialsEnvVarUsesPath(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	// Env var name must come from Path, not from a hardcoded mapping
@@ -664,7 +664,7 @@ func TestBuildDeployment_AdminCredentialsMultipleItems(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
@@ -687,7 +687,7 @@ func TestBuildDeployment_AdminCredentialsNoSpecialMapping(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	// Should use Path as-is, not rename to PASSWORD
@@ -714,7 +714,7 @@ func TestBuildDeployment_UIEnabled_AutoInjectsPassword(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
@@ -738,7 +738,7 @@ func TestBuildDeployment_UIEnabled_ExplicitPasswordMapping_NoDuplicate(t *testin
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	// Count PASSWORD env vars — should be exactly one
@@ -759,7 +759,7 @@ func TestBuildDeployment_UIEnabled_NoCredentials_NoPassword(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	for _, e := range envVars {
@@ -785,7 +785,7 @@ func TestBuildDeployment_UIDisabled_NoAutoInject(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: false}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	for _, e := range envVars {
@@ -810,7 +810,7 @@ func TestBuildDeployment_RuntimeNode_NoAutoInject(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	for _, e := range envVars {
@@ -854,7 +854,7 @@ func TestBuildDeployment_DefaultedCredentials_InjectsEnvVars(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
@@ -868,7 +868,7 @@ func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
 	cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
@@ -1269,7 +1269,7 @@ func TestBuildDeployment_NodeSelectorClusterOnly(t *testing.T) {
 	cluster.Spec.NodeSelector = map[string]string{"pool": "curity", "env": "prod"}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	ns := deploy.Spec.Template.Spec.NodeSelector
 	if ns["pool"] != "curity" || ns["env"] != "prod" {
@@ -1282,7 +1282,7 @@ func TestBuildDeployment_NodeSelectorNodeOnly(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.NodeSelector = map[string]string{"disk": "ssd"}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	ns := deploy.Spec.Template.Spec.NodeSelector
 	if ns["disk"] != "ssd" {
@@ -1296,7 +1296,7 @@ func TestBuildDeployment_NodeSelectorMerge(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.NodeSelector = map[string]string{"pool": "gpu", "disk": "ssd"}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	ns := deploy.Spec.Template.Spec.NodeSelector
 	if ns["pool"] != "gpu" {
@@ -1317,7 +1317,7 @@ func TestBuildDeployment_TolerationsClusterOnly(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	tols := deploy.Spec.Template.Spec.Tolerations
 	if len(tols) != 1 || tols[0].Key != "special" {
@@ -1332,7 +1332,7 @@ func TestBuildDeployment_TolerationsNodeOnly(t *testing.T) {
 		{Key: "gpu", Operator: corev1.TolerationOpEqual, Value: "true"},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	tols := deploy.Spec.Template.Spec.Tolerations
 	if len(tols) != 1 || tols[0].Key != "gpu" {
@@ -1351,7 +1351,7 @@ func TestBuildDeployment_TolerationsNodeOverridesCluster(t *testing.T) {
 		{Key: "new", Operator: corev1.TolerationOpEqual, Value: "yes"},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	tols := deploy.Spec.Template.Spec.Tolerations
 	if len(tols) != 1 || tols[0].Key != "new" {
@@ -1376,7 +1376,7 @@ func TestBuildDeployment_AffinityClusterOnly(t *testing.T) {
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	aff := deploy.Spec.Template.Spec.Affinity
 	if aff == nil || aff.NodeAffinity == nil {
@@ -1398,7 +1398,7 @@ func TestBuildDeployment_AffinityNodeOnly(t *testing.T) {
 		},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	aff := deploy.Spec.Template.Spec.Affinity
 	if aff == nil || aff.PodAntiAffinity == nil {
@@ -1416,7 +1416,7 @@ func TestBuildDeployment_AffinityNodeOverridesCluster(t *testing.T) {
 		PodAntiAffinity: &corev1.PodAntiAffinity{},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	aff := deploy.Spec.Template.Spec.Affinity
 	if aff.NodeAffinity != nil {
@@ -1436,7 +1436,7 @@ func TestBuildDeployment_TopologySpreadClusterOnly(t *testing.T) {
 	}}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	tsc := deploy.Spec.Template.Spec.TopologySpreadConstraints
 	if len(tsc) != 1 || tsc[0].TopologyKey != "topology.kubernetes.io/zone" {
@@ -1453,7 +1453,7 @@ func TestBuildDeployment_TopologySpreadNodeOnly(t *testing.T) {
 		WhenUnsatisfiable: corev1.DoNotSchedule,
 	}}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	tsc := deploy.Spec.Template.Spec.TopologySpreadConstraints
 	if len(tsc) != 1 || tsc[0].TopologyKey != "kubernetes.io/hostname" {
@@ -1472,7 +1472,7 @@ func TestBuildDeployment_TopologySpreadNodeOverridesCluster(t *testing.T) {
 		{MaxSkew: 3, TopologyKey: "hostname", WhenUnsatisfiable: corev1.DoNotSchedule},
 	}
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	tsc := deploy.Spec.Template.Spec.TopologySpreadConstraints
 	if len(tsc) != 1 || tsc[0].TopologyKey != "hostname" {
@@ -1484,7 +1484,7 @@ func TestBuildDeployment_SchedulingNilSafe(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	if deploy.Spec.Template.Spec.NodeSelector != nil {
 		t.Error("expected nil nodeSelector")
@@ -1771,7 +1771,7 @@ func TestBuildDeployment_WithDiscoveredConfigs(t *testing.T) {
 	configs := []DiscoveredManagedResource{
 		{Name: "base-config", IsSecret: false, ConfigType: ConfigTypeBase, Data: map[string][]byte{"cfg.xml": []byte("<cfg/>")}},
 	}
-	deploy := buildDeployment(cluster, node, configs)
+	deploy := buildDeployment(cluster, node, configs, DefaultPackageFetcherImage)
 	container := deploy.Spec.Template.Spec.Containers[0]
 	found := false
 	wantPath := MountPathBase + mountFilename(false, "base-config", "cfg.xml")
@@ -2111,7 +2111,7 @@ func TestBuildDeployment_HPAEnabled_ReplicasMatchMinReplicas(t *testing.T) {
 		MaxReplicas:                    10,
 		TargetCPUUtilizationPercentage: 80,
 	}
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	if deploy.Spec.Replicas == nil {
 		t.Fatal("expected non-nil replicas")
 	}
@@ -2125,7 +2125,7 @@ func TestBuildDeployment_HPADisabled_ReplicasFromSpec(t *testing.T) {
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Autoscaling = &v1alpha1.AutoscalingSpec{Enabled: false}
 	node.Spec.Replicas = ptr.To(int32(3))
-	deploy := buildDeployment(cluster, node, nil)
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	if deploy.Spec.Replicas == nil || *deploy.Spec.Replicas != 3 {
 		t.Errorf("expected replicas=3, got %v", deploy.Spec.Replicas)
 	}
@@ -2381,7 +2381,12 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 		// AdminCredentials is excluded: handled by curity.io/encryption-key-hash
 		// with empty-guards that tolerate the credentials-Secret cache miss on
 		// first reconcile.
-		"AdminCredentials":          true,
+		"AdminCredentials": true,
+		// Packages is excluded: drives curity.io/packages-hash (a separate
+		// pod-template-annotation rolling restart), not cluster.xml regen.
+		// cluster.xml is only about cluster topology (hosts, encryption,
+		// license) — plugin archives are runtime-only.
+		"Packages":                  true,
 		"Logging":                   true,
 		"PodAnnotations":            true,
 		"PodLabels":                 true,

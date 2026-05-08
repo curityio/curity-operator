@@ -69,7 +69,9 @@ func OwnedResourceName(clusterName, nodeName string) string {
 
 // buildDeployment constructs the desired Deployment for an IdentityServerNode.
 // configs contains the validated discovered ConfigMaps/Secrets to mount (may be nil).
-func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode, configs []DiscoveredManagedResource) *appsv1.Deployment {
+// fetcherImage is the operator-level package init-container image, resolved
+// once at controller construction (see ResolvePackageFetcherImage).
+func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode, configs []DiscoveredManagedResource, fetcherImage string) *appsv1.Deployment {
 	labels := buildLabels(cluster, node)
 	podAnnotations := mergeMaps(cluster.Spec.PodAnnotations, node.Spec.PodAnnotations)
 	podLabels := mergeMaps(labels, mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels))
@@ -105,6 +107,13 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 	// Add volume mounts for configuration
 	volumes, mounts := buildVolumes(cluster.Name, configs)
 	container.VolumeMounts = mounts
+
+	// Append package volumes and main-container mounts. Each package gets
+	// an emptyDir at /pkg-<n>, surfaced to the main container at MountPath.
+	if pkgVolumes := buildPackageVolumes(cluster.Spec.Packages); len(pkgVolumes) > 0 {
+		volumes = append(volumes, pkgVolumes...)
+		container.VolumeMounts = append(container.VolumeMounts, buildPackageVolumeMounts(cluster.Spec.Packages)...)
+	}
 
 	// Resolve logging config (node overrides cluster entirely)
 	logging := resolveLogging(cluster, node)
@@ -155,6 +164,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 						RunAsGroup: ptr.To(int64(10000)),
 						FSGroup:    ptr.To(int64(10000)),
 					},
+					InitContainers:            buildPackageInitContainers(cluster.Spec.Packages, fetcherImage),
 					Containers:                containers,
 					Volumes:                   volumes,
 					NodeSelector:              resolveNodeSelector(cluster, node),

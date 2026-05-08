@@ -178,6 +178,7 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `tolerations` | list | Pod toleration specs |
 | `topologySpreadConstraints` | list | Pod spread policies |
 | `affinity` | object | Advanced scheduling constraints |
+| `packages` | list | Remote ZIP archives downloaded and unpacked into every Curity container at startup. See [Packages](#packages) |
 
 ### IdentityServerNode (`isn`)
 
@@ -275,6 +276,113 @@ Config volumes are mounted based on whether an admin node exists:
 ### Namespace Scoping
 
 All managed configs in a namespace are discovered by all clusters in that namespace. To scope configs to a specific cluster, use separate namespaces.
+
+## Packages
+
+`spec.packages` lets you declare remote ZIP archives that the operator downloads and unpacks into every Curity container at startup. Typical use: shipping plugin JARs without baking them into a custom image.
+
+Each entry produces one init container per pod. The init container downloads the archive, unzips it into an `emptyDir` volume, and the main Curity container mounts that volume at the configured `mountPath`. Removing an entry removes its init container and volume on the next reconcile, triggering a rolling restart.
+
+The full package list is hashed into the pod-template annotation `curity.io/packages-hash` so any spec change (URL, auth ref, TLS ref, mount path, order) triggers a rolling restart. Rotating a referenced Secret's value in place does NOT trigger a restart — the hash covers refs, not contents. Use `kubectl rollout restart deployment/<name>` to force a restart on token rotation.
+
+### Public package (no auth, no TLS customization)
+
+```yaml
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: demo
+spec:
+  version: "11.0"
+  packages:
+    - source:
+        url: https://example.com/plugin.zip
+      mountPath: /etc/plugins/example
+```
+
+### Private package with bearer token
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pkg-token
+type: Opaque
+stringData:
+  token: "ghp_..."
+---
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: prod
+spec:
+  version: "11.0"
+  packages:
+    - source:
+        url: https://artifacts.example.com/plugin.zip
+        auth:
+          bearerToken:
+            secretRef:
+              name: pkg-token
+              key: token
+      mountPath: /etc/plugins/oauth-extras
+```
+
+### Private endpoint with custom CA + mTLS
+
+```yaml
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+spec:
+  version: "11.0"
+  packages:
+    - source:
+        url: https://artifacts.internal.example.com/plugin.zip
+        tls:
+          enabled: true       # gate; rest of block is ignored when false
+          ca:
+            secretRef:
+              name: ca-secret
+              key: ca.crt
+          clientCert:
+            secretRef:
+              name: mtls-secret
+              key: tls.crt    # private key is read from Secret key tls.key
+      mountPath: /etc/plugins/secure
+```
+
+### Notes
+
+- **`tls.skipVerify: true`** disables certificate verification — non-production only.
+- **`tls.enabled` defaults to `false`**; the rest of the TLS block is ignored unless `enabled` is `true`.
+- **At most one of `auth.basicAuth` / `auth.bearerToken`** per package (rejected at admission).
+- **At most 20 packages** per cluster.
+- **The init container image is `alpine:3.19`** (the Curity image lacks `curl`/`unzip`). For air-gapped clusters that mirror to a private registry, override at operator deploy time via `PACKAGE_FETCHER_IMAGE` env var on the operator pod — there is no per-CR override.
+- **Each package volume is capped at 256MiB** (emptyDir `sizeLimit`) to bound zip-bomb / disk-full impact.
+- **Credentials never appear on `curl` argv** — bearer tokens are piped via stdin, basic-auth uses a netrc file with mode 0600.
+
+### Events
+
+| Reason | Type | When |
+|---|---|---|
+| `PackagesConfigured` | Normal | First time `packages` becomes non-empty for a node |
+| `PackagesUpdated` | Normal | `packages-hash` changes (any spec edit) |
+| `PackagesRemoved` | Normal | `packages` is cleared from the cluster |
+
+### Debugging packages
+
+```bash
+# Confirm the rolled-out hash on the Deployment
+kubectl get deployment <owned-name> \
+  -o jsonpath='{.spec.template.metadata.annotations.curity\.io/packages-hash}'
+
+# View operator events
+kubectl describe isn <node-name>
+
+# Check init container exit state
+kubectl describe pod <pod-name>
+kubectl logs <pod-name> -c package-fetch-0
+```
 
 ## Running Tests
 

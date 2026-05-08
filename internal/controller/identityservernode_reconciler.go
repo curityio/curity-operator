@@ -40,6 +40,13 @@ type IdentityServerNodeReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder record.EventRecorder
+
+	// PackageFetcherImage is the init-container image used for all
+	// spec.packages downloads. Resolved once via
+	// ResolvePackageFetcherImage at controller construction (see
+	// cmd/manager/main.go) so reconciles never re-read process env.
+	// Empty value falls back to DefaultPackageFetcherImage at use site.
+	PackageFetcherImage string
 }
 
 // +kubebuilder:rbac:groups=curity.io,resources=identityservernodes,verbs=get;list;watch;create;update;patch;delete
@@ -331,7 +338,11 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 6. Build and reconcile the Deployment
 	as := resolveAutoscaling(&cluster, &node)
-	desiredDeploy := buildDeployment(&cluster, &node, applicableConfigs)
+	fetcherImage := r.PackageFetcherImage
+	if fetcherImage == "" {
+		fetcherImage = DefaultPackageFetcherImage
+	}
+	desiredDeploy := buildDeployment(&cluster, &node, applicableConfigs, fetcherImage)
 
 	// Inject cluster config hash annotation for rolling restart when Secret changes.
 	// Only inject when config is ready or no admin exists — avoids hashing
@@ -362,7 +373,31 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		desiredDeploy.Spec.Template.Annotations[annotationManagedConfigsHash] = configHash
 	}
 
+	// Inject packages-hash annotation for rolling restart on packages spec
+	// changes. Hashes spec refs (Secret name/key, URL, mountPath, TLS shape)
+	// — NOT Secret values — so token rotation in place does not roll the
+	// deployment. See packages.go:computePackagesHash.
+	packagesHash := computePackagesHash(cluster.Spec.Packages)
+	if packagesHash != "" {
+		if desiredDeploy.Spec.Template.Annotations == nil {
+			desiredDeploy.Spec.Template.Annotations = make(map[string]string)
+		}
+		desiredDeploy.Spec.Template.Annotations[annotationPackagesHash] = packagesHash
+	}
+
 	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}}
+
+	// Capture the prev packages-hash with a dedicated Get before CreateOrUpdate
+	// rather than from inside the mutator closure. Both work in principle, but
+	// the dedicated Get is easier to reason about and decouples this from any
+	// future change to controllerutil internals.
+	var prevPackagesHash string
+	existingDeploy := &appsv1.Deployment{}
+	if err := r.Get(ctx, client.ObjectKey{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}, existingDeploy); err == nil {
+		prevPackagesHash = existingDeploy.Spec.Template.Annotations[annotationPackagesHash]
+	} else if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("getting existing deployment for prev-hash capture: %w", err)
+	}
 
 	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		currentReplicas := deploy.Spec.Replicas
@@ -399,6 +434,31 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		log.Info("Deployment reconciled", "operation", result, "name", deploy.Name)
 		r.Recorder.Eventf(&node, corev1.EventTypeNormal, "DeploymentReconciled",
 			"Deployment %q %s", deploy.Name, result)
+
+		// Packages-specific events. Distinguish Configured (none -> some),
+		// Updated (some -> different some), Removed (some -> none).
+		// prevPackagesHash is captured by the dedicated r.Get above
+		// (before CreateOrUpdate), so on a brand-new Deployment the Get
+		// returns NotFound and prevPackagesHash stays "".
+		if prevPackagesHash != packagesHash {
+			switch {
+			case prevPackagesHash == "" && packagesHash != "":
+				log.Info("packages configured", "packageCount", len(cluster.Spec.Packages),
+					"packagesHash", packagesHash)
+				r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PackagesConfigured",
+					"Configured %d package(s) on Deployment %q", len(cluster.Spec.Packages), deploy.Name)
+			case prevPackagesHash != "" && packagesHash != "":
+				log.Info("packages updated", "oldPackagesHash", prevPackagesHash,
+					"packagesHash", packagesHash, "packageCount", len(cluster.Spec.Packages))
+				r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PackagesUpdated",
+					"Package set changed (hash %s -> %s); rolling restart triggered",
+					prevPackagesHash, packagesHash)
+			case prevPackagesHash != "" && packagesHash == "":
+				log.Info("packages removed", "oldPackagesHash", prevPackagesHash)
+				r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PackagesRemoved",
+					"Removed all packages from Deployment %q", deploy.Name)
+			}
+		}
 	}
 
 	// 7. Reconcile HorizontalPodAutoscaler

@@ -288,6 +288,13 @@ type PackageSource struct {
 // PackageTLSSpec configures TLS for a package download. When Enabled is
 // false (default), the system trust store is used and the rest of this
 // block is ignored. When Enabled is true, SkipVerify / CA / ClientCert apply.
+//
+// SkipVerify is mutually exclusive with CA and ClientCert: the operator's
+// curl invocation under SkipVerify=true is just ` -k ` (no --cacert, no
+// --cert/--key), so combining them would silently drop the trust bundle
+// and any client cert. The API rejects the combination instead of silently
+// dropping it.
+// +kubebuilder:validation:XValidation:rule="!self.skipVerify || (!has(self.ca) && !has(self.clientCert))",message="tls.skipVerify cannot be combined with tls.ca or tls.clientCert; skipVerify=true silently drops both, so the API rejects the combination"
 type PackageTLSSpec struct {
 	// Enabled gates the rest of this TLS block. When false (default),
 	// the system trust store is used.
@@ -295,16 +302,19 @@ type PackageTLSSpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 
 	// SkipVerify disables certificate verification. Use only in
-	// non-production environments. When true, CA is ignored.
+	// non-production environments. Mutually exclusive with CA and
+	// ClientCert (enforced by CRD validation).
 	// +kubebuilder:default=false
 	SkipVerify bool `json:"skipVerify,omitempty"`
 
 	// CA is a Secret holding a PEM bundle used as the trust root for
-	// this download. Ignored when SkipVerify is true.
+	// this download. Mutually exclusive with SkipVerify (enforced by
+	// CRD validation).
 	CA *PackageSecretKeyRef `json:"ca,omitempty"`
 
 	// ClientCert is a Secret holding the cert (and matching private key)
-	// for mutual TLS.
+	// for mutual TLS. Mutually exclusive with SkipVerify (enforced by
+	// CRD validation).
 	ClientCert *PackageClientCertRef `json:"clientCert,omitempty"`
 }
 

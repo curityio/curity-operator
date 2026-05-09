@@ -353,7 +353,7 @@ spec:
 
 ### Notes
 
-- **`tls.skipVerify: true`** disables certificate verification — non-production only.
+- **`tls.skipVerify: true`** disables certificate verification — non-production only. Mutually exclusive with `tls.ca` / `tls.clientCert` (rejected at admission, since `skipVerify=true` would otherwise silently drop both).
 - **`tls.enabled` defaults to `false`**; the rest of the TLS block is ignored unless `enabled` is `true`.
 - **At most one of `auth.basicAuth` / `auth.bearerToken`** per package (rejected at admission).
 - **At most 20 packages** per cluster.

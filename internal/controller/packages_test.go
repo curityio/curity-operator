@@ -820,20 +820,23 @@ func TestBuildPackageDownloadScript_NetrcUsesConstantFormat(t *testing.T) {
 	}
 }
 
-// Security: the host extracted in Go must match url.Parse semantics —
-// not a regex hack — so URLs with embedded auth, ports, or fragments
-// don't produce nonsense netrc machine lines.
+// Security: the host extracted in Go must match url.Parse semantics
+// AND must strip the port — netrc's `machine` matching is by hostname
+// only, so embedding `host:port` in netrc would silently break basic
+// auth on any non-default port (curl strips the port from the URL host
+// before matching against netrc).
 func TestPackageURLHost(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
 		{"https://example.com/x.zip", "example.com"},
-		{"https://example.com:8443/x.zip", "example.com:8443"},
+		{"https://example.com:8443/x.zip", "example.com"},
 		{"https://example.com/x.zip?token=abc", "example.com"},
 		{"https://example.com/x.zip#frag", "example.com"},
 		{"http://example.com/x.zip", "example.com"},
-		// Pathological inputs the URL pattern allows but Go can still parse:
-		{"https://example.com:8080/x.zip", "example.com:8080"},
+		{"https://example.com:8080/x.zip", "example.com"},
+		// Cluster DNS with port (the demo / smoke scenario):
+		{"http://pkg-server.ns.svc.cluster.local:8080/pkg.zip", "pkg-server.ns.svc.cluster.local"},
 	}
 	for _, c := range cases {
 		if got := packageURLHost(c.in); got != c.want {
@@ -884,8 +887,10 @@ func TestBuildPackageInitEnv_PkgHostOnlyForBasicAuth(t *testing.T) {
 			pkgHost = e.Value
 		}
 	}
-	if pkgHost != "a.example:8443" {
-		t.Errorf("PKG_HOST = %q, want %q", pkgHost, "a.example:8443")
+	// PKG_HOST must NOT include the port (curl strips ports before
+	// matching against netrc; "host:port" in netrc never matches).
+	if pkgHost != "a.example" {
+		t.Errorf("PKG_HOST = %q, want %q (no port — netrc matches by hostname only)", pkgHost, "a.example")
 	}
 }
 

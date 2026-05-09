@@ -1,0 +1,101 @@
+# Tiny nginx that serves /pkg.zip over HTTPS with a self-signed cert
+# generated at startup by an init container (openssl). The cert chain is
+# NOT trusted by anyone, so curl without -k will fail with exit 60 (TLS
+# verify). With -k (skipVerify=true) the fetch succeeds. The ZIP is baked
+# inline as ConfigMap binaryData (177 bytes) so the test is hermetic.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .serverName }}-config
+  namespace: {{ .namespace }}
+data:
+  default.conf: |
+    server {
+      listen 8443 ssl;
+      server_name _;
+      ssl_certificate     /etc/nginx/tls/tls.crt;
+      ssl_certificate_key /etc/nginx/tls/tls.key;
+      location = /pkg.zip {}
+      root /usr/share/nginx/html;
+    }
+binaryData:
+  # Minimal valid ZIP archive containing one file `marker.txt` with content
+  # "marker\n". 177 bytes. Regenerate via:
+  #   echo marker > marker.txt && zip -q test.zip marker.txt && base64 < test.zip | tr -d '\n'
+  pkg.zip: UEsDBAoAAAAAAK2uqFyoFlBoBwAAAAcAAAAKABwAbWFya2VyLnR4dFVUCQADNj/+aTY//ml1eAsAAQT1AQAABBQAAABtYXJrZXIKUEsBAh4DCgAAAAAAra6oXKgWUGgHAAAABwAAAAoAGAAAAAAAAQAAAKSBAAAAAG1hcmtlci50eHRVVAUAAzY//ml1eAsAAQT1AQAABBQAAABQSwUGAAAAAAEAAQBQAAAASwAAAAAA
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .serverName }}
+  namespace: {{ .namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: {{ .serverName }} }
+  template:
+    metadata:
+      labels: { app: {{ .serverName }} }
+    spec:
+      initContainers:
+        # Generate a self-signed cert into the shared emptyDir. CN does not
+        # matter for the test — curl without -k fails on the TLS-verify step
+        # (exit 60) before any hostname check, since the chain is untrusted.
+        - name: gen-cert
+          image: alpine:3.19
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              apk add --no-cache openssl >/dev/null
+              openssl req -x509 -newkey rsa:2048 -days 1 -nodes \
+                -subj "/CN={{ .serverName }}" \
+                -keyout /tls/tls.key -out /tls/tls.crt
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 8443
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+            - name: www
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: {{ .serverName }}-config
+            items:
+              - key: default.conf
+                path: default.conf
+        - name: tls
+          emptyDir: {}
+        - name: www
+          configMap:
+            name: {{ .serverName }}-config
+            items:
+              - key: pkg.zip
+                path: pkg.zip
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .serverName }}
+  namespace: {{ .namespace }}
+spec:
+  selector: { app: {{ .serverName }} }
+  ports:
+    - port: 8443
+      targetPort: 8443

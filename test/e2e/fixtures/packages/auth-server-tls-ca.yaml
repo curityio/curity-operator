@@ -1,0 +1,225 @@
+# Tiny nginx that serves /pkg.zip over HTTPS using a leaf cert signed by a
+# private demo CA. The Curity init container fetches it via --cacert pointing
+# at the CA cert mounted from `tour-ca-secret`. The ZIP is baked inline as
+# ConfigMap binaryData (177 bytes) so the test is hermetic.
+#
+# Cert generation (regenerate if SAN-target hostname changes):
+#   cd /tmp/e2e-tls-ca
+#   openssl req -x509 -newkey rsa:2048 -keyout ca.key -out ca.crt -days 3650 \
+#     -nodes -subj "/CN=E2E Pkg Server CA"
+#   openssl req -newkey rsa:2048 -keyout leaf.key -out leaf.csr -nodes \
+#     -subj "/CN=pkg-ca-server.e2e-pkg-tls-ca.svc.cluster.local"
+#   echo "subjectAltName = DNS:pkg-ca-server.e2e-pkg-tls-ca.svc.cluster.local" > leaf.ext
+#   openssl x509 -req -in leaf.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+#     -out leaf.crt -days 3650 -sha256 -extfile leaf.ext
+#   openssl req -x509 -newkey rsa:2048 -keyout other-ca.key -out other-ca.crt \
+#     -days 3650 -nodes -subj "/CN=E2E Other CA"
+#
+# The leaf cert's SAN must match the in-cluster service hostname:
+#   {{ .serverName }}.{{ .namespace }}.svc.cluster.local
+# When .serverName=pkg-ca-server and .namespace=e2e-pkg-tls-ca the SAN above
+# matches. If callers change either, regenerate the leaf cert.
+
+# CA the cluster trusts (referenced by IdentityServerCluster.tls.ca.secretRef)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .caSecret }}
+  namespace: {{ .namespace }}
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIDGTCCAgGgAwIBAgIUG1QBoMKhdLZH6JTIXERse7MKBd0wDQYJKoZIhvcNAQEL
+    BQAwHDEaMBgGA1UEAwwRRTJFIFBrZyBTZXJ2ZXIgQ0EwHhcNMjYwNTA5MTg1MDUw
+    WhcNMzYwNTA2MTg1MDUwWjAcMRowGAYDVQQDDBFFMkUgUGtnIFNlcnZlciBDQTCC
+    ASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKFlqVBtwKROMjXpcvJozzCE
+    o2KPE0VZ562GDWjuLPwHQrbHoJsDtUEKxpDoOTn8x/THKYJPJujRNQr9+dWwzlA5
+    puhMpSMWMMU1m8ARR2mxHwYDSNUxbYEqv3c73DvmkmG9u1YTGdvaUgOhsDumpeE2
+    D9N4z9oOtwYyZ+/jEaYSfTa2woodOUcQP8d2GKFTjb9MccAAYo6itdyaWahQJyTT
+    11d3hW8U8ozuKzOWcTj2YoSbQWvfTrh4O3Bxoq601BMvaEWhIm925AQknoxtyK9r
+    DgjiWCGdJcC9xBU3CQka1LVXtBj63USLbNHyMsu8dKYK0vIuswD+586Xb8tlLQEC
+    AwEAAaNTMFEwHQYDVR0OBBYEFKCsUZreXdYwoXisqUBLyMxr4WJLMB8GA1UdIwQY
+    MBaAFKCsUZreXdYwoXisqUBLyMxr4WJLMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZI
+    hvcNAQELBQADggEBACJmEVN4cAXHzUTG8m+FEMa2AtjweT6kZyixnsATlsIddWZl
+    69pRwZ3gdtJUAdmjmz7J/MraQTA/LcY20lAqhi1WFGmwllM7lsct7aSdNmyYG7m9
+    T4SS5bb1sQPu/+WSwQ0vAnq6bcbiZYwU9f7huiOBCanG0x7NTNP9AbF7uhBm4Bmh
+    xb33XWSHJgkFBEMHLHR+sB+ghlgNMpksDHt/8HGxif7Pcs7bncT0xHnnKNlK++/6
+    569TcCEQmEsA5rUNyoUocXwBUB7Bz5bBFt7cyJwj+MB6CaRw8Pf2kbvdhzdsGa08
+    5efoJZ5goHWSglKeUx3+kEDnYW0FxpLhNagApRE=
+    -----END CERTIFICATE-----
+
+# Unrelated CA Secret used only by the negative spec — proves --cacert is
+# truly enforcing trust and not silently falling back to the system store.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .otherCaSecret }}
+  namespace: {{ .namespace }}
+type: Opaque
+stringData:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIDDzCCAfegAwIBAgIUA+dhCFSTiZQmLNrN6byADUZFFo0wDQYJKoZIhvcNAQEL
+    BQAwFzEVMBMGA1UEAwwMRTJFIE90aGVyIENBMB4XDTI2MDUwOTE4NTA1MVoXDTM2
+    MDUwNjE4NTA1MVowFzEVMBMGA1UEAwwMRTJFIE90aGVyIENBMIIBIjANBgkqhkiG
+    9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq6M06q0M0guusOujgSmEt1R/xdYjNVRXPk+v
+    j13jMLSTja1BG9oWT3/4QxFjh5W64Ep6Gur4tY1zIScpbKZ8E7XKWQXqEymTr7qm
+    CMKk4OqlnbUWpZs9o/+mAOEsf2NNJf94a48kVQ35X3q+L4FDYNvM8K4Eox4Eryc0
+    Q8UChHajkO6QjPnT+lSETSL0VtCwM/PPpFxFWw8zH4f5AHcukBNx3hUe04Gh29wL
+    xQ0o0o09X6XZs9S/v9qVXmErQoIEXOSRBypxBge7O+zCmNbUkh7vcGEIOhS/6GEH
+    fKdypFz1KQmTXUp6121lRzQnlDzhqmBZYrSE1+l+6AA1TMtUpwIDAQABo1MwUTAd
+    BgNVHQ4EFgQUY4EBsXgjl2JQneRb3FXEL+N/WR8wHwYDVR0jBBgwFoAUY4EBsXgj
+    l2JQneRb3FXEL+N/WR8wDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOC
+    AQEAp2c6FY+/DR4E5/k0HBA9FboBjAcA/ec5nuh6ysvuPQR8a6XiikubQKV4jXtF
+    PJBEEAWCT1slmCgCqs8k2udM8C2861g2hXP/h41Oy0ukB9vI/8snfwuCGsOQaTiR
+    BiBKcnKJ3IKJqusCw3MGhdHXZ31v51caMa9/kUzSgfkJPYLen/VUgATOMraQU7m7
+    TyhLYgn4zkSHYAvyv2FRxMxkn/GcjTNlL5xqtUiHIE8Dpdfa7CFnpiW580zVjojF
+    fWTpC+C5WFseYJWobfcu6XFMOzve6ndExC4W7znqAgDdFpF8dutshyNidnEliHWR
+    6Ogjed+obMhxZk970uyNzqGzIw==
+    -----END CERTIFICATE-----
+
+# Leaf cert + key the test artifact server uses to serve TLS. Signed by
+# the CA above; SAN = pkg-ca-server.e2e-pkg-tls-ca.svc.cluster.local.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .serverName }}-leaf
+  namespace: {{ .namespace }}
+type: kubernetes.io/tls
+stringData:
+  tls.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIDYDCCAkigAwIBAgIUUC/0z92XXnK54zj+qLbUbhLAKW8wDQYJKoZIhvcNAQEL
+    BQAwHDEaMBgGA1UEAwwRRTJFIFBrZyBTZXJ2ZXIgQ0EwHhcNMjYwNTA5MTg1MDUx
+    WhcNMzYwNTA2MTg1MDUxWjA5MTcwNQYDVQQDDC5wa2ctY2Etc2VydmVyLmUyZS1w
+    a2ctdGxzLWNhLnN2Yy5jbHVzdGVyLmxvY2FsMIIBIjANBgkqhkiG9w0BAQEFAAOC
+    AQ8AMIIBCgKCAQEAlmAdt3vWm3bAtKU1UhOOJ9izMHypqTXrss5JCbg+4Eq1mopc
+    9oNIrRNn57dXKGXpnQkhIRQJkM2qDivhgzJTjETQYWbQN0QOHSLwnuNeGwWqZjmK
+    X4mVRjsS/GGTDGCQ2aGa1pDsDmEsL7IQMPS4/xc5haVxZVAA6qtKNxRMnMV5GqQV
+    4NfTc8wh3NhNGXxHOjxodx1tBQdjXyyjLDszhFpH00ItarSKzQJq3kSEDnfXQfYs
+    JFzH8dTu2iBpMck/3Tw0RhrLEoegEP+OseNpYrhDk7VLaZv6YJCSqoHokT2/0edf
+    shzen95MYQL/qsV60jojw6CulQCVXiGl341FKQIDAQABo30wezA5BgNVHREEMjAw
+    gi5wa2ctY2Etc2VydmVyLmUyZS1wa2ctdGxzLWNhLnN2Yy5jbHVzdGVyLmxvY2Fs
+    MB0GA1UdDgQWBBTUz5h20JY3SwHT/Q0m8Fvu1pE3nTAfBgNVHSMEGDAWgBSgrFGa
+    3l3WMKF4rKlAS8jMa+FiSzANBgkqhkiG9w0BAQsFAAOCAQEAU73FG5QFFukJYKjg
+    +7/PwXH6Z7Lp3VSTeh333oSCBBEENYy2PwNRZV3m3XR3EtZhPUqyZMb5ICZZCbH6
+    HMgUtBjvkxGTTBKrnnuaGR5pC/Y7wS3DCKNGp2PkjKROEARE0kw/tX/6TzfubMKY
+    dctv2XK5rubeEDd+wH6AlRDhmxZkxSzVdtsxcDDEbQq2aZZ9QwmNhdAugG4yrRs2
+    zkd8sVNdgc/TAGieOpT51Le22dPFJdHvjFiBeRCQ98R//lSn9peBu9guDFJaNWFp
+    fE5Wq2N/OI7O1BZF/WBwDFhh0dGYDQBu4ryTFL8lBLUD5skRKLEdO5OS2Aa9KnQy
+    b7nfKg==
+    -----END CERTIFICATE-----
+  tls.key: |
+    -----BEGIN PRIVATE KEY-----
+    MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCWYB23e9abdsC0
+    pTVSE44n2LMwfKmpNeuyzkkJuD7gSrWailz2g0itE2fnt1coZemdCSEhFAmQzaoO
+    K+GDMlOMRNBhZtA3RA4dIvCe414bBapmOYpfiZVGOxL8YZMMYJDZoZrWkOwOYSwv
+    shAw9Lj/FzmFpXFlUADqq0o3FEycxXkapBXg19NzzCHc2E0ZfEc6PGh3HW0FB2Nf
+    LKMsOzOEWkfTQi1qtIrNAmreRIQOd9dB9iwkXMfx1O7aIGkxyT/dPDRGGssSh6AQ
+    /46x42liuEOTtUtpm/pgkJKqgeiRPb/R51+yHN6f3kxhAv+qxXrSOiPDoK6VAJVe
+    IaXfjUUpAgMBAAECggEAClDIIRbf8zS7hfjiVkHMqeuZ6TzYB6lRBKhVhtLqj0jY
+    ueP9ehSp9uOCqHjhg/4vvyvJ58K/4DzXilbUxsL8S75JvDDJHk1vGW0U7BVlVn22
+    QYJ3fVPLF3EEfac05u+16BQHsunoo5jjZtc0eKNFEIy3j7U4eO56zZ5X/jzIf6WK
+    XK2lNHVuzm53PKtZ8aI00rLxsR3nv1minhyQNXoLiFtDM2olBsZwcjo53yhnswUA
+    AF2kXyaQPd5+EJa4h+cbBgercYv0tijYPie/thXJw2cMLo4HQbhPHYhAgBz0vzWd
+    rV3w5BTCjc6uMCzFv9v6GcMgvutRKHVWIw29ujLv4QKBgQDEj1bAXiZ9Gui3eH0p
+    NQqLc8wPl/eF7vJdMcfI76/kO52aBN0nZ+0GGxYHNZK/6zHi0auerWrZU+d02ff2
+    5kJyHgDL6dA2zNH+Vc05rJV4lhmfcLpcVMzrxq5AmtMizV7A76zpJHJVLb8iKbHG
+    K3rU61daxtG1LvFrJ1AIFrNZcQKBgQDD2Wmrbls5kgdvvKei4BgF1aCZGXr0S/E8
+    zLzadkUDcS2Qg2yWAlqwNDZwBap/96wb2cFOp4j6iTc08/hhSmTpq274g0Y4/JPi
+    clMf3CYwZLXIlp5prc9diF4VZYMTtdBlc+GITdMoZbzTPpDDP49SvN0Ij7PoZlvG
+    nQmwWe6LOQKBgQCACu/0OGDSNmlKu06tPUQ1O6W+srwnn1R6qScAGkN2Ze9wmaKH
+    PQgGZjafU6LZKplArF0j7Mwh7qpkUGlbiPvX4vuZ2iIs0JgrGjGqVGa6Ou1OE90S
+    sJsdLDvvEexgS3BiNr9o0Lk6C6bq1kZcVY6ajQRGuiV55a6WovFbk44ZwQKBgQDA
+    H21bsJxo82m8IRNJ4g9u2cv7pFVLhZwXCrlQjajR4ZrTIznIRnL0W6PzbHt/oVUC
+    1TCemhbzvtubZKGJv1MTLwtjWlPu30erYn9Mx8fmvUTei3LHNKwxku7IipZ1JWxT
+    ucPK1J2KCZOcnsmf36AXiBJErcPM/WyWf8Lbbr1lcQKBgDxUkCL+fix67j0v/WcJ
+    LJ4eyi9g7cubakrQufwqW0wFIJDzsbm8xutoxIhXC09s0A8mgIEo3anuBKui/zyy
+    jm48N615gaHqZxZktOevIuKRRn7VQ3LAvDyebjzvOaO9R10TwosgkrDR0EDa7ic3
+    iTdvcBw6XB9eI7s7MNaxoPA5
+    -----END PRIVATE KEY-----
+
+# nginx serving /pkg.zip on :8443 using the leaf cert above
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .serverName }}-config
+  namespace: {{ .namespace }}
+data:
+  default.conf: |
+    server {
+      listen 8443 ssl;
+      server_name _;
+      ssl_certificate     /etc/nginx/tls/tls.crt;
+      ssl_certificate_key /etc/nginx/tls/tls.key;
+      location = /pkg.zip {}
+      root /usr/share/nginx/html;
+    }
+binaryData:
+  # Minimal valid ZIP archive containing one file `marker.txt` with content
+  # "marker\n". 177 bytes. Regenerate via:
+  #   echo marker > marker.txt && zip -q test.zip marker.txt && base64 < test.zip | tr -d '\n'
+  pkg.zip: UEsDBAoAAAAAAK2uqFyoFlBoBwAAAAcAAAAKABwAbWFya2VyLnR4dFVUCQADNj/+aTY//ml1eAsAAQT1AQAABBQAAABtYXJrZXIKUEsBAh4DCgAAAAAAra6oXKgWUGgHAAAABwAAAAoAGAAAAAAAAQAAAKSBAAAAAG1hcmtlci50eHRVVAUAAzY//ml1eAsAAQT1AQAABBQAAABQSwUGAAAAAAEAAQBQAAAASwAAAAAA
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .serverName }}
+  namespace: {{ .namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: {{ .serverName }} }
+  template:
+    metadata:
+      labels: { app: {{ .serverName }} }
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 8443
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { cpu: 100m, memory: 64Mi }
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
+            - name: www
+              mountPath: /usr/share/nginx/html
+              readOnly: true
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: {{ .serverName }}-config
+            items:
+              - key: default.conf
+                path: default.conf
+        - name: tls
+          secret:
+            secretName: {{ .serverName }}-leaf
+        - name: www
+          configMap:
+            name: {{ .serverName }}-config
+            items:
+              - key: pkg.zip
+                path: pkg.zip
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .serverName }}
+  namespace: {{ .namespace }}
+spec:
+  selector: { app: {{ .serverName }} }
+  ports:
+    - port: 8443
+      targetPort: 8443

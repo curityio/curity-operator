@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -101,7 +102,7 @@ var _ = Describe("packages feature", func() {
 			ctx := context.Background()
 
 			By("applying cluster + runtime node")
-			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-with-package.yaml", ns,
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-package.yaml", ns,
 				map[string]interface{}{
 					"name": clusterName, "namespace": ns,
 					"url": pkgURL, "mountPath": mountPath,
@@ -193,7 +194,7 @@ var _ = Describe("packages feature", func() {
 		It("creates two init containers and two emptyDir volumes", func() {
 			ctx := context.Background()
 
-			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-with-packages-multi.yaml", ns,
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-packages-multi.yaml", ns,
 				map[string]interface{}{
 					"name": clusterName, "namespace": ns,
 					"urlA": urlA, "urlB": urlB,
@@ -424,7 +425,7 @@ var _ = Describe("packages feature", func() {
 
 		It("projects BEARER_TOKEN as a Secret env var without leaking the value to argv", func() {
 			ctx := context.Background()
-			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-with-package-auth.yaml", ns,
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-package-auth.yaml", ns,
 				map[string]interface{}{
 					"name": clusterName, "namespace": ns,
 					"url": pkgURL, "mountPath": "/etc/plugins/private",
@@ -461,6 +462,452 @@ var _ = Describe("packages feature", func() {
 				g.Expect(script).NotTo(ContainSubstring("test-bearer-token-value"),
 					"the literal token value must NEVER be in the script")
 			}, e2eTimeout, e2eInterval).Should(Succeed())
+		})
+	})
+
+	// =================================================================
+	// End-to-end auth — real download via in-cluster nginx
+	//
+	// Earlier "bearer-token auth" Describe asserts Deployment SHAPE only
+	// (env vars, script substrings). It would NOT have caught a real
+	// runtime regression like the PKG_HOST-with-port bug we found in
+	// manual smoke testing — the script looked correct on paper but
+	// curl's netrc matcher silently failed against `host:port`. These
+	// describes apply a real auth-protected nginx, fetch through the
+	// operator-built init container, and assert the pod reaches Ready
+	// (proving init container exit 0 = real download succeeded).
+	// =================================================================
+
+	Describe("bearer-token end-to-end against in-cluster nginx", Ordered, Label("slow"), func() {
+		const (
+			ns          = "e2e-pkg-bearer-e2e"
+			serverName  = "pkg-bearer-server"
+			tokenSecret = "pkg-bearer-token"
+			tokenValue  = "test-bearer-token-e2e"
+			clusterName = "pkg-bearer-e2e"
+			nodeName    = "pkg-bearer-e2e-rt"
+		)
+		BeforeAll(func() {
+			createNS(ns)
+			ctx := context.Background()
+
+			// Bring up the bearer-protected artifact server.
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/auth-server-bearer.yaml", ns,
+				map[string]interface{}{
+					"namespace":  ns,
+					"serverName": serverName,
+					"token":      tokenValue,
+				})
+			// Wait for nginx pod to be Ready before the Curity init runs.
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: serverName, Namespace: ns}, dep)).To(Succeed())
+				g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">=", 1))
+			}, 90*time.Second, e2eInterval).Should(Succeed())
+
+			// Create the token Secret the package references.
+			Expect(k().Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: tokenSecret, Namespace: ns},
+				StringData: map[string]string{"token": tokenValue},
+			})).To(Succeed())
+		})
+		AfterAll(func() { deleteNS(ns) })
+
+		It("init container fetches the bearer-protected ZIP and unpacks it", func() {
+			ctx := context.Background()
+			pkgURL := "http://" + serverName + "." + ns + ".svc.cluster.local:8080/pkg.zip"
+
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-package-auth.yaml", ns,
+				map[string]interface{}{
+					"name": clusterName, "namespace": ns,
+					"url": pkgURL, "mountPath": "/etc/plugins/bearer",
+					"tokenSecret": tokenSecret,
+				})
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+				map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+			deployName := ownedName(clusterName, nodeName)
+
+			By("waiting for the Curity Deployment to reach 1 ready replica (init container exit 0)")
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: deployName, Namespace: ns}, dep)).To(Succeed())
+				g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">=", 1),
+					"Curity pod must become Ready — proves init container fetched and unpacked the bearer-protected ZIP")
+			}, 120*time.Second, e2eInterval).Should(Succeed())
+
+			By("the init container's stdout must NOT contain the bearer token")
+			pods := &corev1.PodList{}
+			Expect(k().List(ctx, pods, client.InNamespace(ns),
+				client.MatchingLabels{"curity.io/cluster": clusterName})).To(Succeed())
+			Expect(pods.Items).NotTo(BeEmpty())
+			logs, err := utils.Run("kubectl", "logs", "-n", ns,
+				pods.Items[0].Name, "-c", "package-fetch-0")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(logs).NotTo(ContainSubstring(tokenValue),
+				"token value must not leak to pod logs")
+			Expect(logs).To(ContainSubstring("extracted to /pkg"))
+		})
+	})
+
+	Describe("basic-auth end-to-end against in-cluster nginx", Ordered, Label("slow"), func() {
+		const (
+			ns          = "e2e-pkg-basic-e2e"
+			serverName  = "pkg-basic-server"
+			basicSecret = "pkg-basic-creds"
+			username    = "demo-user"
+			password    = "demo-pass"
+			clusterName = "pkg-basic-e2e"
+			nodeName    = "pkg-basic-e2e-rt"
+		)
+		BeforeAll(func() {
+			createNS(ns)
+			ctx := context.Background()
+
+			// Bring up the basic-auth-protected artifact server.
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/auth-server-basic.yaml", ns,
+				map[string]interface{}{
+					"namespace":  ns,
+					"serverName": serverName,
+				})
+			// Wait for nginx Ready.
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: serverName, Namespace: ns}, dep)).To(Succeed())
+				g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">=", 1))
+			}, 90*time.Second, e2eInterval).Should(Succeed())
+
+			// Create the basic-auth Secret the package references.
+			Expect(k().Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: basicSecret, Namespace: ns},
+				StringData: map[string]string{
+					"username": username,
+					"password": password,
+				},
+			})).To(Succeed())
+		})
+		AfterAll(func() { deleteNS(ns) })
+
+		It("init container fetches via basic auth even when the URL has a non-default port (regression: PKG_HOST must NOT include port)", func() {
+			ctx := context.Background()
+			// Non-default port (8080) — this is what surfaced the
+			// original PKG_HOST=host:port netrc-mismatch bug.
+			pkgURL := "http://" + serverName + "." + ns + ".svc.cluster.local:8080/pkg.zip"
+
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-package-basic-auth.yaml", ns,
+				map[string]interface{}{
+					"name": clusterName, "namespace": ns,
+					"url": pkgURL, "mountPath": "/etc/plugins/basic",
+					"basicSecret": basicSecret,
+				})
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+				map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+			deployName := ownedName(clusterName, nodeName)
+
+			By("PKG_HOST env var must be set to hostname WITHOUT port (curl's netrc matches by hostname only)")
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: deployName, Namespace: ns}, dep)).To(Succeed())
+				init := initContainerByName(dep, "package-fetch-0")
+				g.Expect(init).NotTo(BeNil())
+				var pkgHost string
+				for _, e := range init.Env {
+					if e.Name == "PKG_HOST" {
+						pkgHost = e.Value
+					}
+				}
+				g.Expect(pkgHost).To(Equal(serverName+"."+ns+".svc.cluster.local"),
+					"PKG_HOST must be hostname-only; including the port would silently break netrc auth")
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("waiting for the Curity Deployment to reach 1 ready replica (init container exit 0)")
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: deployName, Namespace: ns}, dep)).To(Succeed())
+				g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">=", 1),
+					"Curity pod must become Ready — proves netrc was constructed correctly and basic auth succeeded against the non-default-port endpoint")
+			}, 120*time.Second, e2eInterval).Should(Succeed())
+
+			By("init container stdout must NOT contain the basic-auth password")
+			pods := &corev1.PodList{}
+			Expect(k().List(ctx, pods, client.InNamespace(ns),
+				client.MatchingLabels{"curity.io/cluster": clusterName})).To(Succeed())
+			Expect(pods.Items).NotTo(BeEmpty())
+			logs, err := utils.Run("kubectl", "logs", "-n", ns,
+				pods.Items[0].Name, "-c", "package-fetch-0")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(logs).NotTo(ContainSubstring(password),
+				"password must not leak to pod logs")
+			Expect(logs).NotTo(ContainSubstring(username),
+				"username should not leak to pod logs either")
+			Expect(logs).To(ContainSubstring("extracted to /pkg"))
+		})
+	})
+
+	// =================================================================
+	// TLS skipVerify end-to-end — self-signed nginx, real curl exit 60
+	//
+	// Earlier tests cover Deployment shape; these prove the `-k` flag is
+	// actually wired into curl by pointing at a server with a self-signed
+	// cert and showing:
+	//   - skipVerify=true  → init container exits 0, pod becomes Ready
+	//   - skipVerify=false → init container exits 60 (CURLE_PEER_FAILED_VERIFICATION)
+	// A future regression that drops `-k` from the script (or adds it
+	// unconditionally) is caught by one of these two specs.
+	// =================================================================
+	Describe("TLS skipVerify end-to-end against self-signed nginx", Ordered, Label("slow"), func() {
+		const (
+			ns         = "e2e-pkg-tls-skip"
+			serverName = "pkg-tls-server"
+		)
+		BeforeAll(func() {
+			createNS(ns)
+			ctx := context.Background()
+
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/auth-server-tls.yaml", ns,
+				map[string]interface{}{
+					"namespace":  ns,
+					"serverName": serverName,
+				})
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: serverName, Namespace: ns}, dep)).To(Succeed())
+				g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">=", 1))
+			}, 120*time.Second, e2eInterval).Should(Succeed())
+		})
+		AfterAll(func() { deleteNS(ns) })
+
+		It("skipVerify=true — init container fetches the self-signed-served ZIP and pod becomes Ready", func() {
+			ctx := context.Background()
+			const (
+				clusterName = "pkg-tls-skip-true"
+				nodeName    = "pkg-tls-skip-true-rt"
+			)
+			pkgURL := "https://" + serverName + "." + ns + ".svc.cluster.local:8443/pkg.zip"
+
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-package-tls-skipverify.yaml", ns,
+				map[string]interface{}{
+					"name": clusterName, "namespace": ns,
+					"url": pkgURL, "mountPath": "/etc/plugins/tls-skip",
+					"skipVerify": true,
+				})
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+				map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+			deployName := ownedName(clusterName, nodeName)
+
+			By("init container script must contain the -k flag (paranoid wiring check)")
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: deployName, Namespace: ns}, dep)).To(Succeed())
+				init := initContainerByName(dep, "package-fetch-0")
+				g.Expect(init).NotTo(BeNil())
+				g.Expect(init.Args[0]).To(ContainSubstring(" -k "),
+					"skipVerify=true must produce ` -k ` in the curl invocation")
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("waiting for the Curity Deployment to reach 1 ready replica (init container exit 0 — proves -k accepted the self-signed cert)")
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: deployName, Namespace: ns}, dep)).To(Succeed())
+				g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">=", 1),
+					"Curity pod must become Ready — proves curl -k accepted the self-signed cert and unpacked the ZIP")
+			}, 120*time.Second, e2eInterval).Should(Succeed())
+		})
+
+		It("skipVerify=false — init container fails with curl exit 60 (TLS verify) against the same self-signed server", func() {
+			ctx := context.Background()
+			const (
+				clusterName = "pkg-tls-skip-false"
+				nodeName    = "pkg-tls-skip-false-rt"
+			)
+			pkgURL := "https://" + serverName + "." + ns + ".svc.cluster.local:8443/pkg.zip"
+
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-package-tls-skipverify.yaml", ns,
+				map[string]interface{}{
+					"name": clusterName, "namespace": ns,
+					"url": pkgURL, "mountPath": "/etc/plugins/tls-noskip",
+					"skipVerify": false,
+				})
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+				map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+			By("init container script must NOT contain -k when skipVerify=false")
+			deployName := ownedName(clusterName, nodeName)
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: deployName, Namespace: ns}, dep)).To(Succeed())
+				init := initContainerByName(dep, "package-fetch-0")
+				g.Expect(init).NotTo(BeNil())
+				g.Expect(init.Args[0]).NotTo(ContainSubstring(" -k "),
+					"skipVerify=false must NOT produce ` -k ` in the curl invocation")
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("init container terminates with curl exit 60 (CURLE_PEER_FAILED_VERIFICATION)")
+			Eventually(func(g Gomega) {
+				pods := &corev1.PodList{}
+				g.Expect(k().List(ctx, pods, client.InNamespace(ns),
+					client.MatchingLabels{"curity.io/cluster": clusterName})).To(Succeed())
+				g.Expect(pods.Items).NotTo(BeEmpty(), "Curity pod must exist")
+
+				var found bool
+				var exitCode int32
+				for _, p := range pods.Items {
+					for _, ics := range p.Status.InitContainerStatuses {
+						if ics.Name != "package-fetch-0" {
+							continue
+						}
+						switch {
+						case ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0:
+							found, exitCode = true, ics.State.Terminated.ExitCode
+						case ics.LastTerminationState.Terminated != nil:
+							found, exitCode = true, ics.LastTerminationState.Terminated.ExitCode
+						}
+					}
+				}
+				g.Expect(found).To(BeTrue(), "package-fetch-0 must have terminated with non-zero exit code")
+				g.Expect(exitCode).To(Equal(int32(60)),
+					"expected curl exit 60 (TLS verify failure); got %d", exitCode)
+			}, 180*time.Second, e2eInterval).Should(Succeed())
+		})
+	})
+
+	// =================================================================
+	// TLS custom CA bundle end-to-end — private-CA-signed nginx
+	//
+	// Proves the operator's --cacert wiring is correct by pointing curl at
+	// a server whose leaf cert is signed by a private CA, with the CA
+	// projected into /tls/ca.crt via Secret. Asserts:
+	//   - correct CA  → curl exits 0, pod becomes Ready
+	//   - unrelated CA → curl exits 60 (proves --cacert is enforced and
+	//                    NOT silently falling back to the system trust)
+	//
+	// The leaf cert's SAN must match the in-cluster service hostname.
+	// Constants `ns` and `serverName` here MUST stay in sync with the SAN
+	// baked into auth-server-tls-ca.yaml.
+	// =================================================================
+	Describe("TLS custom-CA end-to-end against private-CA-signed nginx", Ordered, Label("slow"), func() {
+		const (
+			ns            = "e2e-pkg-tls-ca"
+			serverName    = "pkg-ca-server"
+			caSecret      = "pkg-ca-trust"
+			otherCaSecret = "pkg-ca-other"
+		)
+		BeforeAll(func() {
+			createNS(ns)
+			ctx := context.Background()
+
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/auth-server-tls-ca.yaml", ns,
+				map[string]interface{}{
+					"namespace":     ns,
+					"serverName":    serverName,
+					"caSecret":      caSecret,
+					"otherCaSecret": otherCaSecret,
+				})
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: serverName, Namespace: ns}, dep)).To(Succeed())
+				g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">=", 1))
+			}, 120*time.Second, e2eInterval).Should(Succeed())
+		})
+		AfterAll(func() { deleteNS(ns) })
+
+		It("correct CA — init container uses --cacert, fetches the private-CA-signed ZIP, pod becomes Ready", func() {
+			ctx := context.Background()
+			const (
+				clusterName = "pkg-ca-ok"
+				nodeName    = "pkg-ca-ok-rt"
+			)
+			pkgURL := "https://" + serverName + "." + ns + ".svc.cluster.local:8443/pkg.zip"
+
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-package-tls-ca.yaml", ns,
+				map[string]interface{}{
+					"name": clusterName, "namespace": ns,
+					"url": pkgURL, "mountPath": "/etc/plugins/tls-ca",
+					"caSecret": caSecret,
+				})
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+				map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+			deployName := ownedName(clusterName, nodeName)
+
+			By("init container script must contain --cacert /tls/ca.crt and project the CA Secret at /tls")
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: deployName, Namespace: ns}, dep)).To(Succeed())
+				init := initContainerByName(dep, "package-fetch-0")
+				g.Expect(init).NotTo(BeNil())
+				g.Expect(init.Args[0]).To(ContainSubstring("--cacert /tls/ca.crt"),
+					"ca.secretRef must produce `--cacert /tls/ca.crt` in the curl invocation")
+				g.Expect(init.Args[0]).NotTo(ContainSubstring(" -k "),
+					"--cacert path must NOT be combined with -k")
+
+				var pkgVol *corev1.Volume
+				for i := range dep.Spec.Template.Spec.Volumes {
+					if dep.Spec.Template.Spec.Volumes[i].Name == "pkg-0-tls" {
+						pkgVol = &dep.Spec.Template.Spec.Volumes[i]
+					}
+				}
+				g.Expect(pkgVol).NotTo(BeNil(), "pkg-0-tls projected volume must exist")
+				g.Expect(pkgVol.Projected).NotTo(BeNil())
+				g.Expect(pkgVol.Projected.Sources).NotTo(BeEmpty())
+				g.Expect(pkgVol.Projected.Sources[0].Secret).NotTo(BeNil())
+				g.Expect(pkgVol.Projected.Sources[0].Secret.Name).To(Equal(caSecret))
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("waiting for the Curity Deployment to reach 1 ready replica (proves --cacert accepted the chain)")
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: deployName, Namespace: ns}, dep)).To(Succeed())
+				g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">=", 1),
+					"Curity pod must become Ready — proves curl --cacert chained the leaf cert to the projected CA bundle")
+			}, 120*time.Second, e2eInterval).Should(Succeed())
+		})
+
+		It("unrelated CA — curl exits 60 (proves --cacert is enforced and not silently falling back to system trust)", func() {
+			ctx := context.Background()
+			const (
+				clusterName = "pkg-ca-wrong"
+				nodeName    = "pkg-ca-wrong-rt"
+			)
+			pkgURL := "https://" + serverName + "." + ns + ".svc.cluster.local:8443/pkg.zip"
+
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-package-tls-ca.yaml", ns,
+				map[string]interface{}{
+					"name": clusterName, "namespace": ns,
+					"url": pkgURL, "mountPath": "/etc/plugins/tls-ca-wrong",
+					"caSecret": otherCaSecret,
+				})
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+				map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+			By("init container terminates with curl exit 60 (CURLE_PEER_FAILED_VERIFICATION)")
+			Eventually(func(g Gomega) {
+				pods := &corev1.PodList{}
+				g.Expect(k().List(ctx, pods, client.InNamespace(ns),
+					client.MatchingLabels{"curity.io/cluster": clusterName})).To(Succeed())
+				g.Expect(pods.Items).NotTo(BeEmpty(), "Curity pod must exist")
+
+				var found bool
+				var exitCode int32
+				for _, p := range pods.Items {
+					for _, ics := range p.Status.InitContainerStatuses {
+						if ics.Name != "package-fetch-0" {
+							continue
+						}
+						switch {
+						case ics.State.Terminated != nil && ics.State.Terminated.ExitCode != 0:
+							found, exitCode = true, ics.State.Terminated.ExitCode
+						case ics.LastTerminationState.Terminated != nil:
+							found, exitCode = true, ics.LastTerminationState.Terminated.ExitCode
+						}
+					}
+				}
+				g.Expect(found).To(BeTrue(), "package-fetch-0 must have terminated with non-zero exit code")
+				g.Expect(exitCode).To(Equal(int32(60)),
+					"expected curl exit 60 (TLS verify failure: leaf does not chain to the unrelated CA); got %d", exitCode)
+			}, 180*time.Second, e2eInterval).Should(Succeed())
 		})
 	})
 
@@ -571,6 +1018,66 @@ var _ = Describe("packages feature", func() {
 				"error message must mention exactly-one constraint; got %v", err)
 		})
 
+		It("rejects a cluster with tls.skipVerify=true combined with tls.ca", func() {
+			ctx := context.Background()
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "skip-and-ca", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{
+						{
+							Source: v1alpha1.PackageSource{
+								URL: "https://example.com/x.zip",
+								TLS: &v1alpha1.PackageTLSSpec{
+									Enabled:    true,
+									SkipVerify: true,
+									CA: &v1alpha1.PackageSecretKeyRef{
+										SecretRef: v1alpha1.PackageSecretKeySelector{Name: "trust", Key: "ca.crt"},
+									},
+								},
+							},
+							MountPath: "/etc/plugins/x",
+						},
+					},
+				},
+			}
+			err := k().Create(ctx, cluster)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid: %v", err)
+			Expect(strings.ToLower(err.Error())).To(ContainSubstring("skipverify cannot be combined"),
+				"error message must mention skipVerify exclusivity; got %v", err)
+		})
+
+		It("rejects a cluster with tls.skipVerify=true combined with tls.clientCert (m4 footgun)", func() {
+			ctx := context.Background()
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "skip-and-cc", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{
+						{
+							Source: v1alpha1.PackageSource{
+								URL: "https://example.com/x.zip",
+								TLS: &v1alpha1.PackageTLSSpec{
+									Enabled:    true,
+									SkipVerify: true,
+									ClientCert: &v1alpha1.PackageClientCertRef{
+										SecretRef: v1alpha1.PackageClientCertSelector{Name: "client", Key: "tls.crt"},
+									},
+								},
+							},
+							MountPath: "/etc/plugins/x",
+						},
+					},
+				},
+			}
+			err := k().Create(ctx, cluster)
+			Expect(err).To(HaveOccurred())
+			Expect(apierrors.IsInvalid(err)).To(BeTrue(), "expected Invalid: %v", err)
+			Expect(strings.ToLower(err.Error())).To(ContainSubstring("skipverify cannot be combined"),
+				"error message must mention skipVerify exclusivity; got %v", err)
+		})
+
 		It("rejects a cluster with duplicate mountPath across packages", func() {
 			ctx := context.Background()
 			cluster := &v1alpha1.IdentityServerCluster{
@@ -612,7 +1119,7 @@ var _ = Describe("packages feature", func() {
 		It("captures the Deployment with one package via go-snaps", func() {
 			ctx := context.Background()
 
-			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-with-package.yaml", ns,
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-package.yaml", ns,
 				map[string]interface{}{
 					"name": clusterName, "namespace": ns,
 					"url":       "https://example.com/snap.zip",

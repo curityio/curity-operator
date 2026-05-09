@@ -285,16 +285,20 @@ func buildPackageInitEnv(p v1alpha1.PackageSpec) []corev1.EnvVar {
 	return envs
 }
 
-// packageURLHost returns the host (with optional port) portion of a
-// package URL. CRD validation ensures the URL parses; on the rare
-// parse-failure path we return "" and let curl fail at runtime so the
-// init container exits non-zero with a visible error.
+// packageURLHost returns the hostname (NO port) of a package URL — the
+// value that goes into the netrc `machine` line for basic auth. curl
+// strips the port from the URL's host before matching against netrc, so
+// `machine host:port login ...` would never match a request for
+// `http://host:port/...`. Use Hostname() not Host. CRD validation
+// ensures the URL parses; on the rare parse-failure path we return ""
+// and let curl fail at runtime so the init container exits non-zero
+// with a visible error.
 func packageURLHost(u string) string {
 	parsed, err := url.Parse(u)
 	if err != nil || parsed == nil {
 		return ""
 	}
-	return parsed.Host
+	return parsed.Hostname()
 }
 
 // buildPackageInitVolumeMounts returns the init container's mounts:

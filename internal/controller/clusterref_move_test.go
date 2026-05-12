@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
@@ -37,11 +38,23 @@ var _ = Describe("ClusterRef change cleanup", func() {
 		Expect(k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
 	})
 
+	// patchClusterRef retries the Get + Update on resourceVersion conflict.
+	// The node reconciler runs against the same envtest API server and
+	// constantly mutates the node's metadata (finalizers, labels, status)
+	// — without retry, a concurrent reconciler write between our Get and
+	// Update produces a flaky 409 in CI (where reconcile pressure is
+	// higher than on developer machines). retry.DefaultRetry uses an
+	// exponential backoff capped at 5 attempts, which is more than enough
+	// for envtest's single-replica reconciler.
 	patchClusterRef := func(name, newCluster string) {
-		var node v1alpha1.IdentityServerNode
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &node)).To(Succeed())
-		node.Spec.IdentityServerClusterRef = v1alpha1.ObjectReference{Name: newCluster}
-		Expect(k8sClient.Update(ctx, &node)).To(Succeed())
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			var node v1alpha1.IdentityServerNode
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: ns}, &node); err != nil {
+				return err
+			}
+			node.Spec.IdentityServerClusterRef = v1alpha1.ObjectReference{Name: newCluster}
+			return k8sClient.Update(ctx, &node)
+		})).To(Succeed())
 	}
 
 	// simulateConfigReady mirrors the pattern used by existing rename tests:

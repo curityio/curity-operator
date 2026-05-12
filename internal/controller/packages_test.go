@@ -1,10 +1,17 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
@@ -100,6 +107,80 @@ func TestBuildPackageInitContainers_RunsAsRoot(t *testing.T) {
 	}
 	if *sc.RunAsUser != 0 {
 		t.Errorf("RunAsUser = %d, want 0 (root)", *sc.RunAsUser)
+	}
+}
+
+// Defense-in-depth security context: every package-fetch init container
+// must drop ALL Linux capabilities and deny setuid escalation — even
+// though it runs UID 0 for apk. SeccompProfile is intentionally NOT set
+// (OpenShift anyuid SCC rejects pods with seccomp set when runAsUser=0;
+// see packages.go comment). A future change that loosens caps or
+// privilege escalation — or that re-adds SeccompProfile and breaks
+// OpenShift — should fail this test.
+func TestBuildPackageInitContainers_SecurityContextHardened(t *testing.T) {
+	pkgs := []v1alpha1.PackageSpec{onePackage("https://a.example/x.zip", "/p/a")}
+	cs := buildPackageInitContainers(pkgs, DefaultPackageFetcherImage)
+	sc := cs[0].SecurityContext
+	if sc == nil {
+		t.Fatal("init container has no SecurityContext")
+	}
+
+	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+		t.Errorf("AllowPrivilegeEscalation must be explicitly false; got %v", sc.AllowPrivilegeEscalation)
+	}
+
+	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("Capabilities.Drop must be exactly [ALL]; got %+v", sc.Capabilities)
+	}
+	if sc.Capabilities != nil && len(sc.Capabilities.Add) > 0 {
+		t.Errorf("Capabilities.Add must be empty; got %v", sc.Capabilities.Add)
+	}
+
+	// SeccompProfile must remain unset — OpenShift anyuid SCC rejects
+	// pods that set it. On standard K8s, PSA "restricted" injects
+	// RuntimeDefault automatically, so we lose nothing. Setting it
+	// here would re-introduce R1.
+	if sc.SeccompProfile != nil {
+		t.Errorf("SeccompProfile must NOT be set (OpenShift anyuid SCC compatibility); got %+v",
+			sc.SeccompProfile)
+	}
+}
+
+// Every package-fetch init container must carry CPU + memory
+// requests/limits — without them, a zip-bomb, runaway apk install, or
+// malicious URL response could consume node resources until eviction.
+// (Disk is bounded separately by the emptyDir SizeLimit.)
+func TestBuildPackageInitContainers_HasResourceLimits(t *testing.T) {
+	pkgs := []v1alpha1.PackageSpec{
+		onePackage("https://a.example/x.zip", "/p/a"),
+		onePackage("https://b.example/y.zip", "/p/b"),
+	}
+	cs := buildPackageInitContainers(pkgs, DefaultPackageFetcherImage)
+	for i, c := range cs {
+		for _, key := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			req, hasReq := c.Resources.Requests[key]
+			lim, hasLim := c.Resources.Limits[key]
+			if !hasReq || req.IsZero() {
+				t.Errorf("container[%d] missing %s request", i, key)
+			}
+			if !hasLim || lim.IsZero() {
+				t.Errorf("container[%d] missing %s limit", i, key)
+			}
+		}
+		// Lock in the specific values so a future bump to the constant
+		// is intentional, not accidental. Update both sides together.
+		if got, want := c.Resources.Requests[corev1.ResourceCPU], resource.MustParse("50m"); got.Cmp(want) != 0 {
+			t.Errorf("container[%d] CPU request = %s, want %s", i, got.String(), want.String())
+		}
+		if got, want := c.Resources.Limits[corev1.ResourceCPU], resource.MustParse("500m"); got.Cmp(want) != 0 {
+			t.Errorf("container[%d] CPU limit = %s, want %s", i, got.String(), want.String())
+		}
+		if got, want := c.Resources.Requests[corev1.ResourceMemory], resource.MustParse("64Mi"); got.Cmp(want) != 0 {
+			t.Errorf("container[%d] memory request = %s, want %s", i, got.String(), want.String())
+		}
+		if got, want := c.Resources.Limits[corev1.ResourceMemory], resource.MustParse("256Mi"); got.Cmp(want) != 0 {
+			t.Errorf("container[%d] memory limit = %s, want %s", i, got.String(), want.String())
+		}
 	}
 }
 
@@ -776,6 +857,18 @@ func TestBuildPackageDownloadScript_NoURLShellInjection(t *testing.T) {
 	}
 }
 
+// The unzip step must be wrapped with `|| exit 100` so a corrupt archive
+// produces a deterministic exit code outside curl's 0-92 range. The
+// PackagesReady translator relies on this to distinguish "downloaded but
+// not a valid ZIP" (server returned HTML, partial download, etc.) from
+// curl-level failures.
+func TestBuildPackageDownloadScript_UnzipExit100(t *testing.T) {
+	script := buildPackageDownloadScript(onePackage("https://example.com/x.zip", "/p/x"), 0)
+	if !strings.Contains(script, "unzip -q /tmp/pkg.zip -d /pkg || exit 100") {
+		t.Errorf("download script must wrap unzip with `|| exit 100`; got:\n%s", script)
+	}
+}
+
 // Security: a URL with shell metacharacters must still produce the right
 // PKG_URL env var value (the value is set by K8s API, not via shell, so
 // metacharacters are preserved verbatim).
@@ -901,6 +994,392 @@ func TestPackageVolumeSizeLimit(t *testing.T) {
 	want := "256Mi"
 	if v.EmptyDir.SizeLimit == nil || v.EmptyDir.SizeLimit.String() != want {
 		t.Errorf("sizeLimit = %v, want %s", v.EmptyDir.SizeLimit, want)
+	}
+}
+
+// =========================================================================
+// checkPackageSecrets pre-check tests.
+// Plan reference: PLAN-packages-status-visibility, Step 3.
+// =========================================================================
+
+// newSecret builds a corev1.Secret with the given name in namespace "ns" and
+// the provided key/value pairs in Data. Used to set up fake-client fixtures
+// for the pre-check tests.
+func newSecret(name string, kv map[string]string) *corev1.Secret {
+	data := make(map[string][]byte, len(kv))
+	for k, v := range kv {
+		data[k] = []byte(v)
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+		Data:       data,
+	}
+}
+
+// fakeClientWithSecrets builds a fake controller-runtime client carrying the
+// given Secrets. The scheme has corev1 only — Secret is the only resource
+// the pre-check reads.
+func fakeClientWithSecrets(t *testing.T, secrets ...*corev1.Secret) client.Client {
+	t.Helper()
+	s := newScheme(t)
+	objs := make([]client.Object, 0, len(secrets))
+	for _, sec := range secrets {
+		objs = append(objs, sec)
+	}
+	return fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
+}
+
+// Pre-check passes when every referenced Secret/key resolves.
+func TestCheckPackageSecrets_AllPresent(t *testing.T) {
+	c := fakeClientWithSecrets(t,
+		newSecret("auth-creds", map[string]string{"token": "x"}),
+		newSecret("tls-bundle", map[string]string{"ca.crt": "x"}),
+	)
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				Auth: &v1alpha1.PackageAuthSpec{
+					BearerToken: &v1alpha1.PackageSecretKeyRef{
+						SecretRef: v1alpha1.PackageSecretKeySelector{Name: "auth-creds", Key: "token"},
+					},
+				},
+				TLS: &v1alpha1.PackageTLSSpec{
+					Enabled: true,
+					CA: &v1alpha1.PackageSecretKeyRef{
+						SecretRef: v1alpha1.PackageSecretKeySelector{Name: "tls-bundle", Key: "ca.crt"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, err := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if err != nil || reason != "" || msg != "" {
+		t.Errorf("happy path: got (reason=%q, msg=%q, err=%v); want all zero", reason, msg, err)
+	}
+}
+
+// Bearer-token Secret name missing → ReasonPackageSecretMissing.
+func TestCheckPackageSecrets_SecretMissing_BearerToken(t *testing.T) {
+	c := fakeClientWithSecrets(t) // no secrets at all
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				Auth: &v1alpha1.PackageAuthSpec{
+					BearerToken: &v1alpha1.PackageSecretKeyRef{
+						SecretRef: v1alpha1.PackageSecretKeySelector{Name: "absent", Key: "token"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, err := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reason != v1alpha1.ReasonPackageSecretMissing {
+		t.Errorf("reason = %q, want %q", reason, v1alpha1.ReasonPackageSecretMissing)
+	}
+	if !strings.Contains(msg, "Secret \"absent\" not found") {
+		t.Errorf("message %q must name the missing Secret", msg)
+	}
+	if !strings.Contains(msg, "package-fetch-0") || !strings.Contains(msg, "index=0") {
+		t.Errorf("message %q must include index/container-name prefix", msg)
+	}
+}
+
+// Bearer-token Secret exists but the named key is absent.
+func TestCheckPackageSecrets_KeyMissing_BearerToken(t *testing.T) {
+	c := fakeClientWithSecrets(t, newSecret("auth-creds", map[string]string{"other": "x"}))
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				Auth: &v1alpha1.PackageAuthSpec{
+					BearerToken: &v1alpha1.PackageSecretKeyRef{
+						SecretRef: v1alpha1.PackageSecretKeySelector{Name: "auth-creds", Key: "token"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, err := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if reason != v1alpha1.ReasonPackageSecretKeyMissing {
+		t.Errorf("reason = %q, want %q", reason, v1alpha1.ReasonPackageSecretKeyMissing)
+	}
+	if !strings.Contains(msg, `key "token" not found in Secret "auth-creds"`) {
+		t.Errorf("message %q must name both missing key and Secret", msg)
+	}
+}
+
+// BasicAuth: usernameKey absent.
+func TestCheckPackageSecrets_KeyMissing_BasicAuth_UsernameKey(t *testing.T) {
+	c := fakeClientWithSecrets(t, newSecret("ba", map[string]string{"pass": "x"}))
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				Auth: &v1alpha1.PackageAuthSpec{
+					BasicAuth: &v1alpha1.PackageBasicAuthRef{
+						SecretRef: v1alpha1.PackageBasicAuthSelector{Name: "ba", UsernameKey: "user", PasswordKey: "pass"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, _ := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if reason != v1alpha1.ReasonPackageSecretKeyMissing || !strings.Contains(msg, `key "user"`) {
+		t.Errorf("expected SecretKeyMissing for usernameKey; got (reason=%q, msg=%q)", reason, msg)
+	}
+}
+
+// BasicAuth: passwordKey absent (username present).
+func TestCheckPackageSecrets_KeyMissing_BasicAuth_PasswordKey(t *testing.T) {
+	c := fakeClientWithSecrets(t, newSecret("ba", map[string]string{"user": "x"}))
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				Auth: &v1alpha1.PackageAuthSpec{
+					BasicAuth: &v1alpha1.PackageBasicAuthRef{
+						SecretRef: v1alpha1.PackageBasicAuthSelector{Name: "ba", UsernameKey: "user", PasswordKey: "pass"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, _ := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if reason != v1alpha1.ReasonPackageSecretKeyMissing || !strings.Contains(msg, `key "pass"`) {
+		t.Errorf("expected SecretKeyMissing for passwordKey; got (reason=%q, msg=%q)", reason, msg)
+	}
+}
+
+// Regression guard: pre-check must mirror runtime's TLS.Enabled gate. When
+// Enabled=false, runtime does not project the TLS volume and does not pass
+// --cacert / --cert flags — so a missing CA Secret is irrelevant. The
+// pre-check must NOT flip PackagesReady=False for stale refs the user has
+// explicitly disabled.
+func TestCheckPackageSecrets_TLSDisabledSkipsCARefCheck(t *testing.T) {
+	c := fakeClientWithSecrets(t) // no secrets at all
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				TLS: &v1alpha1.PackageTLSSpec{
+					Enabled: false, // gate is closed; runtime ignores CA below
+					CA: &v1alpha1.PackageSecretKeyRef{
+						SecretRef: v1alpha1.PackageSecretKeySelector{Name: "absent", Key: "ca.crt"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, err := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if err != nil || reason != "" || msg != "" {
+		t.Errorf("Enabled=false must skip TLS refs; got (reason=%q, msg=%q, err=%v)", reason, msg, err)
+	}
+}
+
+// Happy path: tls.crt + tls.key (the standard kubernetes.io/tls layout)
+// resolves cleanly via derivePrivateKeyKey. Locks in the crt→key convention.
+func TestCheckPackageSecrets_ClientCertConventionalKeys(t *testing.T) {
+	c := fakeClientWithSecrets(t,
+		newSecret("mtls", map[string]string{"tls.crt": "x", "tls.key": "y"}),
+	)
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				TLS: &v1alpha1.PackageTLSSpec{
+					Enabled: true,
+					ClientCert: &v1alpha1.PackageClientCertRef{
+						SecretRef: v1alpha1.PackageClientCertSelector{Name: "mtls", Key: "tls.crt"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, err := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if err != nil || reason != "" || msg != "" {
+		t.Errorf("conventional tls.crt+tls.key must pass; got (reason=%q, msg=%q, err=%v)", reason, msg, err)
+	}
+}
+
+// ClientCert: the derived private-key key (crt→key) must also be checked.
+func TestCheckPackageSecrets_ClientCertMissingDerivedKey(t *testing.T) {
+	c := fakeClientWithSecrets(t, newSecret("mtls", map[string]string{"tls.crt": "x"}))
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				TLS: &v1alpha1.PackageTLSSpec{
+					Enabled: true,
+					ClientCert: &v1alpha1.PackageClientCertRef{
+						SecretRef: v1alpha1.PackageClientCertSelector{Name: "mtls", Key: "tls.crt"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, _ := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if reason != v1alpha1.ReasonPackageSecretKeyMissing || !strings.Contains(msg, `key "tls.key"`) {
+		t.Errorf("expected SecretKeyMissing for derived tls.key; got (reason=%q, msg=%q)", reason, msg)
+	}
+}
+
+// Both TLS CA and ClientCert refs are walked — a failure on either fails the
+// pre-check. Here ClientCert is the bad one to verify CA-first didn't mask it.
+func TestCheckPackageSecrets_TLSCAandClientCertBothChecked(t *testing.T) {
+	c := fakeClientWithSecrets(t,
+		newSecret("ca-good", map[string]string{"ca.crt": "x"}),
+		// mtls Secret intentionally missing
+	)
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				TLS: &v1alpha1.PackageTLSSpec{
+					Enabled: true,
+					CA: &v1alpha1.PackageSecretKeyRef{
+						SecretRef: v1alpha1.PackageSecretKeySelector{Name: "ca-good", Key: "ca.crt"},
+					},
+					ClientCert: &v1alpha1.PackageClientCertRef{
+						SecretRef: v1alpha1.PackageClientCertSelector{Name: "mtls-absent", Key: "tls.crt"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, _ := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if reason != v1alpha1.ReasonPackageSecretMissing || !strings.Contains(msg, `Secret "mtls-absent" not found`) {
+		t.Errorf("expected SecretMissing for mtls-absent; got (reason=%q, msg=%q)", reason, msg)
+	}
+}
+
+// Iteration stops at the first failing package — serial-fix UX. The second
+// package's worse failure is not reported.
+func TestCheckPackageSecrets_FirstFailureWins(t *testing.T) {
+	c := fakeClientWithSecrets(t) // no secrets — both packages will fail
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				Auth: &v1alpha1.PackageAuthSpec{
+					BearerToken: &v1alpha1.PackageSecretKeyRef{
+						SecretRef: v1alpha1.PackageSecretKeySelector{Name: "first-bad", Key: "token"},
+					},
+				},
+			},
+		},
+		{
+			MountPath: "/p/b",
+			Source: v1alpha1.PackageSource{
+				URL: "https://b.example/y.zip",
+				Auth: &v1alpha1.PackageAuthSpec{
+					BearerToken: &v1alpha1.PackageSecretKeyRef{
+						SecretRef: v1alpha1.PackageSecretKeySelector{Name: "second-bad", Key: "token"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, _ := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if reason != v1alpha1.ReasonPackageSecretMissing {
+		t.Fatalf("reason = %q, want %q", reason, v1alpha1.ReasonPackageSecretMissing)
+	}
+	if !strings.Contains(msg, "first-bad") {
+		t.Errorf("message %q must reference the FIRST failing Secret (first-bad)", msg)
+	}
+	if strings.Contains(msg, "second-bad") {
+		t.Errorf("message %q must NOT reference the second failing Secret — serial-fix UX broken", msg)
+	}
+	if !strings.Contains(msg, "package-fetch-0") {
+		t.Errorf("message %q must reference index 0", msg)
+	}
+}
+
+// Plan D13: non-IsNotFound errors are propagated as retryErr, NOT translated
+// to a False condition. Caller uses controller-runtime exponential backoff.
+func TestCheckPackageSecrets_TransientErrorPropagates(t *testing.T) {
+	transientErr := errors.New("simulated API server flake")
+	s := newScheme(t)
+	c := fake.NewClientBuilder().WithScheme(s).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, client client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			return transientErr
+		},
+	}).Build()
+
+	pkgs := []v1alpha1.PackageSpec{
+		{
+			MountPath: "/p/a",
+			Source: v1alpha1.PackageSource{
+				URL: "https://a.example/x.zip",
+				Auth: &v1alpha1.PackageAuthSpec{
+					BearerToken: &v1alpha1.PackageSecretKeyRef{
+						SecretRef: v1alpha1.PackageSecretKeySelector{Name: "auth-creds", Key: "token"},
+					},
+				},
+			},
+		},
+	}
+	reason, msg, err := checkPackageSecrets(context.Background(), c, pkgs, "ns")
+	if reason != "" || msg != "" {
+		t.Errorf("transient error path must NOT set reason/message; got (reason=%q, msg=%q)", reason, msg)
+	}
+	if err == nil || !errors.Is(err, transientErr) {
+		t.Errorf("err must wrap the underlying transient error; got %v", err)
+	}
+}
+
+// URLs longer than packageURLMessageMaxLen are truncated with "..." indicator.
+func TestFormatPackageMessage_URLTruncation(t *testing.T) {
+	longURL := "https://example.com/" + strings.Repeat("x", 300)
+	p := v1alpha1.PackageSpec{
+		MountPath: "/p/a",
+		Source:    v1alpha1.PackageSource{URL: longURL},
+	}
+	msg := formatPackageMessage(2, p, "detail")
+	if strings.Contains(msg, longURL) {
+		t.Errorf("message must NOT contain the full long URL: %q", msg)
+	}
+	if !strings.Contains(msg, "...") {
+		t.Errorf("truncated message must include `...` indicator: %q", msg)
+	}
+	if !strings.Contains(msg, "index=2") || !strings.Contains(msg, "package-fetch-2") {
+		t.Errorf("message must include index and container name: %q", msg)
+	}
+	if !strings.Contains(msg, ": detail") {
+		t.Errorf("message must include the detail suffix: %q", msg)
+	}
+}
+
+// URLs at or below the cap are passed through verbatim.
+func TestFormatPackageMessage_URLNotTruncatedBelowCap(t *testing.T) {
+	shortURL := "https://example.com/x.zip"
+	p := v1alpha1.PackageSpec{
+		MountPath: "/p/a",
+		Source:    v1alpha1.PackageSource{URL: shortURL},
+	}
+	msg := formatPackageMessage(0, p, "ok")
+	if !strings.Contains(msg, shortURL) {
+		t.Errorf("short URL must appear verbatim in message: %q", msg)
+	}
+	if strings.Contains(msg, "...") {
+		t.Errorf("short URL must NOT be truncated: %q", msg)
 	}
 }
 

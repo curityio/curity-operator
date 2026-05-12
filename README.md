@@ -357,7 +357,11 @@ spec:
 - **`tls.enabled` defaults to `false`**; the rest of the TLS block is ignored unless `enabled` is `true`.
 - **At most one of `auth.basicAuth` / `auth.bearerToken`** per package (rejected at admission).
 - **At most 20 packages** per cluster.
-- **The init container image is `alpine:3.19`** (the Curity image lacks `curl`/`unzip`). For air-gapped clusters that mirror to a private registry, override at operator deploy time via `PACKAGE_FETCHER_IMAGE` env var on the operator pod — there is no per-CR override.
+- **The init container image is `alpine:3.19`** (the Curity image lacks `curl`/`unzip`). For air-gapped clusters that mirror to a private registry, override at operator deploy time via the `PACKAGE_FETCHER_IMAGE` env var on the operator pod — there is no per-CR override. The Helm chart exposes it as `controllerManager.manager.env.packageFetcherImage`, e.g.:
+  ```bash
+  helm install curity-operator ./charts/curity-operator \
+    --set controllerManager.manager.env.packageFetcherImage=my-registry.example.com/alpine:3.19
+  ```
 - **Each package volume is capped at 256MiB** (emptyDir `sizeLimit`) to bound zip-bomb / disk-full impact.
 - **Credentials never appear on `curl` argv** — bearer tokens are piped via stdin, basic-auth uses a netrc file with mode 0600.
 
@@ -371,17 +375,98 @@ spec:
 
 ### Debugging packages
 
+Package-fetch failures surface on `IdentityServerCluster.status.conditions` and
+`IdentityServerNode.status.conditions` under a `PackagesReady` condition.
+Start there before drilling into pod state.
+
+```bash
+# Check the cluster-level condition first — same view, fewer drills.
+kubectl get isc <name> -o jsonpath='{.status.conditions[?(@.type=="PackagesReady")]}{"\n"}'
+
+# Per-node condition (useful when only one node in the cluster failed).
+kubectl get isn <node> -o jsonpath='{.status.conditions[?(@.type=="PackagesReady")]}{"\n"}'
+
+# The condition Reason maps to a failure category (see table below).
+# The Message names the failing package index, mountPath, and (for
+# runtime failures) the curl exit code or kubelet error string.
+```
+
+**Reason taxonomy.** The `PackagesReady` Reason field tells you which
+class of failure occurred:
+
+| Reason | Cause |
+|---|---|
+| `AllPackagesFetched` | True. Every init container exited 0. |
+| `PackageSecretMissing` | A referenced Secret does not exist (or was deleted). |
+| `PackageSecretKeyMissing` | The Secret exists, but the named key is absent. |
+| `PackageImagePullFailed` | The package-fetcher image (`alpine:3.19` or override) cannot be pulled. |
+| `PackageTLSVerifyFailed` | curl exit 60 — the server's TLS cert does not chain to the configured `tls.ca`. |
+| `PackageClientCertInvalid` | curl exits 58/82 — the configured `tls.clientCert` Secret data could not be used. |
+| `PackageHTTPError` | curl exit 22 — the URL returned 4xx/5xx. |
+| `PackageInvalidArchive` | Download succeeded but `unzip` rejected the file (server returned HTML, partial download, corrupt archive). |
+| `PackageFetchFailed` | Open-set catch-all (DNS, TCP, timeout, size limit, OOMKilled, future kubelet messages). The Message includes the exit code or verbatim kubelet text. |
+| Ready overlay `PackagesNotReady` | Set on the `Ready` condition (delegating to `PackagesReady` for the detail) so `kubectl get` shows the failure at a glance. |
+
+**Decision tree.** If `PackagesReady` does not give you enough detail,
+the next step depends on the init container's state:
+
+- **`Init:CreateContainerConfigError` or `Init:ImagePullBackOff`** —
+  kubelet failed before the container ran. The verbatim reason is on
+  the pod, not in logs (the container never produced output):
+  ```bash
+  kubectl describe pod <pod>
+  ```
+- **`Init:Error` or `Init:CrashLoopBackOff`** — the script ran and
+  exited non-zero. The cause is in the container's logs:
+  ```bash
+  kubectl logs <pod> -c package-fetch-<N>
+  ```
+
+**curl exit codes you might see in `PackageFetchFailed` messages.**
+The script uses `curl -fsSL --max-time 120 --max-filesize 268435456`,
+so the exit codes specifically reachable are:
+
+| Exit | Meaning |
+|---|---|
+| 6 | DNS — could not resolve host |
+| 7 | Connection refused / failed to connect |
+| 22 | HTTP 4xx/5xx (`PackageHTTPError`) |
+| 28 | Operation timed out (>120s) |
+| 51 | Peer cert verification failed (server-side; ambiguous between hostname mismatch and chain trust) |
+| 58 | Could not use client cert file (`PackageClientCertInvalid`) |
+| 60 | TLS verify failed against `--cacert` (`PackageTLSVerifyFailed`) |
+| 63 | --max-filesize (256 MiB) exceeded |
+| 77 | CA cert file could not be read |
+| 82 | Could not initialize SSL engine (`PackageClientCertInvalid`) |
+| 100 | Operator-emitted — `unzip` failed (`PackageInvalidArchive`); the artifact downloaded but is not a valid ZIP |
+| 137 | OOMKilled — increase the init container's memory request |
+
+**Steady-state behavior on Secret deletion.** If you delete a Secret
+that a package references while the pod is healthy and serving, the
+operator stays SILENT — pre-check does not re-run for unchanged spec.
+`PackagesReady` stays True. The existing pod is unaffected (it already
+fetched its packages at init time). The condition only flips to False
+when a NEW pod tries to start and kubelet fails to project the Secret —
+typically on a manual `kubectl delete pod`, node drain, OOM eviction,
+or any future rolling restart.
+
+**Secret data rotation.** Editing a Secret's data in place (same name,
+same key, new bytes — e.g., rotating a token) does NOT trigger a
+rolling restart. The packages hash covers Secret REFERENCES, not bytes.
+To force a fetch with new credentials, edit `spec.packages` (e.g., bump
+`mountPath`) or manually `kubectl delete pod`.
+
+**Other useful commands.**
+
 ```bash
 # Confirm the rolled-out hash on the Deployment
 kubectl get deployment <owned-name> \
   -o jsonpath='{.spec.template.metadata.annotations.curity\.io/packages-hash}'
 
-# View operator events
+# View operator events (PackagesConfigured / PackagesUpdated / PackagesRemoved
+# fire on spec transitions; warnings fire on PackagesReady=False transitions).
 kubectl describe isn <node-name>
-
-# Check init container exit state
-kubectl describe pod <pod-name>
-kubectl logs <pod-name> -c package-fetch-0
+kubectl get events --field-selector reason=PackageSecretMissing
 ```
 
 ## Running Tests

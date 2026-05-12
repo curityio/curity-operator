@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -199,4 +201,138 @@ func conditionsEqual(a, b []metav1.Condition) bool {
 		}
 	}
 	return true
+}
+
+// packageInitContainerStatusChangedPredicate filters Pod events down to those
+// that affect the PackagesReady condition on an IdentityServerNode. Goals:
+//   - Skip Create events. A freshly-created pod has no InitContainerStatuses
+//     entries yet, so there is nothing for the translator to act on. Kubelet
+//     will emit an Update once the kubelet has populated the status.
+//   - Skip pods not owned by this operator (no managed-by label). Other
+//     workloads in the same namespace must not fan out reconciles.
+//   - Skip Update events that do not affect the status of any
+//     `package-fetch-*` init container. Without this filter, every pod
+//     heartbeat update (resourceVersion bump, condition timestamp tick)
+//     would wake the reconciler.
+//
+// Pass through Delete events so that a pod going away is treated as a
+// recovery signal — the node reconciler recomputes from the surviving pods.
+type packageInitContainerStatusChangedPredicate struct {
+	predicate.Funcs
+}
+
+func (p packageInitContainerStatusChangedPredicate) Create(_ event.CreateEvent) bool {
+	return false
+}
+
+func (p packageInitContainerStatusChangedPredicate) Delete(_ event.DeleteEvent) bool {
+	return true
+}
+
+func (p packageInitContainerStatusChangedPredicate) Generic(_ event.GenericEvent) bool {
+	return false
+}
+
+func (p packageInitContainerStatusChangedPredicate) Update(e event.UpdateEvent) bool {
+	if e.ObjectOld == nil || e.ObjectNew == nil {
+		return false
+	}
+	newPod, ok := e.ObjectNew.(*corev1.Pod)
+	if !ok {
+		return false
+	}
+	if newPod.GetLabels()[labelManagedBy] != labelManagedByCurityOperator {
+		return false
+	}
+	oldPod, ok := e.ObjectOld.(*corev1.Pod)
+	if !ok {
+		return false
+	}
+	return packageInitContainerStatusDiffers(oldPod, newPod)
+}
+
+// labelManagedBy and labelManagedByCurityOperator name the standard label
+// pair stamped on every pod template by buildLabels (resources.go).
+const (
+	labelManagedBy               = "app.kubernetes.io/managed-by"
+	labelManagedByCurityOperator = "curity-operator"
+)
+
+// packageFetchContainerNamePrefix is the prefix used by buildPackageInitContainers
+// for every package-fetch init container — see packageInitContainerName.
+const packageFetchContainerNamePrefix = "package-fetch-"
+
+// packageInitContainerStatusDiffers reports whether any init container whose
+// name starts with packageFetchContainerNamePrefix has a different State or
+// LastState (or RestartCount) between the old and new pod. The comparison
+// is index-based on container Name so re-orderings inside the status slice
+// (which kubelet does not do today, but spec it out defensively) cannot mask
+// a real status change.
+func packageInitContainerStatusDiffers(oldPod, newPod *corev1.Pod) bool {
+	oldByName := indexInitStatusesByName(oldPod.Status.InitContainerStatuses)
+	for i := range newPod.Status.InitContainerStatuses {
+		newStat := &newPod.Status.InitContainerStatuses[i]
+		if !strings.HasPrefix(newStat.Name, packageFetchContainerNamePrefix) {
+			continue
+		}
+		oldStat, found := oldByName[newStat.Name]
+		if !found {
+			// Container appeared between events — definitely a status change.
+			return true
+		}
+		if !equalInitContainerStatus(oldStat, newStat) {
+			return true
+		}
+	}
+	return false
+}
+
+// indexInitStatusesByName returns a name-keyed view of an
+// InitContainerStatuses slice. Used to compare pre/post states without
+// assuming positional stability.
+func indexInitStatusesByName(statuses []corev1.ContainerStatus) map[string]*corev1.ContainerStatus {
+	out := make(map[string]*corev1.ContainerStatus, len(statuses))
+	for i := range statuses {
+		out[statuses[i].Name] = &statuses[i]
+	}
+	return out
+}
+
+// equalInitContainerStatus reports whether two ContainerStatus snapshots
+// agree on every field the translator cares about: current State,
+// LastState, and RestartCount. Other fields (Image, ContainerID, etc.)
+// are ignored to avoid spurious wakeups on cosmetic kubelet updates.
+func equalInitContainerStatus(a, b *corev1.ContainerStatus) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.RestartCount != b.RestartCount {
+		return false
+	}
+	if !equalContainerState(a.State, b.State) {
+		return false
+	}
+	return equalContainerState(a.LastTerminationState, b.LastTerminationState)
+}
+
+// equalContainerState compares two ContainerState values on the fields the
+// translator inspects: Waiting{Reason,Message}, Running.StartedAt presence,
+// Terminated{ExitCode,Reason,Message}.
+func equalContainerState(a, b corev1.ContainerState) bool {
+	switch {
+	case a.Waiting != nil && b.Waiting != nil:
+		return a.Waiting.Reason == b.Waiting.Reason && a.Waiting.Message == b.Waiting.Message
+	case a.Running != nil && b.Running != nil:
+		return true // running-vs-running counts as "same" — translator ignores running entries
+	case a.Terminated != nil && b.Terminated != nil:
+		return a.Terminated.ExitCode == b.Terminated.ExitCode &&
+			a.Terminated.Reason == b.Terminated.Reason &&
+			a.Terminated.Message == b.Terminated.Message
+	case a.Waiting == nil && a.Running == nil && a.Terminated == nil &&
+		b.Waiting == nil && b.Running == nil && b.Terminated == nil:
+		return true
+	default:
+		// State transitioned between Waiting/Running/Terminated.
+		return false
+	}
 }

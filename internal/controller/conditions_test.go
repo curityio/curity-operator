@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -198,6 +199,172 @@ func TestComputeClusterConditions_DegradedNode(t *testing.T) {
 	conditions := computeClusterConditions(nodes, 1)
 
 	assertCondition(t, conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue)
+}
+
+// =========================================================================
+// PackagesReady cluster aggregation tests
+// =========================================================================
+
+// packagesReadyTrue builds a node-status conditions slice containing a
+// PackagesReady=True condition (plus the standard Ready/Available stubs so
+// the rest of computeClusterConditions has values to roll up).
+func packagesReadyTrue() []metav1.Condition {
+	return append(readyConditions(),
+		metav1.Condition{
+			Type:   v1alpha1.ConditionPackagesReady,
+			Status: metav1.ConditionTrue,
+			Reason: v1alpha1.ReasonAllPackagesFetched,
+		},
+	)
+}
+
+// packagesReadyFalse builds a node-status conditions slice containing a
+// PackagesReady=False condition with the given reason and message.
+func packagesReadyFalse(reason, message string) []metav1.Condition {
+	return append(readyConditions(),
+		metav1.Condition{
+			Type:    v1alpha1.ConditionPackagesReady,
+			Status:  metav1.ConditionFalse,
+			Reason:  reason,
+			Message: message,
+		},
+	)
+}
+
+func nodeNamed(name string, conditions []metav1.Condition) v1alpha1.IdentityServerNode {
+	return v1alpha1.IdentityServerNode{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeRuntime},
+		Status:     v1alpha1.IdentityServerNodeStatus{Conditions: conditions},
+	}
+}
+
+// No child node carries PackagesReady → the cluster-level condition must be
+// absent entirely (plan F5).
+func TestComputeClusterConditions_PackagesReadyMirroring_AllNodesAbsent(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		nodeNamed("a", readyConditions()),
+		nodeNamed("b", readyConditions()),
+	}
+	conditions := computeClusterConditions(nodes, 1)
+	if apimeta.FindStatusCondition(conditions, v1alpha1.ConditionPackagesReady) != nil {
+		t.Error("PackagesReady must be omitted when no node has it set")
+	}
+}
+
+// Every node-with-condition is True → cluster is True with success count.
+func TestComputeClusterConditions_PackagesReadyMirroring_AllTrue(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		nodeNamed("a", packagesReadyTrue()),
+		nodeNamed("b", packagesReadyTrue()),
+	}
+	conditions := computeClusterConditions(nodes, 1)
+	got := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionPackagesReady)
+	if got == nil {
+		t.Fatal("PackagesReady must be set when all nodes have it True")
+	}
+	if got.Status != metav1.ConditionTrue || got.Reason != v1alpha1.ReasonAllPackagesFetched {
+		t.Errorf("got %+v, want True/AllPackagesFetched", got)
+	}
+	if !strings.Contains(got.Message, "2 node") {
+		t.Errorf("multi-node True message must include node count: %q", got.Message)
+	}
+}
+
+// Mixed: one node True, others absent → still True (count reflects nodes that
+// have the condition set).
+func TestComputeClusterConditions_PackagesReadyMirroring_TrueWithAbsentPeers(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		nodeNamed("a", readyConditions()),   // no PackagesReady
+		nodeNamed("b", packagesReadyTrue()), // True
+	}
+	conditions := computeClusterConditions(nodes, 1)
+	got := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionPackagesReady)
+	if got == nil || got.Status != metav1.ConditionTrue {
+		t.Errorf("expected True with one True/one absent; got %+v", got)
+	}
+	if !strings.Contains(got.Message, "1 node") {
+		t.Errorf("count must reflect nodes-with-condition, not nodes-total: %q", got.Message)
+	}
+}
+
+// Single-node cluster with one False → message is the node's verbatim
+// message, no "<node>:" prefix.
+func TestComputeClusterConditions_PackagesReadyMirroring_SingleNodeFalse(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		nodeNamed("rt", packagesReadyFalse(v1alpha1.ReasonPackageSecretMissing, `Secret "x" not found`)),
+	}
+	conditions := computeClusterConditions(nodes, 1)
+	got := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionPackagesReady)
+	if got == nil || got.Status != metav1.ConditionFalse {
+		t.Fatalf("expected False; got %+v", got)
+	}
+	if got.Reason != v1alpha1.ReasonPackageSecretMissing {
+		t.Errorf("reason = %q, want %q", got.Reason, v1alpha1.ReasonPackageSecretMissing)
+	}
+	if got.Message != `Secret "x" not found` {
+		t.Errorf("single-node message must be verbatim (no prefix): %q", got.Message)
+	}
+}
+
+// Multi-node cluster with exactly one False → message is prefixed by the
+// failing node's name.
+func TestComputeClusterConditions_PackagesReadyMirroring_MultiNodeOneFail(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		nodeNamed("rt-1", packagesReadyTrue()),
+		nodeNamed("rt-2", packagesReadyFalse(v1alpha1.ReasonPackageHTTPError, `exited 22 (HTTP 4xx/5xx)`)),
+	}
+	conditions := computeClusterConditions(nodes, 1)
+	got := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionPackagesReady)
+	if got == nil || got.Reason != v1alpha1.ReasonPackageHTTPError {
+		t.Fatalf("expected HTTPError; got %+v", got)
+	}
+	if !strings.HasPrefix(got.Message, "rt-2: ") {
+		t.Errorf("multi-node single-fail must prefix with node name: %q", got.Message)
+	}
+}
+
+// Multi-node, multiple failures → message reports F/N count plus the first
+// failing node (sorted by name).
+func TestComputeClusterConditions_PackagesReadyMirroring_MultiNodeMultiFail(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		nodeNamed("rt-z", packagesReadyFalse(v1alpha1.ReasonPackageHTTPError, "exit 22")),
+		nodeNamed("rt-a", packagesReadyFalse(v1alpha1.ReasonPackageSecretMissing, `Secret "x" not found`)),
+	}
+	conditions := computeClusterConditions(nodes, 1)
+	got := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionPackagesReady)
+	if got == nil {
+		t.Fatal("expected set")
+	}
+	// Deterministic: sorted by name → "rt-a" is first → SecretMissing wins.
+	if got.Reason != v1alpha1.ReasonPackageSecretMissing {
+		t.Errorf("first-by-name reason expected; got %q", got.Reason)
+	}
+	if !strings.Contains(got.Message, "2/2 nodes") {
+		t.Errorf("message must include failure count: %q", got.Message)
+	}
+	if !strings.Contains(got.Message, "first: rt-a:") {
+		t.Errorf("message must name the first failing node: %q", got.Message)
+	}
+}
+
+// Determinism: shuffling node order in the input must not change the chosen
+// "first failing" node — sorting by name happens inside aggregatePackagesReady.
+func TestComputeClusterConditions_PackagesReadyMirroring_FirstFailDeterministic(t *testing.T) {
+	a := nodeNamed("a", packagesReadyFalse(v1alpha1.ReasonPackageSecretMissing, `Secret "a" not found`))
+	z := nodeNamed("z", packagesReadyFalse(v1alpha1.ReasonPackageHTTPError, "exit 22"))
+
+	for _, order := range [][]v1alpha1.IdentityServerNode{{a, z}, {z, a}} {
+		conds := computeClusterConditions(order, 1)
+		got := apimeta.FindStatusCondition(conds, v1alpha1.ConditionPackagesReady)
+		if got == nil {
+			t.Fatal("expected set")
+		}
+		if got.Reason != v1alpha1.ReasonPackageSecretMissing {
+			t.Errorf("input order %v: expected SecretMissing (from node 'a'); got %q",
+				[]string{order[0].Name, order[1].Name}, got.Reason)
+		}
+	}
 }
 
 // --- helpers ---

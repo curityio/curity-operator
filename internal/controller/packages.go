@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,8 +11,10 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
@@ -38,6 +41,30 @@ const EnvPackageFetcherImage = "PACKAGE_FETCHER_IMAGE"
 // blast radius of a misbehaving URL (zip-bomb, runaway download) to
 // 256MiB of node ephemeral storage per package.
 var packageVolumeSizeLimit = resource.MustParse("256Mi")
+
+// packageInitContainerResources caps the CPU and memory available to
+// every package-fetch init container. Without this, a zip-bomb, runaway
+// `apk add`, or a malicious URL response could consume node-level
+// CPU/memory until eviction (the emptyDir size limit caps disk only).
+//
+// Sizing rationale:
+//   - CPU: requests=50m, limits=500m. The init is a one-shot curl +
+//     unzip; legitimate work is bursty for ~1-5s. 500m allows that burst
+//     without letting a CPU-spinning shell exploit starve the node.
+//   - Memory: requests=64Mi, limits=256Mi. apk index + curl runtime
+//     ~30-50Mi RSS; unzip streams (RSS stays small even for 256Mi ZIPs
+//     because emptyDir is disk-backed, not tmpfs). 256Mi limit matches
+//     the volume cap so the worst-case blast radius is symmetric.
+var packageInitContainerResources = corev1.ResourceRequirements{
+	Requests: corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("50m"),
+		corev1.ResourceMemory: resource.MustParse("64Mi"),
+	},
+	Limits: corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("500m"),
+		corev1.ResourceMemory: resource.MustParse("256Mi"),
+	},
+}
 
 // ResolvePackageFetcherImage reads $PACKAGE_FETCHER_IMAGE once at
 // controller construction (called from cmd/manager/main.go), returning
@@ -218,9 +245,40 @@ func buildPackageInitContainer(p v1alpha1.PackageSpec, idx int, image string) co
 		Args:            []string{buildPackageDownloadScript(p, idx)},
 		Env:             buildPackageInitEnv(p),
 		VolumeMounts:    buildPackageInitVolumeMounts(p, idx),
+		// Bound CPU/memory so a zip-bomb, runaway apk install, or
+		// malicious URL response cannot consume node resources until
+		// eviction. See packageInitContainerResources for sizing
+		// rationale. Disk is bounded separately by the emptyDir
+		// SizeLimit on the package volume (packageVolumeSizeLimit).
+		Resources: packageInitContainerResources,
+		// Defense-in-depth: even though the init runs as UID 0 (apk
+		// needs root to write /var/lib/apk), strip every Linux
+		// capability and deny setuid escalation. apk + curl + unzip
+		// require zero caps; none of them call setuid binaries. A
+		// compromised package URL that escapes the script still lands
+		// in a container that can't SYS_ADMIN, can't NET_RAW, and
+		// can't escalate.
+		//
+		// SeccompProfile is intentionally NOT set: OpenShift's anyuid
+		// SCC (which the operator requires for runAsUser=0) rejects
+		// pods that set seccompProfile, and no standard SCC allows
+		// both seccomp AND UID 0 simultaneously. On standard K8s with
+		// PodSecurityAdmission "restricted", the namespace policy
+		// injects seccompProfile=RuntimeDefault when the pod does not
+		// specify one — so we lose nothing on PSA clusters and
+		// preserve OpenShift compatibility. Users who want explicit
+		// operator-managed seccomp on non-PSA clusters can pursue an
+		// env-var opt-in as a follow-up.
+		//
+		// readOnlyRootFilesystem is also NOT set — apk writes to
+		// /var/lib/apk, /usr/bin, /etc/apk; enabling it would break
+		// the install step. A future image with curl + unzip baked in
+		// would allow readOnly + dropping the apk step entirely.
 		SecurityContext: &corev1.SecurityContext{
-			RunAsUser:  ptr.To(int64(0)),
-			RunAsGroup: ptr.To(int64(0)),
+			RunAsUser:                ptr.To(int64(0)),
+			RunAsGroup:               ptr.To(int64(0)),
+			AllowPrivilegeEscalation: ptr.To(false),
+			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		},
 	}
 	return c
@@ -404,7 +462,12 @@ func buildPackageDownloadScript(p v1alpha1.PackageSpec, idx int) string {
 		sb.WriteString(" \"$PKG_URL\"\n")
 	}
 
-	sb.WriteString("unzip -q /tmp/pkg.zip -d /pkg\n")
+	// Wrap unzip with "|| exit 100" so an archive failure is distinguishable
+	// from a curl failure: curl reserves exits 1-93, so the script's exit
+	// becomes 100 only when the downloaded artifact is not a valid ZIP
+	// (server returned HTML, partial download, corrupt archive). The
+	// PackagesReady translator maps exit 100 to ReasonPackageInvalidArchive.
+	sb.WriteString("unzip -q /tmp/pkg.zip -d /pkg || exit 100\n")
 	fmt.Fprintf(&sb, "echo \"package-fetch-%d: extracted to /pkg\"\n", idx)
 	return sb.String()
 }
@@ -432,4 +495,142 @@ func computePackagesHash(packages []v1alpha1.PackageSpec) string {
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+// packageURLMessageMaxLen caps URLs embedded in condition messages so the
+// total stays well under K8s's 32KiB condition-message limit even with
+// long URLs and many historical condition transitions.
+const packageURLMessageMaxLen = 200
+
+// truncatePackageURL trims a URL for embedding in a condition message,
+// appending "..." when the source exceeds packageURLMessageMaxLen.
+func truncatePackageURL(u string) string {
+	if len(u) <= packageURLMessageMaxLen {
+		return u
+	}
+	return u[:packageURLMessageMaxLen] + "..."
+}
+
+// formatPackageMessage produces the canonical message format shared by both
+// the pre-check leg and the pod-watch translator. Embedding the index, mount
+// path, and (truncated) URL lets a user reading `kubectl describe` map the
+// failure straight back to a `spec.packages[N]` entry.
+func formatPackageMessage(idx int, p v1alpha1.PackageSpec, detail string) string {
+	return fmt.Sprintf("package-fetch-%d (index=%d, mountPath=%s, url=%s): %s",
+		idx, idx, p.MountPath, truncatePackageURL(p.Source.URL), detail)
+}
+
+// secretRefCheckResult classifies one Secret reference's pre-check outcome.
+type secretRefCheckResult struct {
+	reason   string // "" on success or transient error
+	detail   string // populated only when reason != ""
+	retryErr error  // non-nil only on transient (non-IsNotFound) errors
+}
+
+// isFailure reports whether the result represents either a definitive
+// failure (reason set) or a transient error (retryErr set) that should
+// stop the iteration. Callers still need to inspect retryErr vs reason
+// to know how to propagate, but the predicate centralises the precedence
+// rule so call sites don't have to repeat it.
+func (r secretRefCheckResult) isFailure() bool {
+	return r.retryErr != nil || r.reason != ""
+}
+
+// checkSecretKeys looks up a Secret by name and verifies that every key in
+// requiredKeys is present in Secret.Data. Returns:
+//   - {reason: "", retryErr: nil} on success.
+//   - {reason: ReasonPackageSecretMissing} when the Secret is not found.
+//   - {reason: ReasonPackageSecretKeyMissing} when a required key is absent.
+//   - {retryErr: err} on any other API error — pre-check is inconclusive,
+//     caller should propagate the error so controller-runtime backs off
+//     instead of flipping the condition to False on a transient blip.
+func checkSecretKeys(ctx context.Context, r client.Reader, namespace, secretName string, requiredKeys []string) secretRefCheckResult {
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretName}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return secretRefCheckResult{
+				reason: v1alpha1.ReasonPackageSecretMissing,
+				detail: fmt.Sprintf("Secret %q not found", secretName),
+			}
+		}
+		return secretRefCheckResult{retryErr: fmt.Errorf("getting Secret %q: %w", secretName, err)}
+	}
+	for _, key := range requiredKeys {
+		if _, ok := secret.Data[key]; !ok {
+			return secretRefCheckResult{
+				reason: v1alpha1.ReasonPackageSecretKeyMissing,
+				detail: fmt.Sprintf("key %q not found in Secret %q", key, secretName),
+			}
+		}
+	}
+	return secretRefCheckResult{}
+}
+
+// checkPackageSecrets validates that every Secret reference in spec.packages
+// resolves to an existing Secret containing every named key. Called from the
+// node reconciler before stamping a Deployment that would otherwise fail at
+// pod-start time with an opaque kubelet error.
+//
+// Return values:
+//   - (reason="", message="", retryErr=nil): all refs resolve, pre-check passed.
+//   - (reason=Reason..., message="<formatted>", retryErr=nil): first definitive
+//     failure (Secret missing or required key missing). Iteration stops at the
+//     first failure — serial-fix UX, matching the pod-watch translator.
+//   - (reason="", message="", retryErr=err): a non-IsNotFound API error
+//     occurred. Caller MUST propagate err to controller-runtime (exponential
+//     backoff requeue) without changing the condition — pre-check is
+//     inconclusive, not failed (plan D13).
+func checkPackageSecrets(ctx context.Context, r client.Reader, packages []v1alpha1.PackageSpec, namespace string) (reason, message string, retryErr error) {
+	for i, p := range packages {
+		if res := checkPackageRefs(ctx, r, namespace, p); res.isFailure() {
+			if res.retryErr != nil {
+				return "", "", res.retryErr
+			}
+			return res.reason, formatPackageMessage(i, p, res.detail), nil
+		}
+	}
+	return "", "", nil
+}
+
+// checkPackageRefs walks all Secret references attached to one PackageSpec,
+// returning the first failure or an empty result on success. Split from
+// checkPackageSecrets so each ref-type's logic stays focused.
+//
+// TLS references are gated on packageEnabledTLS — when tls.enabled=false
+// (the default), the runtime ignores ca and clientCert refs (no projected
+// volume, no --cacert/--cert flags), so the pre-check must skip them too
+// or it produces false positives on stale refs that the user disabled.
+func checkPackageRefs(ctx context.Context, r client.Reader, namespace string, p v1alpha1.PackageSpec) secretRefCheckResult {
+	if packageEnabledTLS(p) {
+		if p.Source.TLS.CA != nil {
+			ref := p.Source.TLS.CA.SecretRef
+			if res := checkSecretKeys(ctx, r, namespace, ref.Name, []string{ref.Key}); res.isFailure() {
+				return res
+			}
+		}
+		if p.Source.TLS.ClientCert != nil {
+			ref := p.Source.TLS.ClientCert.SecretRef
+			// Pre-check requires both the cert key and the derived private
+			// key sibling — same convention as buildPackageTLSVolume.
+			keys := []string{ref.Key, derivePrivateKeyKey(ref.Key)}
+			if res := checkSecretKeys(ctx, r, namespace, ref.Name, keys); res.isFailure() {
+				return res
+			}
+		}
+	}
+	if p.Source.Auth != nil {
+		if p.Source.Auth.BearerToken != nil {
+			ref := p.Source.Auth.BearerToken.SecretRef
+			if res := checkSecretKeys(ctx, r, namespace, ref.Name, []string{ref.Key}); res.isFailure() {
+				return res
+			}
+		}
+		if p.Source.Auth.BasicAuth != nil {
+			ref := p.Source.Auth.BasicAuth.SecretRef
+			if res := checkSecretKeys(ctx, r, namespace, ref.Name, []string{ref.UsernameKey, ref.PasswordKey}); res.isFailure() {
+				return res
+			}
+		}
+	}
+	return secretRefCheckResult{}
 }

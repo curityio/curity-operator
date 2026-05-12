@@ -1723,7 +1723,8 @@ spec:
                             ca:
                               description: |-
                                 CA is a Secret holding a PEM bundle used as the trust root for
-                                this download. Ignored when SkipVerify is true.
+                                this download. Mutually exclusive with SkipVerify (enforced by
+                                CRD validation).
                               properties:
                                 secretRef:
                                   description: PackageSecretKeySelector identifies one
@@ -1744,7 +1745,8 @@ spec:
                             clientCert:
                               description: |-
                                 ClientCert is a Secret holding the cert (and matching private key)
-                                for mutual TLS.
+                                for mutual TLS. Mutually exclusive with SkipVerify (enforced by
+                                CRD validation).
                               properties:
                                 secretRef:
                                   description: |-
@@ -1776,9 +1778,15 @@ spec:
                               default: false
                               description: |-
                                 SkipVerify disables certificate verification. Use only in
-                                non-production environments. When true, CA is ignored.
+                                non-production environments. Mutually exclusive with CA and
+                                ClientCert (enforced by CRD validation).
                               type: boolean
                           type: object
+                          x-kubernetes-validations:
+                          - message: tls.skipVerify cannot be combined with tls.ca or
+                              tls.clientCert; skipVerify=true silently drops both, so
+                              the API rejects the combination
+                            rule: '!self.skipVerify || (!has(self.ca) && !has(self.clientCert))'
                         url:
                           description: |-
                             URL is the full URL of the ZIP archive to fetch. HTTPS is strongly

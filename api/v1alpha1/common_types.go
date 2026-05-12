@@ -28,6 +28,9 @@ const (
 	// referenced IdentityServerCluster exists and the node has been adopted
 	// via controller OwnerReferences.
 	ConditionClusterReady = "ClusterReady"
+	// ConditionPackagesReady reports whether the init-container package
+	// downloads succeeded (set only when spec.packages is non-empty).
+	ConditionPackagesReady = "PackagesReady"
 )
 
 // Reason values used across multiple condition types. Each constant names
@@ -39,6 +42,69 @@ const (
 	// and Ready while the orphan state persists.
 	ReasonClusterFound    = "ClusterFound"
 	ReasonClusterNotFound = "ClusterNotFound"
+
+	// ReasonPackagesNotReady is set on ConditionReady when ConditionPackagesReady
+	// is False — the package-fetch failure delegates to the PackagesReady
+	// condition for the detailed message.
+	ReasonPackagesNotReady = "PackagesNotReady"
+)
+
+// Reason values for ConditionPackagesReady (set by the pre-check leg or the
+// pod-watch translator on IdentityServerNode, mirrored to IdentityServerCluster).
+const (
+	// ReasonAllPackagesFetched is set on ConditionPackagesReady=True when every
+	// package-fetch init container across the current ReplicaSet's pods exited 0.
+	ReasonAllPackagesFetched = "AllPackagesFetched"
+
+	// ReasonPackagesPending means a new package set has been applied but the
+	// new ReplicaSet's pods have not yet reported init-container status.
+	// Set preemptively when the operator is about to stamp a Deployment
+	// with new package init containers, so the Ready overlay flips False
+	// immediately — closes the rolling-update Ready=True false-positive
+	// window that the prior PackagesReady=True (from the old, still-serving
+	// pod) would otherwise leak through.
+	ReasonPackagesPending = "PackagesPending"
+
+	// ReasonPackagePodCreationFailed means the Deployment's ReplicaSet
+	// controller cannot create pods for the package-bearing spec (SCC
+	// rejection, admission webhook denial, ResourceQuota exhausted,
+	// invalid pod spec). Without this, a packages rollout that blocks at
+	// pod-creation time produces no pod-watch events and PackagesReady
+	// stays PackagesPending indefinitely. The condition message carries
+	// the Deployment's verbatim ReplicaFailure text so users see the
+	// actual K8s diagnostic on `kubectl describe`.
+	ReasonPackagePodCreationFailed = "PackagePodCreationFailed"
+
+	// ReasonPackageSecretMissing means a referenced Secret does not exist.
+	ReasonPackageSecretMissing = "PackageSecretMissing"
+
+	// ReasonPackageSecretKeyMissing means the referenced Secret exists but
+	// the named key is absent.
+	ReasonPackageSecretKeyMissing = "PackageSecretKeyMissing"
+
+	// ReasonPackageImagePullFailed means the fetcher init-container image
+	// could not be pulled.
+	ReasonPackageImagePullFailed = "PackageImagePullFailed"
+
+	// ReasonPackageTLSVerifyFailed means the package download failed TLS
+	// certificate verification against the configured CA bundle.
+	ReasonPackageTLSVerifyFailed = "PackageTLSVerifyFailed"
+
+	// ReasonPackageClientCertInvalid means the configured mTLS client cert
+	// or private key could not be used for the package download.
+	ReasonPackageClientCertInvalid = "PackageClientCertInvalid"
+
+	// ReasonPackageHTTPError means the package URL returned an HTTP 4xx/5xx.
+	ReasonPackageHTTPError = "PackageHTTPError"
+
+	// ReasonPackageInvalidArchive means the downloaded artifact could not
+	// be unpacked as a ZIP archive.
+	ReasonPackageInvalidArchive = "PackageInvalidArchive"
+
+	// ReasonPackageFetchFailed is the open-set catch-all for any definitive
+	// package-fetch failure that does not match a more specific reason.
+	// The condition message carries the verbatim diagnostic signal.
+	ReasonPackageFetchFailed = "PackageFetchFailed"
 )
 
 // Finalizer names.

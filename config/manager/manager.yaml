@@ -28,6 +28,15 @@ spec:
         - --health-addr=:8081
         image: controller:latest
         name: manager
+        env:
+        # PACKAGE_FETCHER_IMAGE overrides the default `alpine:3.19` image
+        # used by per-package init containers (see internal/controller/
+        # packages.go:ResolvePackageFetcherImage). Set to a private-mirror
+        # tag for air-gap clusters where docker.io/alpine:3.19 is not
+        # reachable. Helmify templatizes this value so the Helm chart
+        # exposes it as .Values.controllerManager.manager.env.packageFetcherImage.
+        - name: PACKAGE_FETCHER_IMAGE
+          value: "alpine:3.19"
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

@@ -43,10 +43,21 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "set -e\napk add --no-cache curl unzip ca-certificates >/dev/null\nmkdir -p /pkg\ncurl -fsSL --max-time 120 --max-filesize 268435456 -o /tmp/pkg.zip \"$PKG_URL\"\nunzip -q /tmp/pkg.zip -d /pkg\necho \"package-fetch-0: extracted to /pkg\"\n"
+            - "set -e\napk add --no-cache curl unzip ca-certificates >/dev/null\nmkdir -p /pkg\ncurl -fsSL --max-time 120 --max-filesize 268435456 -o /tmp/pkg.zip \"$PKG_URL\"\nunzip -q /tmp/pkg.zip -d /pkg || exit 100\necho \"package-fetch-0: extracted to /pkg\"\n"
           env:
             - name: PKG_URL
               value: https://example.com/snap.zip
+          resources:
+            limits:
+              cpu:
+                format: DecimalSI
+              memory:
+                format: BinarySI
+            requests:
+              cpu:
+                format: DecimalSI
+              memory:
+                format: BinarySI
           volumeMounts:
             - name: pkg-0
               mountPath: /pkg
@@ -54,8 +65,12 @@ spec:
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
           securityContext:
+            capabilities:
+              drop:
+                - ALL
             runAsUser: 0
             runAsGroup: 0
+            allowPrivilegeEscalation: false
       containers:
         - name: curity
           image: curity.azurecr.io/curity/idsvr:11.0

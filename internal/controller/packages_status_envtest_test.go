@@ -1,6 +1,8 @@
 package controller_test
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -428,6 +430,27 @@ var _ = Describe("PackagesReady condition (envtest)", func() {
 				deploy)).To(Succeed())
 			stampedHash = deploy.Spec.Template.Annotations["curity.io/packages-hash"]
 			g.Expect(stampedHash).NotTo(BeEmpty(), "Deployment must have curity.io/packages-hash stamped")
+		}, timeout, interval).Should(Succeed())
+
+		// Pre-stamp LastObservedPackageSecretsHash on the ISN so the
+		// Secret-watch recovery hook sees "no Secret change since last
+		// recovery" and skips pod deletion. Without this, the recovery
+		// hook would delete the synthetic failing pod we create below
+		// before the translator can stably surface the condition,
+		// because the translator's first read sees PackageTLSVerifyFailed
+		// (recoverable failure) and the recovery gate then fires.
+		Eventually(func(g Gomega) {
+			node := &v1alpha1.IdentityServerNode{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName, Namespace: ns}, node)).To(Succeed())
+			secret := &corev1.Secret{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: ns}, secret)).To(Succeed())
+			hash := sha256.New()
+			hash.Write([]byte(secretName))
+			hash.Write([]byte{0})
+			hash.Write([]byte(secret.ResourceVersion))
+			hash.Write([]byte{0})
+			node.Status.LastObservedPackageSecretsHash = fmt.Sprintf("%x", hash.Sum(nil))
+			g.Expect(k8sClient.Status().Update(ctx, node)).To(Succeed())
 		}, timeout, interval).Should(Succeed())
 
 		// Craft a Pod owned by a synthetic ReplicaSet with a failing

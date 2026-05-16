@@ -1399,3 +1399,126 @@ func TestBuildPackageInitContainers_NoExtraImagePullSecrets(t *testing.T) {
 		}
 	}
 }
+
+// --- packageSecretNames / packageReferencesSecret ---
+
+func TestPackageSecretNames_Empty(t *testing.T) {
+	if got := packageSecretNames(nil); got != nil {
+		t.Errorf("nil input: want nil, got %v", got)
+	}
+	if got := packageSecretNames([]v1alpha1.PackageSpec{}); got != nil {
+		t.Errorf("empty slice: want nil, got %v", got)
+	}
+}
+
+func TestPackageSecretNames_URLOnly(t *testing.T) {
+	pkgs := []v1alpha1.PackageSpec{{Source: v1alpha1.PackageSource{URL: "https://x"}}}
+	if got := packageSecretNames(pkgs); got != nil {
+		t.Errorf("URL-only package: want nil, got %v", got)
+	}
+}
+
+func TestPackageSecretNames_BasicAuth(t *testing.T) {
+	pkgs := []v1alpha1.PackageSpec{{
+		Source: v1alpha1.PackageSource{
+			Auth: &v1alpha1.PackageAuthSpec{
+				BasicAuth: &v1alpha1.PackageBasicAuthRef{
+					SecretRef: v1alpha1.PackageBasicAuthSelector{
+						Name: "creds", UsernameKey: "u", PasswordKey: "p",
+					},
+				},
+			},
+		},
+	}}
+	got := packageSecretNames(pkgs)
+	if len(got) != 1 || got[0] != "creds" {
+		t.Errorf("want [creds], got %v", got)
+	}
+}
+
+func TestPackageSecretNames_BearerToken(t *testing.T) {
+	pkgs := []v1alpha1.PackageSpec{{
+		Source: v1alpha1.PackageSource{
+			Auth: &v1alpha1.PackageAuthSpec{
+				BearerToken: &v1alpha1.PackageSecretKeyRef{
+					SecretRef: v1alpha1.PackageSecretKeySelector{Name: "tok", Key: "t"},
+				},
+			},
+		},
+	}}
+	got := packageSecretNames(pkgs)
+	if len(got) != 1 || got[0] != "tok" {
+		t.Errorf("want [tok], got %v", got)
+	}
+}
+
+func TestPackageSecretNames_TLSDisabledIgnoresRefs(t *testing.T) {
+	pkgs := []v1alpha1.PackageSpec{{
+		Source: v1alpha1.PackageSource{
+			TLS: &v1alpha1.PackageTLSSpec{
+				Enabled: false,
+				CA: &v1alpha1.PackageSecretKeyRef{
+					SecretRef: v1alpha1.PackageSecretKeySelector{Name: "ca", Key: "ca.crt"},
+				},
+			},
+		},
+	}}
+	if got := packageSecretNames(pkgs); got != nil {
+		t.Errorf("TLS disabled but CA referenced: want nil, got %v", got)
+	}
+}
+
+func TestPackageSecretNames_TLSEnabledIncludesRefs(t *testing.T) {
+	pkgs := []v1alpha1.PackageSpec{{
+		Source: v1alpha1.PackageSource{
+			TLS: &v1alpha1.PackageTLSSpec{
+				Enabled: true,
+				CA: &v1alpha1.PackageSecretKeyRef{
+					SecretRef: v1alpha1.PackageSecretKeySelector{Name: "ca", Key: "ca.crt"},
+				},
+				ClientCert: &v1alpha1.PackageClientCertRef{
+					SecretRef: v1alpha1.PackageClientCertSelector{Name: "client", Key: "tls.crt"},
+				},
+			},
+		},
+	}}
+	got := packageSecretNames(pkgs)
+	if len(got) != 2 || got[0] != "ca" || got[1] != "client" {
+		t.Errorf("want [ca client], got %v", got)
+	}
+}
+
+func TestPackageSecretNames_Dedup(t *testing.T) {
+	bearer := &v1alpha1.PackageSecretKeyRef{
+		SecretRef: v1alpha1.PackageSecretKeySelector{Name: "shared", Key: "t"},
+	}
+	pkgs := []v1alpha1.PackageSpec{
+		{Source: v1alpha1.PackageSource{Auth: &v1alpha1.PackageAuthSpec{BearerToken: bearer}}},
+		{Source: v1alpha1.PackageSource{Auth: &v1alpha1.PackageAuthSpec{BearerToken: bearer}}},
+	}
+	got := packageSecretNames(pkgs)
+	if len(got) != 1 || got[0] != "shared" {
+		t.Errorf("want [shared], got %v", got)
+	}
+}
+
+func TestPackageReferencesSecret(t *testing.T) {
+	pkgs := []v1alpha1.PackageSpec{{
+		Source: v1alpha1.PackageSource{
+			Auth: &v1alpha1.PackageAuthSpec{
+				BearerToken: &v1alpha1.PackageSecretKeyRef{
+					SecretRef: v1alpha1.PackageSecretKeySelector{Name: "tok", Key: "t"},
+				},
+			},
+		},
+	}}
+	if !packageReferencesSecret(pkgs, "tok") {
+		t.Error("want true for matching name")
+	}
+	if packageReferencesSecret(pkgs, "other") {
+		t.Error("want false for non-matching name")
+	}
+	if packageReferencesSecret(nil, "tok") {
+		t.Error("want false for nil packages")
+	}
+}

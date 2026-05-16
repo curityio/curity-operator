@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -257,6 +258,85 @@ const (
 	labelManagedBy               = "app.kubernetes.io/managed-by"
 	labelManagedByCurityOperator = "curity-operator"
 )
+
+// packageSecretCandidatePredicate filters Secret events down to ones that
+// could plausibly affect a package fetch. It does NOT verify the Secret is
+// actually referenced — that resolution lives in the mapFunc which has the
+// client. The predicate's job is the cheap pre-filter:
+//
+//   - Type filter: only Opaque / TLS / basic-auth Secrets are valid package
+//     refs. SA tokens, dockercfg, bootstrap-token are dropped to avoid
+//     waking the reconciler on unrelated churn (cert-manager TLS rotation
+//     is the heaviest source).
+//   - Update content filter: drop events where neither .Data nor .Type
+//     changed. Cosmetic label/annotation churn from sync controllers
+//     (external-secrets, sealed-secrets) does not warrant a reconcile.
+//   - Generic events: dropped (no information).
+//
+// Create and Delete events for acceptable Secret types pass unconditionally
+// — the mapFunc decides relevance.
+type packageSecretCandidatePredicate struct {
+	predicate.Funcs
+}
+
+func (p packageSecretCandidatePredicate) Create(e event.CreateEvent) bool {
+	return isAcceptablePackageSecretType(e.Object)
+}
+
+func (p packageSecretCandidatePredicate) Delete(e event.DeleteEvent) bool {
+	return isAcceptablePackageSecretType(e.Object)
+}
+
+func (p packageSecretCandidatePredicate) Generic(_ event.GenericEvent) bool {
+	return false
+}
+
+func (p packageSecretCandidatePredicate) Update(e event.UpdateEvent) bool {
+	oldSecret, oldOK := e.ObjectOld.(*corev1.Secret)
+	newSecret, newOK := e.ObjectNew.(*corev1.Secret)
+	if !oldOK || !newOK || oldSecret == nil || newSecret == nil {
+		return false
+	}
+	if !isAcceptablePackageSecretType(newSecret) {
+		return false
+	}
+	if oldSecret.Type != newSecret.Type {
+		return true
+	}
+	return !secretDataEqual(oldSecret.Data, newSecret.Data)
+}
+
+// isAcceptablePackageSecretType returns true for Secret types that are
+// valid carriers of a package-fetch credential or TLS material. Empty type
+// is treated as Opaque per the API server's defaulting.
+func isAcceptablePackageSecretType(obj client.Object) bool {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok || secret == nil {
+		return false
+	}
+	switch secret.Type {
+	case "", corev1.SecretTypeOpaque, corev1.SecretTypeTLS, corev1.SecretTypeBasicAuth:
+		return true
+	}
+	return false
+}
+
+// secretDataEqual compares two Secret .Data maps for byte-level equality.
+// Using equality.Semantic.DeepEqual would also work but pulls in apimachinery's
+// reflection-based path; the maps are small enough that an explicit walk is
+// both faster and easier to reason about.
+func secretDataEqual(a, b map[string][]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok || !bytes.Equal(va, vb) {
+			return false
+		}
+	}
+	return true
+}
 
 // packageFetchContainerNamePrefix is the prefix used by buildPackageInitContainers
 // for every package-fetch init container — see packageInitContainerName.

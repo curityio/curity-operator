@@ -753,3 +753,130 @@ func TestPackageInitPredicate_UpdateStateTransitionPasses(t *testing.T) {
 		t.Error("Waiting → Terminated transition must pass")
 	}
 }
+
+// --- packageSecretCandidatePredicate ---
+
+func secretOpaque(data map[string][]byte) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "ns"},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       data,
+	}
+}
+
+func TestPackageSecretCandidatePredicate_Update_NoChange(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	a := secretOpaque(map[string][]byte{"k": []byte("v")})
+	b := secretOpaque(map[string][]byte{"k": []byte("v")})
+	if p.Update(event.UpdateEvent{ObjectOld: a, ObjectNew: b}) {
+		t.Error("identical .Data: want false")
+	}
+}
+
+func TestPackageSecretCandidatePredicate_Update_LabelOnly(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	a := secretOpaque(map[string][]byte{"k": []byte("v")})
+	b := secretOpaque(map[string][]byte{"k": []byte("v")})
+	b.Labels = map[string]string{"new": "label"}
+	if p.Update(event.UpdateEvent{ObjectOld: a, ObjectNew: b}) {
+		t.Error("label-only change: want false")
+	}
+}
+
+func TestPackageSecretCandidatePredicate_Update_DataValueChanged(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	a := secretOpaque(map[string][]byte{"k": []byte("v1")})
+	b := secretOpaque(map[string][]byte{"k": []byte("v2")})
+	if !p.Update(event.UpdateEvent{ObjectOld: a, ObjectNew: b}) {
+		t.Error(".Data value change: want true")
+	}
+}
+
+func TestPackageSecretCandidatePredicate_Update_DataKeyAdded(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	a := secretOpaque(map[string][]byte{"k": []byte("v")})
+	b := secretOpaque(map[string][]byte{"k": []byte("v"), "k2": []byte("v2")})
+	if !p.Update(event.UpdateEvent{ObjectOld: a, ObjectNew: b}) {
+		t.Error(".Data key add: want true")
+	}
+}
+
+func TestPackageSecretCandidatePredicate_Update_DataKeyRemoved(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	a := secretOpaque(map[string][]byte{"k": []byte("v"), "k2": []byte("v2")})
+	b := secretOpaque(map[string][]byte{"k": []byte("v")})
+	if !p.Update(event.UpdateEvent{ObjectOld: a, ObjectNew: b}) {
+		t.Error(".Data key remove: want true")
+	}
+}
+
+func TestPackageSecretCandidatePredicate_Update_TypeChanged(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	a := secretOpaque(map[string][]byte{"k": []byte("v")})
+	b := secretOpaque(map[string][]byte{"k": []byte("v")})
+	b.Type = corev1.SecretTypeTLS
+	if !p.Update(event.UpdateEvent{ObjectOld: a, ObjectNew: b}) {
+		t.Error("type change to acceptable: want true")
+	}
+}
+
+func TestPackageSecretCandidatePredicate_Update_TypeChangedToUnsupported(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	a := secretOpaque(map[string][]byte{"k": []byte("v")})
+	b := secretOpaque(map[string][]byte{"k": []byte("v")})
+	b.Type = corev1.SecretTypeServiceAccountToken
+	if p.Update(event.UpdateEvent{ObjectOld: a, ObjectNew: b}) {
+		t.Error("type change to SA token: want false (new type rejected)")
+	}
+}
+
+func TestPackageSecretCandidatePredicate_Update_NilOldOrNew(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	if p.Update(event.UpdateEvent{ObjectOld: nil, ObjectNew: secretOpaque(nil)}) {
+		t.Error("nil old: want false")
+	}
+	if p.Update(event.UpdateEvent{ObjectOld: secretOpaque(nil), ObjectNew: nil}) {
+		t.Error("nil new: want false")
+	}
+}
+
+func TestPackageSecretCandidatePredicate_Update_NonSecretType(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm"}}
+	if p.Update(event.UpdateEvent{ObjectOld: cm, ObjectNew: cm}) {
+		t.Error("non-Secret object: want false (defensive)")
+	}
+}
+
+func TestPackageSecretCandidatePredicate_CreateAndDelete_TypeFilter(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	cases := []struct {
+		name string
+		typ  corev1.SecretType
+		want bool
+	}{
+		{"empty (defaults to Opaque)", "", true},
+		{"opaque", corev1.SecretTypeOpaque, true},
+		{"tls", corev1.SecretTypeTLS, true},
+		{"basic-auth", corev1.SecretTypeBasicAuth, true},
+		{"service-account-token", corev1.SecretTypeServiceAccountToken, false},
+		{"dockercfg", corev1.SecretTypeDockercfg, false},
+		{"bootstrap-token", corev1.SecretTypeBootstrapToken, false},
+	}
+	for _, tc := range cases {
+		s := &corev1.Secret{Type: tc.typ}
+		if got := p.Create(event.CreateEvent{Object: s}); got != tc.want {
+			t.Errorf("Create %s: want %v, got %v", tc.name, tc.want, got)
+		}
+		if got := p.Delete(event.DeleteEvent{Object: s}); got != tc.want {
+			t.Errorf("Delete %s: want %v, got %v", tc.name, tc.want, got)
+		}
+	}
+}
+
+func TestPackageSecretCandidatePredicate_Generic(t *testing.T) {
+	p := packageSecretCandidatePredicate{}
+	if p.Generic(event.GenericEvent{Object: secretOpaque(nil)}) {
+		t.Error("generic event: want false")
+	}
+}

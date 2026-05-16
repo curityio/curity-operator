@@ -485,4 +485,190 @@ var _ = Describe("PackagesReady condition (envtest)", func() {
 		// Cleanup the pod so the AfterEach can drop the namespace cleanly.
 		_ = k8sClient.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(0))})
 	})
+
+	// Secret-watch fast recovery (PLAN-secret-watch-on-init-error).
+	// Creating the missing Secret must wake the reconciler in seconds,
+	// not minutes. The old 30 s requeue path is still in place as a
+	// fallback, but this test enforces the watch-driven path: assertion
+	// timeout is 10 s, well under the requeue interval.
+	It("Secret watch flips PackagesReady=False -> True within 10s of Secret create", func() {
+		clusterName := "pkg-watch-fast"
+		nodeName := "rt"
+		secretName := "fast-secret"
+
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version: "11.0",
+				Packages: []v1alpha1.PackageSpec{{
+					MountPath: "/etc/plugins/p",
+					Source: v1alpha1.PackageSource{
+						URL: "https://repo.example.com/p.zip",
+						Auth: &v1alpha1.PackageAuthSpec{
+							BearerToken: &v1alpha1.PackageSecretKeyRef{
+								SecretRef: v1alpha1.PackageSecretKeySelector{Name: secretName, Key: "token"},
+							},
+						},
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		testCreateNode(ns, nodeName, v1alpha1.NodeTypeRuntime, clusterName)
+
+		// Wait for the pre-check fail state (the baseline).
+		Eventually(func(g Gomega) {
+			node := &v1alpha1.IdentityServerNode{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName, Namespace: ns}, node)).To(Succeed())
+			cond := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionPackagesReady)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Reason).To(Equal(v1alpha1.ReasonPackageSecretMissing))
+		}, timeout, interval).Should(Succeed())
+
+		// Apply the Secret; the watch must fire within seconds.
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns},
+			Data:       map[string][]byte{"token": []byte("opaque")},
+		})).To(Succeed())
+
+		// Tight 10s budget — much less than the 30 s requeue. If this
+		// fails, the watch wiring is broken.
+		Eventually(func(g Gomega) {
+			deploy := &appsv1.Deployment{}
+			g.Expect(k8sClient.Get(ctx,
+				types.NamespacedName{Name: ownedName(clusterName, nodeName), Namespace: ns},
+				deploy)).To(Succeed())
+			node := &v1alpha1.IdentityServerNode{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName, Namespace: ns}, node)).To(Succeed())
+			cond := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionPackagesReady)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Reason).NotTo(Equal(v1alpha1.ReasonPackageSecretMissing),
+				"reason should have advanced past SecretMissing after the Secret create event")
+		}, 10*time.Second, interval).Should(Succeed())
+	})
+
+	// Steady-state silence (PLAN-secret-watch-on-init-error, L3/L11).
+	// While PackagesReady=True (a healthy package), updating a referenced
+	// Secret must NOT cause the operator to push a new Deployment or
+	// flip the condition. The relaxed pre-check gate is the safeguard.
+	It("Secret update while PackagesReady=True does not bump Deployment generation", func() {
+		clusterName := "pkg-watch-steady"
+		nodeName := "rt"
+		secretName := "steady-secret"
+
+		// Apply Secret first so pre-check passes immediately.
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: ns},
+			Data:       map[string][]byte{"token": []byte("v1")},
+		})).To(Succeed())
+
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version: "11.0",
+				Packages: []v1alpha1.PackageSpec{{
+					MountPath: "/etc/plugins/p",
+					Source: v1alpha1.PackageSource{
+						URL: "https://repo.example.com/p.zip",
+						Auth: &v1alpha1.PackageAuthSpec{
+							BearerToken: &v1alpha1.PackageSecretKeyRef{
+								SecretRef: v1alpha1.PackageSecretKeySelector{Name: secretName, Key: "token"},
+							},
+						},
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		testCreateNode(ns, nodeName, v1alpha1.NodeTypeRuntime, clusterName)
+
+		// Wait for the Deployment to be created and capture its generation.
+		// In envtest the pod-watch translator will set
+		// PackagesReady=PackagesPending (no real pods exist), which is
+		// NOT a recoverable-failure reason — so the relaxed gate stays
+		// silent. That is the exact behavior we want to lock down.
+		deployKey := types.NamespacedName{Name: ownedName(clusterName, nodeName), Namespace: ns}
+		var initialGeneration int64
+		Eventually(func(g Gomega) {
+			deploy := &appsv1.Deployment{}
+			g.Expect(k8sClient.Get(ctx, deployKey, deploy)).To(Succeed())
+			initialGeneration = deploy.Generation
+			g.Expect(initialGeneration).NotTo(BeZero())
+		}, timeout, interval).Should(Succeed())
+
+		// Rotate the Secret value. The watch will fire; the gate must
+		// keep pre-check from running and the recovery hook from
+		// doing anything.
+		secret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: secretName, Namespace: ns}, secret)).To(Succeed())
+		secret.Data["token"] = []byte("v2-rotated")
+		Expect(k8sClient.Update(ctx, secret)).To(Succeed())
+
+		// Give the reconciler a window to (mis)behave. The Deployment
+		// generation must not have changed; if the gate is too loose,
+		// CreateOrUpdate would bump it.
+		Consistently(func(g Gomega) {
+			deploy := &appsv1.Deployment{}
+			g.Expect(k8sClient.Get(ctx, deployKey, deploy)).To(Succeed())
+			g.Expect(deploy.Generation).To(Equal(initialGeneration),
+				"Deployment generation must not change on steady-state Secret rotation")
+		}, 5*time.Second, interval).Should(Succeed())
+	})
+
+	// Unrelated Secret in the same namespace must NOT enqueue the ISN.
+	// The mapFunc only enqueues nodes whose parent ISC references the
+	// Secret name; an unrelated Secret returns an empty list.
+	It("Secret unrelated to any package does not affect the node", func() {
+		clusterName := "pkg-watch-unrelated"
+		nodeName := "rt"
+		pkgSecret := "real-pkg-secret"
+
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: pkgSecret, Namespace: ns},
+			Data:       map[string][]byte{"token": []byte("v1")},
+		})).To(Succeed())
+
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version: "11.0",
+				Packages: []v1alpha1.PackageSpec{{
+					MountPath: "/etc/plugins/p",
+					Source: v1alpha1.PackageSource{
+						URL: "https://repo.example.com/p.zip",
+						Auth: &v1alpha1.PackageAuthSpec{
+							BearerToken: &v1alpha1.PackageSecretKeyRef{
+								SecretRef: v1alpha1.PackageSecretKeySelector{Name: pkgSecret, Key: "token"},
+							},
+						},
+					},
+				}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		testCreateNode(ns, nodeName, v1alpha1.NodeTypeRuntime, clusterName)
+
+		deployKey := types.NamespacedName{Name: ownedName(clusterName, nodeName), Namespace: ns}
+		var initialGeneration int64
+		Eventually(func(g Gomega) {
+			deploy := &appsv1.Deployment{}
+			g.Expect(k8sClient.Get(ctx, deployKey, deploy)).To(Succeed())
+			initialGeneration = deploy.Generation
+			g.Expect(initialGeneration).NotTo(BeZero())
+		}, timeout, interval).Should(Succeed())
+
+		// Create an Opaque Secret with a name that no package references.
+		Expect(k8sClient.Create(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "totally-unrelated", Namespace: ns},
+			Data:       map[string][]byte{"random": []byte("noise")},
+		})).To(Succeed())
+
+		// Deployment generation must not change. Use Consistently to
+		// give the reconciler time to misbehave if it would.
+		Consistently(func(g Gomega) {
+			deploy := &appsv1.Deployment{}
+			g.Expect(k8sClient.Get(ctx, deployKey, deploy)).To(Succeed())
+			g.Expect(deploy.Generation).To(Equal(initialGeneration))
+		}, 5*time.Second, interval).Should(Succeed())
+	})
 })

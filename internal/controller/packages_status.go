@@ -322,6 +322,59 @@ func classifyTerminatedState(t *corev1.ContainerStateTerminated) (reason, detail
 	}
 }
 
+// isRecoverableSecretFailure reports whether a prior PackagesReady condition
+// represents a failure that can plausibly be fixed by a Secret edit. Used to
+// gate two things: (1) whether the pre-check should re-run on a Secret event,
+// and (2) whether the recovery action (failing-pod deletion) should fire.
+//
+// Image-pull and pod-creation failures are intentionally excluded — they are
+// not Secret-related, and triggering pod deletion on those would be wasted
+// churn. PackagesPending and the True-status reasons exclude themselves
+// since recovery only makes sense when the condition is currently False.
+func isRecoverableSecretFailure(c *metav1.Condition) bool {
+	if c == nil || c.Status != metav1.ConditionFalse {
+		return false
+	}
+	switch c.Reason {
+	case v1alpha1.ReasonPackageSecretMissing,
+		v1alpha1.ReasonPackageSecretKeyMissing,
+		v1alpha1.ReasonPackageHTTPError,
+		v1alpha1.ReasonPackageTLSVerifyFailed,
+		v1alpha1.ReasonPackageClientCertInvalid,
+		v1alpha1.ReasonPackageFetchFailed,
+		v1alpha1.ReasonPackageInvalidArchive:
+		return true
+	}
+	return false
+}
+
+// failingPackagePodFilter reports whether a pod is a candidate for recovery
+// deletion: it must carry the current packages-hash (so old-rollout pods are
+// not killed), must be operator-managed, must not already be terminating,
+// and must have at least one package-fetch init container in a definitive
+// failure state.
+func failingPackagePodFilter(pod *corev1.Pod, expectedHash string) bool {
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return false
+	}
+	if pod.Labels[labelManagedBy] != labelManagedByCurityOperator {
+		return false
+	}
+	if pod.Annotations[annotationPackagesHash] != expectedHash {
+		return false
+	}
+	for i := range pod.Status.InitContainerStatuses {
+		ics := &pod.Status.InitContainerStatuses[i]
+		if !strings.HasPrefix(ics.Name, packageFetchContainerNamePrefix) {
+			continue
+		}
+		if _, _, isFailure := classifyInitContainer(ics); isFailure {
+			return true
+		}
+	}
+	return false
+}
+
 // parsePackageFetchIndex extracts N from "package-fetch-N". The predicate
 // only delivers names with this prefix; defensive parse so a malformed
 // suffix degrades gracefully rather than panicking.

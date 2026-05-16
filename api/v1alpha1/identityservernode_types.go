@@ -121,6 +121,15 @@ type IdentityServerNodeStatus struct {
 	// AppliedManagedResources lists the managed ConfigMaps and Secrets
 	// (curity.io/managed=true) mounted on this node.
 	AppliedManagedResources []AppliedManagedResource `json:"appliedManagedResources,omitempty"`
+
+	// LastObservedPackageSecretsHash is a hash of the resourceVersions of
+	// every Secret referenced by spec.packages. Used by the Secret-watch
+	// recovery action to fire pod-deletion only once per Secret change
+	// (instead of on every reconcile while the condition is in a
+	// recoverable failure state — that would create an infinite
+	// delete/recreate loop when the user's Secret value is still wrong).
+	// Internal bookkeeping; not part of the user-facing API.
+	LastObservedPackageSecretsHash string `json:"lastObservedPackageSecretsHash,omitempty"`
 }
 
 // +kubebuilder:object:root=true

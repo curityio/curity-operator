@@ -601,36 +601,126 @@ func checkPackageSecrets(ctx context.Context, r client.Reader, packages []v1alph
 // volume, no --cacert/--cert flags), so the pre-check must skip them too
 // or it produces false positives on stale refs that the user disabled.
 func checkPackageRefs(ctx context.Context, r client.Reader, namespace string, p v1alpha1.PackageSpec) secretRefCheckResult {
+	for _, ref := range packageSecretKeyRefs(p) {
+		if res := checkSecretKeys(ctx, r, namespace, ref.name, ref.keys); res.isFailure() {
+			return res
+		}
+	}
+	return secretRefCheckResult{}
+}
+
+// packageSecretKeyRef bundles a Secret name with the keys the package
+// requires inside it. Order is significant — the slice returned by
+// packageSecretKeyRefs preserves the historical pre-check order
+// (TLS-CA, TLS-clientCert, bearerToken, basicAuth) so the first-failure
+// message stays stable across the refactor.
+type packageSecretKeyRef struct {
+	name string
+	keys []string
+}
+
+// packageSecretKeyRefs enumerates every Secret reference on a single
+// PackageSpec along with the keys required from each Secret. TLS refs are
+// gated by packageEnabledTLS to match checkPackageRefs' historical behavior.
+// Single source of truth used by both checkPackageRefs (pre-check) and
+// packageSecretNames (Secret-watch mapFunc).
+func packageSecretKeyRefs(p v1alpha1.PackageSpec) []packageSecretKeyRef {
+	var refs []packageSecretKeyRef
 	if packageEnabledTLS(p) {
 		if p.Source.TLS.CA != nil {
-			ref := p.Source.TLS.CA.SecretRef
-			if res := checkSecretKeys(ctx, r, namespace, ref.Name, []string{ref.Key}); res.isFailure() {
-				return res
-			}
+			r := p.Source.TLS.CA.SecretRef
+			refs = append(refs, packageSecretKeyRef{name: r.Name, keys: []string{r.Key}})
 		}
 		if p.Source.TLS.ClientCert != nil {
-			ref := p.Source.TLS.ClientCert.SecretRef
-			// Pre-check requires both the cert key and the derived private
-			// key sibling — same convention as buildPackageTLSVolume.
-			keys := []string{ref.Key, derivePrivateKeyKey(ref.Key)}
-			if res := checkSecretKeys(ctx, r, namespace, ref.Name, keys); res.isFailure() {
-				return res
-			}
+			r := p.Source.TLS.ClientCert.SecretRef
+			refs = append(refs, packageSecretKeyRef{
+				name: r.Name,
+				keys: []string{r.Key, derivePrivateKeyKey(r.Key)},
+			})
 		}
 	}
 	if p.Source.Auth != nil {
 		if p.Source.Auth.BearerToken != nil {
-			ref := p.Source.Auth.BearerToken.SecretRef
-			if res := checkSecretKeys(ctx, r, namespace, ref.Name, []string{ref.Key}); res.isFailure() {
-				return res
-			}
+			r := p.Source.Auth.BearerToken.SecretRef
+			refs = append(refs, packageSecretKeyRef{name: r.Name, keys: []string{r.Key}})
 		}
 		if p.Source.Auth.BasicAuth != nil {
-			ref := p.Source.Auth.BasicAuth.SecretRef
-			if res := checkSecretKeys(ctx, r, namespace, ref.Name, []string{ref.UsernameKey, ref.PasswordKey}); res.isFailure() {
-				return res
+			r := p.Source.Auth.BasicAuth.SecretRef
+			refs = append(refs, packageSecretKeyRef{
+				name: r.Name,
+				keys: []string{r.UsernameKey, r.PasswordKey},
+			})
+		}
+	}
+	return refs
+}
+
+// packageSecretNames returns the set of Secret names referenced by every
+// package in spec, deduplicated, in stable order. Used by the Secret-watch
+// mapFunc to decide whether a Secret event is relevant to a given cluster
+// without re-implementing the same enable-gates checkPackageRefs honors.
+func packageSecretNames(packages []v1alpha1.PackageSpec) []string {
+	seen := make(map[string]struct{})
+	var names []string
+	for _, p := range packages {
+		for _, ref := range packageSecretKeyRefs(p) {
+			if _, dup := seen[ref.name]; dup {
+				continue
+			}
+			seen[ref.name] = struct{}{}
+			names = append(names, ref.name)
+		}
+	}
+	return names
+}
+
+// computePackageSecretsRVHash returns a stable hash of the resourceVersion
+// of every Secret referenced by packages. Used by the Secret-watch recovery
+// action to gate pod-deletion on actual Secret changes — without this,
+// every reconcile during a recoverable failure would delete the pod even
+// when the user has not edited the Secret, producing an infinite
+// delete/recreate loop. The hash is independent of Secret VALUES; we use
+// resourceVersion which the API server bumps on any Data/Type/metadata
+// change. Returns "" when no Secrets are referenced (no packages, or
+// packages with only URL/TLS-disabled), or when any referenced Secret is
+// missing (we treat "missing Secret" the same as "empty hash" — the
+// pre-check will set PackageSecretMissing on the condition path).
+func computePackageSecretsRVHash(ctx context.Context, r client.Reader, packages []v1alpha1.PackageSpec, namespace string) (string, error) {
+	names := packageSecretNames(packages)
+	if len(names) == 0 {
+		return "", nil
+	}
+	h := sha256.New()
+	for _, name := range names {
+		var s corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &s); err != nil {
+			if apierrors.IsNotFound(err) {
+				// Missing Secret — include the name with an empty rv so
+				// the hash changes when the Secret later appears.
+				h.Write([]byte(name))
+				h.Write([]byte{0})
+				continue
+			}
+			return "", fmt.Errorf("getting Secret %q for rv hash: %w", name, err)
+		}
+		h.Write([]byte(name))
+		h.Write([]byte{0})
+		h.Write([]byte(s.ResourceVersion))
+		h.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// packageReferencesSecret reports whether any package in spec references a
+// Secret with the given name. Thin wrapper over packageSecretNames for use
+// from predicates that want a boolean answer without allocating a slice.
+func packageReferencesSecret(packages []v1alpha1.PackageSpec, name string) bool {
+	for _, p := range packages {
+		for _, ref := range packageSecretKeyRefs(p) {
+			if ref.name == name {
+				return true
 			}
 		}
 	}
-	return secretRefCheckResult{}
+	return false
 }

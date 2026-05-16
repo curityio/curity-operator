@@ -58,7 +58,7 @@ type IdentityServerNodeReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
@@ -400,13 +400,38 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("getting existing deployment for prev-hash capture: %w", err)
 	}
 
-	// Package-secret pre-check (plan D1). Runs only when the spec just
-	// changed OR there is no Deployment yet — in steady state the existing
-	// pod has already consumed the Secrets at init time, so re-validating
-	// every reconcile produces false alarms (user deletes a Secret while
-	// pods serve traffic → pod-watch catches the failure at the NEXT pod
-	// restart, when it actually matters).
-	if len(cluster.Spec.Packages) > 0 && prevPackagesHash != packagesHash {
+	// Capture priorPackagesReady early so the pre-check gate can use it to
+	// decide whether to re-run as a recovery probe on a Secret event. The
+	// later capture at the status-recompute step (search for
+	// "Capture PackagesReady (which lives outside") will still take a fresh
+	// read for the translator/Ready-overlay path — both are needed.
+	//
+	// IMPORTANT: copy the Condition value rather than holding the pointer
+	// returned by apimeta.FindStatusCondition. That pointer aliases the
+	// element inside node.Status.Conditions, and the pre-check below calls
+	// setCondition which mutates that element in place to PackagesPending —
+	// which would silently flip our captured "prior" reason and break the
+	// recovery gate check at the bottom of the reconcile.
+	var priorPackagesReadyForGate *metav1.Condition
+	if c := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionPackagesReady); c != nil {
+		copied := *c
+		priorPackagesReadyForGate = &copied
+	}
+
+	// Package-secret pre-check (plan D1 + Secret-watch recovery). Two gates:
+	//
+	//  (1) Spec just changed — original gate; avoids stamping a broken spec
+	//      onto the Deployment.
+	//  (2) PackagesReady is currently in a recoverable failure — recovery
+	//      probe woken by a Secret event. Without this, a user fixing a
+	//      Secret has to wait for the 30 s requeue before recovery starts.
+	//
+	// We deliberately do NOT re-run pre-check in steady state on every
+	// Secret event: once a package is downloaded into the pod's emptyDir,
+	// the Secret is irrelevant to the running container. Flipping the
+	// condition on Secret tampering while pods serve correctly is alarmism.
+	if len(cluster.Spec.Packages) > 0 &&
+		(prevPackagesHash != packagesHash || isRecoverableSecretFailure(priorPackagesReadyForGate)) {
 		reason, message, retryErr := checkPackageSecrets(ctx, r.Client, cluster.Spec.Packages, node.Namespace)
 		if retryErr != nil {
 			// Non-IsNotFound API error — pre-check is inconclusive, do
@@ -727,6 +752,44 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			setCondition(&node.Status.Conditions, v1alpha1.ConditionPackagesReady,
 				metav1.ConditionFalse, v1alpha1.ReasonPackagePodCreationFailed, msg, node.Generation)
 		}
+
+		// Recovery action (Secret-watch path). When this reconcile was
+		// triggered while PackagesReady was in a recoverable failure AND
+		// the pre-check passed (we would have returned early if it did
+		// not), delete the failing package-fetch pods so kubelet starts
+		// a fresh container that re-resolves the Secret. Without this,
+		// failing pods sit in CrashLoopBackOff with cached env values
+		// for up to 5 min while the operator's pre-check is already
+		// satisfied.
+		if isRecoverableSecretFailure(priorPackagesReadyForGate) && listErr == nil {
+			// Gate recovery on actual Secret changes. Compute a hash of
+			// the resourceVersions of every referenced Secret; only
+			// delete pods if the hash differs from what we stamped on
+			// the last successful recovery. Without this, every
+			// reconcile during a recoverable failure deletes the pod
+			// even when the user's Secret value is still wrong — an
+			// infinite delete/recreate loop.
+			currentSecretsHash, hashErr := computePackageSecretsRVHash(ctx, r.Client, cluster.Spec.Packages, node.Namespace)
+			if hashErr != nil {
+				log.Error(hashErr, "computing package Secrets rv hash during recovery",
+					"cluster", cluster.Name, "node", node.Name)
+			} else if currentSecretsHash != "" && currentSecretsHash != node.Status.LastObservedPackageSecretsHash {
+				deleted, delErr := r.deleteFailingPackagePods(ctx, pods, packagesHash)
+				if delErr != nil {
+					log.Error(delErr, "deleting failing package-fetch pods during recovery",
+						"cluster", cluster.Name, "node", node.Name)
+				}
+				if deleted > 0 {
+					r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PackageRecoveryAttempted",
+						"Deleted %d failing package-fetch pod(s) after Secret change; kubelet will restart with fresh credentials",
+						deleted)
+				}
+				// Record the observed hash regardless of delete count
+				// (deleted=0 means filter rejected, but we still saw
+				// the Secret change — don't repeat the gate check).
+				node.Status.LastObservedPackageSecretsHash = currentSecretsHash
+			}
+		}
 	} else {
 		// No packages configured — drop any stale PackagesReady from a
 		// previous reconcile when packages WERE configured.
@@ -787,6 +850,11 @@ func (r *IdentityServerNodeReconciler) SetupWithManager(mgr ctrl.Manager) error 
 			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(r.findNodesForPod),
 			builder.WithPredicates(packageInitContainerStatusChangedPredicate{}),
+		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findNodesForPackageSecret),
+			builder.WithPredicates(packageSecretCandidatePredicate{}),
 		).
 		Complete(r)
 }
@@ -982,6 +1050,57 @@ func (r *IdentityServerNodeReconciler) findNodesForPod(ctx context.Context, obj 
 	return nil
 }
 
+// findNodesForPackageSecret maps a Secret event to every IdentityServerNode
+// whose parent cluster references the Secret from spec.packages. The watch
+// fans out via this reverse-lookup because Secrets are user-owned and carry
+// no operator label — we cannot pre-filter at the predicate layer. The
+// predicate already trims out unrelated Secret types and cosmetic updates,
+// so this function is invoked only for events that are *plausibly* relevant.
+//
+// Algorithm: list clusters in the Secret's namespace, keep the ones whose
+// packages reference this Secret name, then enqueue every node belonging to
+// each match (via the curity.io/cluster label). List errors are logged and
+// produce an empty result — the watch is level-triggered, so a missed event
+// is recovered by the next eligible Secret event or the existing 30 s
+// requeue. The cache backs both Lists, so cost per event is O(clusters_in_ns
+// + matched_clusters · nodes_per_cluster) with no API roundtrip.
+func (r *IdentityServerNodeReconciler) findNodesForPackageSecret(ctx context.Context, obj client.Object) []ctrl.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok || secret == nil {
+		return nil
+	}
+
+	log := ctrl.LoggerFrom(ctx)
+	var clusters v1alpha1.IdentityServerClusterList
+	if err := r.List(ctx, &clusters, client.InNamespace(secret.Namespace)); err != nil {
+		log.Error(err, "listing clusters for package-secret watch",
+			"secret", secret.Name, "namespace", secret.Namespace)
+		return nil
+	}
+
+	var requests []ctrl.Request
+	for i := range clusters.Items {
+		c := &clusters.Items[i]
+		if !packageReferencesSecret(c.Spec.Packages, secret.Name) {
+			continue
+		}
+		var nodes v1alpha1.IdentityServerNodeList
+		if err := r.List(ctx, &nodes,
+			client.InNamespace(secret.Namespace),
+			client.MatchingLabels{"curity.io/cluster": c.Name},
+		); err != nil {
+			log.Error(err, "listing nodes for package-secret watch",
+				"cluster", c.Name, "secret", secret.Name)
+			continue
+		}
+		for j := range nodes.Items {
+			n := &nodes.Items[j]
+			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(n)})
+		}
+	}
+	return requests
+}
+
 // listOwnedPods returns the pods produced by this node's Deployment, filtered
 // by the standard labels stamped on the pod template (resources.go:439).
 // Used by the PackagesReady translator to derive a condition value from
@@ -1000,6 +1119,44 @@ func (r *IdentityServerNodeReconciler) listOwnedPods(ctx context.Context, cluste
 		return nil, fmt.Errorf("listing pods for node %q in cluster %q: %w", nodeName, clusterName, err)
 	}
 	return podList.Items, nil
+}
+
+// deleteFailingPackagePods iterates the already-listed pods (passed in by
+// the caller to avoid a second cache List) and deletes those that match the
+// failingPackagePodFilter for the given expectedHash. Returns the count of
+// successfully-issued Delete calls. IsNotFound errors are tolerated — the
+// pod is gone, which is the desired end state. Other errors are accumulated
+// into the returned error so the caller can log but proceed.
+//
+// Uses direct client.Delete (not eviction). PDB only gates the
+// pods/eviction subresource, so a strict PodDisruptionBudget will not
+// block this path — verified empirically on OpenShift 2026-05-15.
+func (r *IdentityServerNodeReconciler) deleteFailingPackagePods(
+	ctx context.Context, pods []corev1.Pod, expectedHash string,
+) (int, error) {
+	log := ctrl.LoggerFrom(ctx)
+	deleted := 0
+	var errs []error
+	policy := metav1.DeletePropagationBackground
+	for i := range pods {
+		if !failingPackagePodFilter(&pods[i], expectedHash) {
+			continue
+		}
+		if err := r.Delete(ctx, &pods[i], &client.DeleteOptions{PropagationPolicy: &policy}); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			log.Error(err, "deleting failing package-fetch pod", "pod", pods[i].Name)
+			errs = append(errs, err)
+			continue
+		}
+		log.Info("deleted failing package-fetch pod for recovery", "pod", pods[i].Name)
+		deleted++
+	}
+	if len(errs) > 0 {
+		return deleted, fmt.Errorf("%d delete error(s); first: %w", len(errs), errs[0])
+	}
+	return deleted, nil
 }
 
 // replicaFailureMessageMaxLen caps the verbatim K8s ReplicaFailure

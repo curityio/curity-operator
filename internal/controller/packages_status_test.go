@@ -479,3 +479,181 @@ func TestParsePackageFetchIndex(t *testing.T) {
 		})
 	}
 }
+
+// --- isRecoverableSecretFailure ---
+
+func TestIsRecoverableSecretFailure(t *testing.T) {
+	cases := []struct {
+		name string
+		c    *metav1.Condition
+		want bool
+	}{
+		{"nil", nil, false},
+		{"True/AllPackagesFetched", &metav1.Condition{Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonAllPackagesFetched}, false},
+		{"Unknown", &metav1.Condition{Status: metav1.ConditionUnknown, Reason: v1alpha1.ReasonPackageSecretMissing}, false},
+		{"False/SecretMissing", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageSecretMissing}, true},
+		{"False/SecretKeyMissing", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageSecretKeyMissing}, true},
+		{"False/HTTPError", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageHTTPError}, true},
+		{"False/TLSVerifyFailed", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageTLSVerifyFailed}, true},
+		{"False/ClientCertInvalid", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageClientCertInvalid}, true},
+		{"False/FetchFailed", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageFetchFailed}, true},
+		{"False/InvalidArchive", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageInvalidArchive}, true},
+		{"False/ImagePullFailed", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageImagePullFailed}, false},
+		{"False/PodCreationFailed", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackagePodCreationFailed}, false},
+		{"False/PackagesPending", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackagesPending}, false},
+	}
+	for _, tc := range cases {
+		if got := isRecoverableSecretFailure(tc.c); got != tc.want {
+			t.Errorf("%s: want %v, got %v", tc.name, tc.want, got)
+		}
+	}
+}
+
+// --- failingPackagePodFilter ---
+
+func podWithInitStatus(hash string, initStatuses []corev1.ContainerStatus) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "pod",
+			Annotations: map[string]string{annotationPackagesHash: hash},
+			Labels:      map[string]string{labelManagedBy: labelManagedByCurityOperator},
+		},
+		Status: corev1.PodStatus{InitContainerStatuses: initStatuses},
+	}
+}
+
+func TestFailingPackagePodFilter_NoPackageFetchContainer(t *testing.T) {
+	p := podWithInitStatus("h1", []corev1.ContainerStatus{
+		{Name: "config-init", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+	})
+	if failingPackagePodFilter(p, "h1") {
+		t.Error("non-package-fetch init: want false")
+	}
+}
+
+func TestFailingPackagePodFilter_HealthyTerminated(t *testing.T) {
+	p := podWithInitStatus("h1", []corev1.ContainerStatus{
+		{Name: "package-fetch-0", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+	})
+	if failingPackagePodFilter(p, "h1") {
+		t.Error("exit 0: want false")
+	}
+}
+
+func TestFailingPackagePodFilter_CrashLoopBackOffWithLastTerminated(t *testing.T) {
+	p := podWithInitStatus("h1", []corev1.ContainerStatus{
+		{
+			Name:         "package-fetch-0",
+			RestartCount: 3,
+			State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			LastTerminationState: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 22},
+			},
+		},
+	})
+	if !failingPackagePodFilter(p, "h1") {
+		t.Error("CrashLoopBackOff with last exit 22: want true")
+	}
+}
+
+func TestFailingPackagePodFilter_CreateContainerConfigError(t *testing.T) {
+	p := podWithInitStatus("h1", []corev1.ContainerStatus{
+		{
+			Name: "package-fetch-0",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+				Reason: "CreateContainerConfigError", Message: `secret "x" not found`,
+			}},
+		},
+	})
+	if !failingPackagePodFilter(p, "h1") {
+		t.Error("CreateContainerConfigError: want true")
+	}
+}
+
+func TestFailingPackagePodFilter_ImagePullBackOff(t *testing.T) {
+	p := podWithInitStatus("h1", []corev1.ContainerStatus{
+		{
+			Name: "package-fetch-0",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+				Reason: "ImagePullBackOff", Message: "Back-off pulling image",
+			}},
+		},
+	})
+	if !failingPackagePodFilter(p, "h1") {
+		t.Error("ImagePullBackOff: want true")
+	}
+}
+
+func TestFailingPackagePodFilter_HashMismatch(t *testing.T) {
+	p := podWithInitStatus("OLD-HASH", []corev1.ContainerStatus{
+		{
+			Name:         "package-fetch-0",
+			RestartCount: 3,
+			State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			LastTerminationState: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 22},
+			},
+		},
+	})
+	if failingPackagePodFilter(p, "NEW-HASH") {
+		t.Error("hash mismatch: want false even when failing")
+	}
+}
+
+func TestFailingPackagePodFilter_DeletionTimestamp(t *testing.T) {
+	now := metav1.Now()
+	p := podWithInitStatus("h1", []corev1.ContainerStatus{
+		{
+			Name:         "package-fetch-0",
+			RestartCount: 3,
+			State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			LastTerminationState: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 22},
+			},
+		},
+	})
+	p.DeletionTimestamp = &now
+	if failingPackagePodFilter(p, "h1") {
+		t.Error("already-terminating: want false")
+	}
+}
+
+func TestFailingPackagePodFilter_NotOperatorManaged(t *testing.T) {
+	p := podWithInitStatus("h1", []corev1.ContainerStatus{
+		{
+			Name:         "package-fetch-0",
+			RestartCount: 3,
+			State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			LastTerminationState: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 22},
+			},
+		},
+	})
+	delete(p.Labels, labelManagedBy)
+	if failingPackagePodFilter(p, "h1") {
+		t.Error("missing managed-by label: want false")
+	}
+}
+
+func TestFailingPackagePodFilter_NilPod(t *testing.T) {
+	if failingPackagePodFilter(nil, "h1") {
+		t.Error("nil pod: want false")
+	}
+}
+
+func TestFailingPackagePodFilter_MultipleInitOneFailing(t *testing.T) {
+	p := podWithInitStatus("h1", []corev1.ContainerStatus{
+		{Name: "package-fetch-0", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+		{
+			Name:         "package-fetch-1",
+			RestartCount: 1,
+			State:        corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+			LastTerminationState: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 22},
+			},
+		},
+	})
+	if !failingPackagePodFilter(p, "h1") {
+		t.Error("one of two failing: want true")
+	}
+}

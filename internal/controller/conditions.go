@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"sort"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -174,5 +175,76 @@ func computeClusterConditions(nodes []v1alpha1.IdentityServerNode, generation in
 		setCondition(&conditions, v1alpha1.ConditionDegraded, metav1.ConditionFalse, "Healthy", "Cluster is healthy", generation)
 	}
 
+	// PackagesReady rollup: aggregate child-node PackagesReady values into
+	// a single cluster-level condition. Per the plan (F2, D4):
+	//   - Omit the condition entirely if no child node sets it (no packages
+	//     configured anywhere, or first reconcile before child status).
+	//   - True when every node-with-the-condition is True.
+	//   - False with first-failing-by-name node's reason; multi-node clusters
+	//     prefix the message with "<node>:" (single failure) or
+	//     "F/N nodes have package failures (first: <node>: ...)" (multi-fail).
+	// Sorting by node name makes the "first failing" selection deterministic
+	// across reconciles (controller-runtime does not guarantee list order).
+	if packagesCond, set := aggregatePackagesReady(nodes); set {
+		setCondition(&conditions, v1alpha1.ConditionPackagesReady,
+			packagesCond.Status, packagesCond.Reason, packagesCond.Message, generation)
+	}
+
 	return conditions
+}
+
+// aggregatePackagesReady computes the cluster-level PackagesReady condition
+// from child node conditions. Returns set=false when no child has the
+// condition (omit at cluster level too — plan F5).
+func aggregatePackagesReady(nodes []v1alpha1.IdentityServerNode) (cond metav1.Condition, set bool) {
+	type nodeCond struct {
+		name string
+		cond *metav1.Condition
+	}
+	var withCond []nodeCond
+	for i := range nodes {
+		if c := apimeta.FindStatusCondition(nodes[i].Status.Conditions, v1alpha1.ConditionPackagesReady); c != nil {
+			withCond = append(withCond, nodeCond{name: nodes[i].Name, cond: c})
+		}
+	}
+	if len(withCond) == 0 {
+		return metav1.Condition{}, false
+	}
+	sort.Slice(withCond, func(i, j int) bool { return withCond[i].name < withCond[j].name })
+
+	var firstFail *nodeCond
+	failCount := 0
+	for i := range withCond {
+		if withCond[i].cond.Status == metav1.ConditionFalse {
+			failCount++
+			if firstFail == nil {
+				firstFail = &withCond[i]
+			}
+		}
+	}
+
+	if firstFail == nil {
+		return metav1.Condition{
+			Type:    v1alpha1.ConditionPackagesReady,
+			Status:  metav1.ConditionTrue,
+			Reason:  v1alpha1.ReasonAllPackagesFetched,
+			Message: fmt.Sprintf("%d node(s) have all packages fetched", len(withCond)),
+		}, true
+	}
+
+	msg := firstFail.cond.Message
+	if len(withCond) > 1 {
+		if failCount == 1 {
+			msg = fmt.Sprintf("%s: %s", firstFail.name, firstFail.cond.Message)
+		} else {
+			msg = fmt.Sprintf("%d/%d nodes have package failures (first: %s: %s)",
+				failCount, len(withCond), firstFail.name, firstFail.cond.Message)
+		}
+	}
+	return metav1.Condition{
+		Type:    v1alpha1.ConditionPackagesReady,
+		Status:  metav1.ConditionFalse,
+		Reason:  firstFail.cond.Reason,
+		Message: msg,
+	}, true
 }

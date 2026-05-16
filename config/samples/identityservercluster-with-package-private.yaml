@@ -1,0 +1,67 @@
+# Example: IdentityServerCluster declaring a private ZIP package fetched
+# with a bearer token, custom CA, and mTLS client certificate.
+#
+# Prerequisites: the three Secrets below must exist in the same namespace.
+# Replace the placeholder names with your real Secret names.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pkg-token
+  namespace: curity
+type: Opaque
+stringData:
+  # GitHub PAT, OAuth access token, or any "Authorization: Bearer …" value.
+  token: REPLACE_ME
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pkg-ca
+  namespace: curity
+type: Opaque
+stringData:
+  # PEM-encoded CA bundle used to verify the artifact server's certificate.
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    REPLACE_ME
+    -----END CERTIFICATE-----
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pkg-mtls
+  namespace: curity
+# kubernetes.io/tls Secret type enforces tls.crt + tls.key keys.
+type: kubernetes.io/tls
+data:
+  tls.crt: REPLACE_ME_BASE64
+  tls.key: REPLACE_ME_BASE64
+---
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: demo-with-private-package
+  namespace: curity
+spec:
+  version: "11.0"
+  packages:
+    - source:
+        url: https://artifacts.internal.example.com/plugin.zip
+        tls:
+          enabled: true
+          ca:
+            secretRef:
+              name: pkg-ca
+              key: ca.crt
+          clientCert:
+            secretRef:
+              name: pkg-mtls
+              # operator reads the matching private key from sibling key
+              # tls.key (last "crt" in this field becomes "key").
+              key: tls.crt
+        auth:
+          bearerToken:
+            secretRef:
+              name: pkg-token
+              key: token
+      mountPath: /etc/plugins/secure

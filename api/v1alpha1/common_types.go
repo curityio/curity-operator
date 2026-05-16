@@ -28,6 +28,9 @@ const (
 	// referenced IdentityServerCluster exists and the node has been adopted
 	// via controller OwnerReferences.
 	ConditionClusterReady = "ClusterReady"
+	// ConditionPackagesReady reports whether the init-container package
+	// downloads succeeded (set only when spec.packages is non-empty).
+	ConditionPackagesReady = "PackagesReady"
 )
 
 // Reason values used across multiple condition types. Each constant names
@@ -39,6 +42,69 @@ const (
 	// and Ready while the orphan state persists.
 	ReasonClusterFound    = "ClusterFound"
 	ReasonClusterNotFound = "ClusterNotFound"
+
+	// ReasonPackagesNotReady is set on ConditionReady when ConditionPackagesReady
+	// is False — the package-fetch failure delegates to the PackagesReady
+	// condition for the detailed message.
+	ReasonPackagesNotReady = "PackagesNotReady"
+)
+
+// Reason values for ConditionPackagesReady (set by the pre-check leg or the
+// pod-watch translator on IdentityServerNode, mirrored to IdentityServerCluster).
+const (
+	// ReasonAllPackagesFetched is set on ConditionPackagesReady=True when every
+	// package-fetch init container across the current ReplicaSet's pods exited 0.
+	ReasonAllPackagesFetched = "AllPackagesFetched"
+
+	// ReasonPackagesPending means a new package set has been applied but the
+	// new ReplicaSet's pods have not yet reported init-container status.
+	// Set preemptively when the operator is about to stamp a Deployment
+	// with new package init containers, so the Ready overlay flips False
+	// immediately — closes the rolling-update Ready=True false-positive
+	// window that the prior PackagesReady=True (from the old, still-serving
+	// pod) would otherwise leak through.
+	ReasonPackagesPending = "PackagesPending"
+
+	// ReasonPackagePodCreationFailed means the Deployment's ReplicaSet
+	// controller cannot create pods for the package-bearing spec (SCC
+	// rejection, admission webhook denial, ResourceQuota exhausted,
+	// invalid pod spec). Without this, a packages rollout that blocks at
+	// pod-creation time produces no pod-watch events and PackagesReady
+	// stays PackagesPending indefinitely. The condition message carries
+	// the Deployment's verbatim ReplicaFailure text so users see the
+	// actual K8s diagnostic on `kubectl describe`.
+	ReasonPackagePodCreationFailed = "PackagePodCreationFailed"
+
+	// ReasonPackageSecretMissing means a referenced Secret does not exist.
+	ReasonPackageSecretMissing = "PackageSecretMissing"
+
+	// ReasonPackageSecretKeyMissing means the referenced Secret exists but
+	// the named key is absent.
+	ReasonPackageSecretKeyMissing = "PackageSecretKeyMissing"
+
+	// ReasonPackageImagePullFailed means the fetcher init-container image
+	// could not be pulled.
+	ReasonPackageImagePullFailed = "PackageImagePullFailed"
+
+	// ReasonPackageTLSVerifyFailed means the package download failed TLS
+	// certificate verification against the configured CA bundle.
+	ReasonPackageTLSVerifyFailed = "PackageTLSVerifyFailed"
+
+	// ReasonPackageClientCertInvalid means the configured mTLS client cert
+	// or private key could not be used for the package download.
+	ReasonPackageClientCertInvalid = "PackageClientCertInvalid"
+
+	// ReasonPackageHTTPError means the package URL returned an HTTP 4xx/5xx.
+	ReasonPackageHTTPError = "PackageHTTPError"
+
+	// ReasonPackageInvalidArchive means the downloaded artifact could not
+	// be unpacked as a ZIP archive.
+	ReasonPackageInvalidArchive = "PackageInvalidArchive"
+
+	// ReasonPackageFetchFailed is the open-set catch-all for any definitive
+	// package-fetch failure that does not match a more specific reason.
+	// The condition message carries the verbatim diagnostic signal.
+	ReasonPackageFetchFailed = "PackageFetchFailed"
 )
 
 // Finalizer names.
@@ -240,4 +306,150 @@ type LoggingSpec struct {
 	// Resources for the sidecar log tailing containers.
 	// Node-level overrides cluster-level.
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// PackageSpec declares one remote ZIP archive that the operator downloads
+// at pod start and unpacks into the Curity container at MountPath.
+// Each entry produces one init container per pod. Removing an entry
+// removes its init container and mount on the next reconcile.
+type PackageSpec struct {
+	// Source describes where to fetch the archive from.
+	// +kubebuilder:validation:Required
+	Source PackageSource `json:"source"`
+
+	// MountPath is the absolute path inside the Curity container where
+	// the archive contents are unpacked. Each package needs a distinct path.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^/`
+	// +kubebuilder:validation:MaxLength=1024
+	MountPath string `json:"mountPath"`
+}
+
+// PackageSource describes the source of a package archive.
+// When auth is set, exactly one of basicAuth or bearerToken must be
+// configured — `auth: {}` (empty) is rejected so the API surface is
+// unambiguous (an empty auth block would silently fall back to
+// unauthenticated, which is confusing). Omit the auth field entirely
+// for unauthenticated downloads.
+// +kubebuilder:validation:XValidation:rule="!has(self.auth) || ((has(self.auth.basicAuth) ? 1 : 0) + (has(self.auth.bearerToken) ? 1 : 0) == 1)",message="exactly one of auth.basicAuth or auth.bearerToken must be set when auth is configured"
+type PackageSource struct {
+	// URL is the full URL of the ZIP archive to fetch. HTTPS is strongly
+	// recommended; the pattern allows http:// only because the proposal
+	// schema does — production deployments should set NetworkPolicy to
+	// block plain-HTTP egress.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^https?://`
+	// +kubebuilder:validation:MaxLength=2048
+	URL string `json:"url"`
+
+	// TLS configures the download connection's TLS behavior. Omit to
+	// accept the system trust store with default verification.
+	TLS *PackageTLSSpec `json:"tls,omitempty"`
+
+	// Auth carries credentials for authenticated endpoints. Set at most
+	// one of BasicAuth or BearerToken.
+	Auth *PackageAuthSpec `json:"auth,omitempty"`
+}
+
+// PackageTLSSpec configures TLS for a package download. When Enabled is
+// false (default), the system trust store is used and the rest of this
+// block is ignored. When Enabled is true, SkipVerify / CA / ClientCert apply.
+//
+// SkipVerify is mutually exclusive with CA and ClientCert: the operator's
+// curl invocation under SkipVerify=true is just ` -k ` (no --cacert, no
+// --cert/--key), so combining them would silently drop the trust bundle
+// and any client cert. The API rejects the combination instead of silently
+// dropping it.
+// +kubebuilder:validation:XValidation:rule="!self.skipVerify || (!has(self.ca) && !has(self.clientCert))",message="tls.skipVerify cannot be combined with tls.ca or tls.clientCert; skipVerify=true silently drops both, so the API rejects the combination"
+type PackageTLSSpec struct {
+	// Enabled gates the rest of this TLS block. When false (default),
+	// the system trust store is used.
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// SkipVerify disables certificate verification. Use only in
+	// non-production environments. Mutually exclusive with CA and
+	// ClientCert (enforced by CRD validation).
+	// +kubebuilder:default=false
+	SkipVerify bool `json:"skipVerify,omitempty"`
+
+	// CA is a Secret holding a PEM bundle used as the trust root for
+	// this download. Mutually exclusive with SkipVerify (enforced by
+	// CRD validation).
+	CA *PackageSecretKeyRef `json:"ca,omitempty"`
+
+	// ClientCert is a Secret holding the cert (and matching private key)
+	// for mutual TLS. Mutually exclusive with SkipVerify (enforced by
+	// CRD validation).
+	ClientCert *PackageClientCertRef `json:"clientCert,omitempty"`
+}
+
+// PackageAuthSpec carries credentials for an authenticated download.
+// Set at most one of BasicAuth or BearerToken.
+type PackageAuthSpec struct {
+	// BasicAuth provides HTTP Basic Authentication credentials.
+	BasicAuth *PackageBasicAuthRef `json:"basicAuth,omitempty"`
+
+	// BearerToken provides a bearer token sent as `Authorization: Bearer <token>`.
+	BearerToken *PackageSecretKeyRef `json:"bearerToken,omitempty"`
+}
+
+// PackageSecretKeyRef references a single key in a Secret. Used for
+// bearer tokens, CA bundles, and client cert files.
+type PackageSecretKeyRef struct {
+	// +kubebuilder:validation:Required
+	SecretRef PackageSecretKeySelector `json:"secretRef"`
+}
+
+// PackageSecretKeySelector identifies one key inside a Secret.
+type PackageSecretKeySelector struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Required
+	Key string `json:"key"`
+}
+
+// PackageClientCertRef references the Secret holding a client certificate
+// and matching private key for mTLS.
+type PackageClientCertRef struct {
+	// +kubebuilder:validation:Required
+	SecretRef PackageClientCertSelector `json:"secretRef"`
+}
+
+// PackageClientCertSelector identifies the Secret holding the client
+// certificate. The Secret must contain both `tls.crt` and `tls.key` keys
+// (the K8s TLS Secret convention). Key names the cert entry; the matching
+// private key is read from the sibling key derived by replacing a trailing
+// "crt" with "key" (so `tls.crt` → `tls.key`).
+type PackageClientCertSelector struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Required
+	Key string `json:"key"`
+}
+
+// PackageBasicAuthRef references credentials for HTTP basic auth.
+type PackageBasicAuthRef struct {
+	// +kubebuilder:validation:Required
+	SecretRef PackageBasicAuthSelector `json:"secretRef"`
+}
+
+// PackageBasicAuthSelector identifies the Secret holding basic-auth
+// credentials and the keys within it for username and password.
+type PackageBasicAuthSelector struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
+
+	// UsernameKey is the key in the Secret that holds the username.
+	// +kubebuilder:validation:Required
+	UsernameKey string `json:"usernameKey"`
+
+	// PasswordKey is the key in the Secret that holds the password.
+	// +kubebuilder:validation:Required
+	PasswordKey string `json:"passwordKey"`
 }

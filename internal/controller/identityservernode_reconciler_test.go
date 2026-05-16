@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -691,19 +692,32 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 
 			testCreateNode(ns, "peer-admin", v1alpha1.NodeTypeAdmin, "admin-recovery-cluster")
 
+			// 60s (not the 30s default) to ride out variable CI scheduling:
+			// the stuck-admin's Degraded=DuplicateAdmin is set only AFTER
+			// the cluster-watch fires from peer-admin's creation event
+			// (incrementing Status.NodeCount), which can lag under heavy
+			// envtest reconciler load. Matches the 60s timeout on the
+			// recovery Eventually below.
 			Eventually(func() string {
 				node := &v1alpha1.IdentityServerNode{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "stuck-admin", Namespace: ns}, node); err != nil {
 					return ""
 				}
 				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
-			}, timeout, interval).Should(Equal("DuplicateAdmin"))
+			}, 60*time.Second, interval).Should(Equal("DuplicateAdmin"))
 
-			peer := &v1alpha1.IdentityServerNode{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "peer-admin", Namespace: ns}, peer)).To(Succeed())
-			peer.Spec.Type = v1alpha1.NodeTypeRuntime
-			peer.Spec.Role = "peer-admin-runtime-role"
-			Expect(k8sClient.Update(ctx, peer)).To(Succeed())
+			// Retry on conflict: the reconciler also writes the peer's
+			// finalizer / labels concurrently with our spec change. Matches
+			// the patchClusterRef helper added in clusterref_move_test.go.
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				peer := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "peer-admin", Namespace: ns}, peer); err != nil {
+					return err
+				}
+				peer.Spec.Type = v1alpha1.NodeTypeRuntime
+				peer.Spec.Role = "peer-admin-runtime-role"
+				return k8sClient.Update(ctx, peer)
+			})).To(Succeed())
 
 			Eventually(func() string {
 				node := &v1alpha1.IdentityServerNode{}

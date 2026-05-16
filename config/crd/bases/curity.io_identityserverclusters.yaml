@@ -1635,6 +1635,184 @@ spec:
                 description: NodeSelector constrains pods to nodes with matching labels.
                 maxProperties: 100
                 type: object
+              packages:
+                description: |-
+                  Packages declares remote ZIP archives the operator downloads at
+                  pod start and unpacks into every Curity container of every node
+                  referencing this cluster. Each entry produces one init container
+                  per pod. Removing an entry removes its init container and mount
+                  on the next reconcile (which triggers a rolling restart).
+                  MountPaths must be unique across the list — duplicates are
+                  rejected at admission via CEL.
+                items:
+                  description: |-
+                    PackageSpec declares one remote ZIP archive that the operator downloads
+                    at pod start and unpacks into the Curity container at MountPath.
+                    Each entry produces one init container per pod. Removing an entry
+                    removes its init container and mount on the next reconcile.
+                  properties:
+                    mountPath:
+                      description: |-
+                        MountPath is the absolute path inside the Curity container where
+                        the archive contents are unpacked. Each package needs a distinct path.
+                      maxLength: 1024
+                      pattern: ^/
+                      type: string
+                    source:
+                      description: Source describes where to fetch the archive from.
+                      properties:
+                        auth:
+                          description: |-
+                            Auth carries credentials for authenticated endpoints. Set at most
+                            one of BasicAuth or BearerToken.
+                          properties:
+                            basicAuth:
+                              description: BasicAuth provides HTTP Basic Authentication
+                                credentials.
+                              properties:
+                                secretRef:
+                                  description: |-
+                                    PackageBasicAuthSelector identifies the Secret holding basic-auth
+                                    credentials and the keys within it for username and password.
+                                  properties:
+                                    name:
+                                      maxLength: 253
+                                      type: string
+                                    passwordKey:
+                                      description: PasswordKey is the key in the Secret
+                                        that holds the password.
+                                      type: string
+                                    usernameKey:
+                                      description: UsernameKey is the key in the Secret
+                                        that holds the username.
+                                      type: string
+                                  required:
+                                  - name
+                                  - passwordKey
+                                  - usernameKey
+                                  type: object
+                              required:
+                              - secretRef
+                              type: object
+                            bearerToken:
+                              description: 'BearerToken provides a bearer token sent
+                                as `Authorization: Bearer <token>`.'
+                              properties:
+                                secretRef:
+                                  description: PackageSecretKeySelector identifies
+                                    one key inside a Secret.
+                                  properties:
+                                    key:
+                                      type: string
+                                    name:
+                                      maxLength: 253
+                                      type: string
+                                  required:
+                                  - key
+                                  - name
+                                  type: object
+                              required:
+                              - secretRef
+                              type: object
+                          type: object
+                        tls:
+                          description: |-
+                            TLS configures the download connection's TLS behavior. Omit to
+                            accept the system trust store with default verification.
+                          properties:
+                            ca:
+                              description: |-
+                                CA is a Secret holding a PEM bundle used as the trust root for
+                                this download. Mutually exclusive with SkipVerify (enforced by
+                                CRD validation).
+                              properties:
+                                secretRef:
+                                  description: PackageSecretKeySelector identifies
+                                    one key inside a Secret.
+                                  properties:
+                                    key:
+                                      type: string
+                                    name:
+                                      maxLength: 253
+                                      type: string
+                                  required:
+                                  - key
+                                  - name
+                                  type: object
+                              required:
+                              - secretRef
+                              type: object
+                            clientCert:
+                              description: |-
+                                ClientCert is a Secret holding the cert (and matching private key)
+                                for mutual TLS. Mutually exclusive with SkipVerify (enforced by
+                                CRD validation).
+                              properties:
+                                secretRef:
+                                  description: |-
+                                    PackageClientCertSelector identifies the Secret holding the client
+                                    certificate. The Secret must contain both `tls.crt` and `tls.key` keys
+                                    (the K8s TLS Secret convention). Key names the cert entry; the matching
+                                    private key is read from the sibling key derived by replacing a trailing
+                                    "crt" with "key" (so `tls.crt` → `tls.key`).
+                                  properties:
+                                    key:
+                                      type: string
+                                    name:
+                                      maxLength: 253
+                                      type: string
+                                  required:
+                                  - key
+                                  - name
+                                  type: object
+                              required:
+                              - secretRef
+                              type: object
+                            enabled:
+                              default: false
+                              description: |-
+                                Enabled gates the rest of this TLS block. When false (default),
+                                the system trust store is used.
+                              type: boolean
+                            skipVerify:
+                              default: false
+                              description: |-
+                                SkipVerify disables certificate verification. Use only in
+                                non-production environments. Mutually exclusive with CA and
+                                ClientCert (enforced by CRD validation).
+                              type: boolean
+                          type: object
+                          x-kubernetes-validations:
+                          - message: tls.skipVerify cannot be combined with tls.ca
+                              or tls.clientCert; skipVerify=true silently drops both,
+                              so the API rejects the combination
+                            rule: '!self.skipVerify || (!has(self.ca) && !has(self.clientCert))'
+                        url:
+                          description: |-
+                            URL is the full URL of the ZIP archive to fetch. HTTPS is strongly
+                            recommended; the pattern allows http:// only because the proposal
+                            schema does — production deployments should set NetworkPolicy to
+                            block plain-HTTP egress.
+                          maxLength: 2048
+                          pattern: ^https?://
+                          type: string
+                      required:
+                      - url
+                      type: object
+                      x-kubernetes-validations:
+                      - message: exactly one of auth.basicAuth or auth.bearerToken
+                          must be set when auth is configured
+                        rule: '!has(self.auth) || ((has(self.auth.basicAuth) ? 1 :
+                          0) + (has(self.auth.bearerToken) ? 1 : 0) == 1)'
+                  required:
+                  - mountPath
+                  - source
+                  type: object
+                maxItems: 20
+                type: array
+                x-kubernetes-validations:
+                - message: each package mountPath must be unique
+                  rule: self.all(p1, self.exists_one(p2, p2.mountPath == p1.mountPath))
               podAnnotations:
                 additionalProperties:
                   type: string

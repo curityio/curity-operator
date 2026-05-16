@@ -76,9 +76,10 @@ func run(cmd *cobra.Command, _ []string) error {
 	//nolint:staticcheck // TODO: migrate to events.EventRecorder
 	nodeRecorder := mgr.GetEventRecorderFor("identityservernode-controller")
 	if err := (&controller.IdentityServerNodeReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: nodeRecorder,
+		Client:              mgr.GetClient(),
+		Scheme:              mgr.GetScheme(),
+		Recorder:            nodeRecorder,
+		PackageFetcherImage: controller.ResolvePackageFetcherImage(),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("failed to setup IdentityServerNode controller: %w", err)
 	}

@@ -1,0 +1,171 @@
+
+[packages feature snapshot of Deployment shape with one package captures the Deployment with one package via go-snaps - 1]
+metadata:
+  name: pkg-snap-pkg-snap-rt-5cf9ad58
+  namespace: e2e-packages-snapshot
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/instance: pkg-snap-pkg-snap-rt-5cf9ad58
+    app.kubernetes.io/managed-by: curity-operator
+    app.kubernetes.io/name: curity-identity-server
+    app.kubernetes.io/version: "11.0"
+    curity.io/cluster: pkg-snap
+    curity.io/role: runtime-role
+  ownerReferences: <Any value>
+  managedFields: <Any value>
+spec:
+  replicas: 1
+  selector: <Any value>
+  template:
+    metadata: <Any value>
+    spec:
+      volumes:
+        - name: cluster-config
+          secret:
+            secretName: pkg-snap-cluster-config
+            items:
+              - key: cluster.xml
+                path: cluster.xml
+            defaultMode: 420
+            optional: true
+        - name: pkg-0
+          emptyDir:
+            sizeLimit:
+              format: BinarySI
+      initContainers:
+        - name: package-fetch-0
+          image: alpine:3.19
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - "set -e\napk add --no-cache curl unzip ca-certificates >/dev/null\nmkdir -p /pkg\ncurl -fsSL --max-time 120 --max-filesize 268435456 -o /tmp/pkg.zip \"$PKG_URL\"\nunzip -q /tmp/pkg.zip -d /pkg || exit 100\necho \"package-fetch-0: extracted to /pkg\"\n"
+          env:
+            - name: PKG_URL
+              value: https://example.com/snap.zip
+          resources:
+            limits:
+              cpu:
+                format: DecimalSI
+              memory:
+                format: BinarySI
+            requests:
+              cpu:
+                format: DecimalSI
+              memory:
+                format: BinarySI
+          volumeMounts:
+            - name: pkg-0
+              mountPath: /pkg
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+      containers:
+        - name: curity
+          image: curity.azurecr.io/curity/idsvr:11.0
+          args:
+            - /opt/idsvr/bin/idsvr
+            - -s
+            - runtime-role
+            - --no-admin
+          ports:
+            - name: health-check
+              containerPort: 4465
+              protocol: TCP
+            - name: metrics
+              containerPort: 4466
+              protocol: TCP
+            - name: http
+              containerPort: 8443
+              protocol: TCP
+          env:
+            - name: STATUS_CMD_PORT
+              value: "4465"
+            - name: LOGGING_LEVEL
+              value: INFO
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pkg-snap-admin-creds
+                  key: ADMIN_PASSWORD
+            - name: CONFIG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pkg-snap-admin-creds
+                  key: CONFIG_ENCRYPTION_KEY
+            - name: KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: pkg-snap-admin-creds
+                  key: KEYSTORE_PASSWORD
+          volumeMounts:
+            - name: cluster-config
+              readOnly: true
+              mountPath: /opt/idsvr/etc/init/cluster.xml
+              subPath: cluster.xml
+            - name: pkg-0
+              readOnly: true
+              mountPath: /etc/plugins/snap
+          livenessProbe:
+            httpGet:
+              path: /
+              port:
+                type: 0
+                intval: 4465
+                strval: ""
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port:
+                type: 0
+                intval: 4465
+                strval: ""
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 3
+            failureThreshold: 3
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      securityContext:
+        runAsUser: 10001
+        runAsGroup: 10000
+        fsGroup: 10000
+      schedulerName: default-scheduler
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable:
+        type: 1
+        intval: 0
+        strval: 25%
+      maxSurge:
+        type: 1
+        intval: 0
+        strval: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+
+---

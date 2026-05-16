@@ -283,7 +283,11 @@ All managed configs in a namespace are discovered by all clusters in that namesp
 
 Each entry produces one init container per pod. The init container downloads the archive, unzips it into an `emptyDir` volume, and the main Curity container mounts that volume at the configured `mountPath`. Removing an entry removes its init container and volume on the next reconcile, triggering a rolling restart.
 
-The full package list is hashed into the pod-template annotation `curity.io/packages-hash` so any spec change (URL, auth ref, TLS ref, mount path, order) triggers a rolling restart. Rotating a referenced Secret's value in place does NOT trigger a restart — the hash covers refs, not contents. Use `kubectl rollout restart deployment/<name>` to force a restart on token rotation.
+How the operator reacts to changes:
+
+- **Spec change** (URL, auth ref, TLS ref, mount path, order): the `curity.io/packages-hash` pod-template annotation changes → rolling restart on the next reconcile.
+- **Secret edit while cluster is healthy** (`PackagesReady=True`): no automatic action. The packages-hash covers refs, not Secret contents, so running pods keep their cached env value. This is intentional — a routine token rotation should not churn pods. Use `kubectl rollout restart deployment/<name>` if you need the new value picked up immediately.
+- **Secret edit while cluster is failing** (`PackagesReady=False` with a recoverable reason: `PackageHTTPError`, `PackageSecretMissing`, `PackageSecretKeyMissing`, `PackageTLSVerifyFailed`, `PackageClientCertInvalid`, `PackageFetchFailed`, `PackageInvalidArchive`): the operator deletes the failing pod automatically. The fresh pod reads the corrected Secret and the cluster recovers in seconds, no manual restart needed.
 
 ### Public package (no auth, no TLS customization)
 

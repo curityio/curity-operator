@@ -19,6 +19,9 @@ spec:
   identityServerClusterRef:
     name: upd-cluster
   replicas: 3
+  service:
+    type: ClusterIP
+    port: 8443
 status:
   conditions:
     - type: Ready

@@ -169,6 +169,7 @@ var _ = Describe("ClusterRef change", func() {
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterA},
 					Replicas:                 ptr.To(int32(2)),
 					PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &pdbMin},
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k().Create(ctx, rt)).To(Succeed())
@@ -356,6 +357,7 @@ var _ = Describe("ClusterRef change", func() {
 					Role:                     "hopper-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterA},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k().Create(ctx, rt)).To(Succeed())
@@ -425,6 +427,7 @@ var _ = Describe("ClusterRef change", func() {
 					Role:                     "rt-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: realCluster},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k().Create(ctx, rt)).To(Succeed())

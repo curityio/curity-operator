@@ -356,11 +356,7 @@ func (in *IdentityServerNodeSpec) DeepCopyInto(out *IdentityServerNodeSpec) {
 		*out = new(ProbeSpec)
 		(*in).DeepCopyInto(*out)
 	}
-	if in.Service != nil {
-		in, out := &in.Service, &out.Service
-		*out = new(ServiceSpec)
-		**out = **in
-	}
+	out.Service = in.Service
 	if in.EnvironmentVariables != nil {
 		in, out := &in.EnvironmentVariables, &out.EnvironmentVariables
 		*out = make([]v1.EnvVar, len(*in))

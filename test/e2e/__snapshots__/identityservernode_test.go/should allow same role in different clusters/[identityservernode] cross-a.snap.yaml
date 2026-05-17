@@ -19,6 +19,9 @@ spec:
   identityServerClusterRef:
     name: role-cluster-a
   replicas: 1
+  service:
+    type: ClusterIP
+    port: 8443
 status:
   conditions:
     - type: Ready

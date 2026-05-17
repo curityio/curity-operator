@@ -21,6 +21,9 @@ spec:
   replicas: 1
   podLabels:
     team: identity
+  service:
+    type: ClusterIP
+    port: 8443
 status:
   conditions:
     - type: Ready

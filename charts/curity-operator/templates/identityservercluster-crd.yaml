@@ -76,26 +76,46 @@ spec:
                       admin credentials.
                     properties:
                       secretKeyRef:
-                        description: SecretKeyRefSource references a Secret with selectable
-                          items.
+                        description: |-
+                          SecretKeyRefSource references the admin-credentials Secret. Items must
+                          contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY,
+                          and KEYSTORE_PASSWORD — these specific keys are what the operator projects
+                          into Curity pods.
                         properties:
                           items:
                             items:
-                              description: KeyToPath maps a key in a Secret or ConfigMap
-                                to a mount path.
+                              description: |-
+                                KeyToPath maps a Secret key to the env var name projected into the
+                                container. Path is the env var Name (not a filesystem path), so it must be
+                                a valid POSIX env var identifier: starts with letter or underscore, then
+                                alphanumerics or underscore.
                               properties:
                                 key:
                                   type: string
                                 path:
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[A-Za-z_][A-Za-z0-9_]*$
                                   type: string
                               required:
                               - key
                               - path
                               type: object
-                            minItems: 1
+                            maxItems: 3
+                            minItems: 3
                             type: array
+                            x-kubernetes-validations:
+                            - message: items must contain exactly one entry each for
+                                ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD
+                              rule: self.exists_one(i, i.key == 'ADMIN_PASSWORD') &&
+                                self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY')
+                                && self.exists_one(i, i.key == 'KEYSTORE_PASSWORD')
                           name:
+                            description: Name must be a valid DNS-1123 subdomain Secret
+                              name.
+                            maxLength: 253
                             minLength: 1
+                            pattern: ^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$
                             type: string
                         required:
                         - items
@@ -1489,25 +1509,26 @@ spec:
                     maxItems: 100
                     type: array
                   enabled:
-                    default: false
                     type: boolean
                   maxReplicas:
-                    default: 10
                     format: int32
                     maximum: 10000
                     minimum: 1
                     type: integer
                   minReplicas:
-                    default: 2
                     format: int32
                     minimum: 1
                     type: integer
                   targetCPUUtilizationPercentage:
-                    default: 80
                     format: int32
                     maximum: 100
                     minimum: 1
                     type: integer
+                required:
+                - enabled
+                - maxReplicas
+                - minReplicas
+                - targetCPUUtilizationPercentage
                 type: object
                 x-kubernetes-validations:
                 - message: minReplicas must be less than or equal to maxReplicas
@@ -1677,14 +1698,18 @@ spec:
                                   properties:
                                     name:
                                       maxLength: 253
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$
                                       type: string
                                     passwordKey:
                                       description: PasswordKey is the key in the Secret
                                         that holds the password.
+                                      minLength: 1
                                       type: string
                                     usernameKey:
                                       description: UsernameKey is the key in the Secret
                                         that holds the username.
+                                      minLength: 1
                                       type: string
                                   required:
                                   - name
@@ -1703,9 +1728,12 @@ spec:
                                     key inside a Secret.
                                   properties:
                                     key:
+                                      minLength: 1
                                       type: string
                                     name:
                                       maxLength: 253
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$
                                       type: string
                                   required:
                                   - key
@@ -1731,9 +1759,12 @@ spec:
                                     key inside a Secret.
                                   properties:
                                     key:
+                                      minLength: 1
                                       type: string
                                     name:
                                       maxLength: 253
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$
                                       type: string
                                   required:
                                   - key
@@ -1757,9 +1788,12 @@ spec:
                                     "crt" with "key" (so `tls.crt` → `tls.key`).
                                   properties:
                                     key:
+                                      minLength: 1
                                       type: string
                                     name:
                                       maxLength: 253
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$
                                       type: string
                                   required:
                                   - key
@@ -1789,12 +1823,16 @@ spec:
                             rule: '!self.skipVerify || (!has(self.ca) && !has(self.clientCert))'
                         url:
                           description: |-
-                            URL is the full URL of the ZIP archive to fetch. HTTPS is strongly
-                            recommended; the pattern allows http:// only because the proposal
-                            schema does — production deployments should set NetworkPolicy to
-                            block plain-HTTP egress.
+                            URL is the full HTTP or HTTPS URL of the ZIP archive to fetch.
+                            Both schemes are supported; use NetworkPolicy at the cluster level
+                            to restrict plain-HTTP egress if your deployment requires it.
+                            The pattern also rejects URLs with embedded credentials
+                            (userinfo@host) — use the structured `auth` field instead — and
+                            disallows whitespace or control characters anywhere in the URL.
+                            The tail accepts `/path`, `?query`, or `#fragment` after the host,
+                            so bare-host, query-only and fragment-only URLs all parse.
                           maxLength: 2048
-                          pattern: ^https?://
+                          pattern: ^https?://[^/@\s]+([/?#][^\s]*)?$
                           type: string
                       required:
                       - url
@@ -1833,7 +1871,13 @@ spec:
                       during voluntary disruption. Accepts an integer (e.g., 2) or a
                       percentage string (e.g., "50%"). Matches upstream
                       policy/v1.PodDisruptionBudgetSpec.MinAvailable.
+                      Pattern catches invalid string forms; CEL catches negative integers
+                      (Pattern does not apply to the int variant of x-kubernetes-int-or-string).
+                    pattern: ^([0-9]+|[0-9]+%)$
                     x-kubernetes-int-or-string: true
+                    x-kubernetes-validations:
+                    - message: minAvailable must be non-negative
+                      rule: '!(type(self) == int && self < 0)'
                 type: object
               podLabels:
                 additionalProperties:
@@ -2320,6 +2364,10 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: cluster name must not contain '.'; the operator derives DNS-1035
+            Service names from it, and dots are not valid in DNS-1035 labels
+          rule: '!self.metadata.name.contains(''.'')'
     served: true
     storage: true
     subresources:

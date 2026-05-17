@@ -266,12 +266,8 @@ func buildServicePorts(node *v1alpha1.IdentityServerNode) []corev1.ServicePort {
 			ports = append(ports, corev1.ServicePort{Name: "admin-ui", Port: portAdminUI, TargetPort: intstr.FromString("admin-ui")})
 		}
 	} else {
-		servicePort := int32(portHTTP)
-		if node.Spec.Service != nil && node.Spec.Service.Port > 0 {
-			servicePort = node.Spec.Service.Port
-		}
 		ports = append(ports,
-			corev1.ServicePort{Name: "http", Port: servicePort, TargetPort: intstr.FromString("http")},
+			corev1.ServicePort{Name: "http", Port: node.Spec.Service.Port, TargetPort: intstr.FromString("http")},
 		)
 	}
 
@@ -285,12 +281,11 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		{Name: "LOGGING_LEVEL", Value: resolveLoggingLevel(cluster, node)},
 	}
 
-	// Admin UI HTTP mode
-	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil {
-		// Secure defaults to true if not explicitly set
-		secure := node.Spec.UI.Secure == nil || *node.Spec.UI.Secure
+	// Admin UI HTTP mode. nil Secure falls through to the secure-HTTPS default
+	// (a guard for in-process construction paths that bypass admission).
+	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
 		httpMode := "false"
-		if !secure {
+		if node.Spec.UI.Secure != nil && !*node.Spec.UI.Secure {
 			httpMode = "true"
 		}
 		envVars = append(envVars, corev1.EnvVar{Name: "ADMIN_UI_HTTP_MODE", Value: httpMode})
@@ -457,8 +452,8 @@ func buildSelectorLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1
 }
 
 // resolveReplicas returns the replica count for the Deployment.
-// Admin nodes are always forced to 1 replica.
-// Runtime nodes with HPA enabled return minReplicas as the initial baseline.
+// Admin nodes always get 1 (enforced at admission by CEL). Runtime nodes
+// with HPA enabled return minReplicas as the initial baseline.
 func resolveReplicas(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *int32 {
 	if node.Spec.Type == v1alpha1.NodeTypeAdmin {
 		return ptr.To(int32(1))
@@ -594,12 +589,10 @@ func buildLogSidecars(logging *v1alpha1.LoggingSpec) []corev1.Container {
 	return sidecars
 }
 
-// resolveServiceType returns the service type from the node spec or defaults to ClusterIP.
+// resolveServiceType returns the service type from the node spec. Service is
+// Required at admission, so the field is always populated.
 func resolveServiceType(node *v1alpha1.IdentityServerNode) corev1.ServiceType {
-	if node.Spec.Service != nil && node.Spec.Service.Type != "" {
-		return node.Spec.Service.Type
-	}
-	return corev1.ServiceTypeClusterIP
+	return node.Spec.Service.Type
 }
 
 // buildLivenessProbe constructs the liveness probe with configurable or default values.

@@ -35,6 +35,7 @@ func newTestNode(nodeType v1alpha1.NodeType) *v1alpha1.IdentityServerNode {
 			Role:                     "test-role",
 			IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-1"},
 			Replicas:                 ptr.To(int32(1)),
+			Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443},
 		},
 	}
 }
@@ -67,7 +68,7 @@ func TestBuildDeployment_RuntimeArgs(t *testing.T) {
 func TestBuildDeployment_AdminPorts(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
-	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
@@ -298,15 +299,40 @@ func TestBuildDeployment_UIEnabled(t *testing.T) {
 	assertEnvVar(t, envVars, "ADMIN_UI_HTTP_MODE", "true")
 }
 
+// TestBuildDeployment_UIEnabledSecureNil exercises the nil-guard on UI.Secure
+// at resources.go:289-297. Admission-time CEL enforces Secure non-nil when
+// Enabled=true, but unit-constructed nodes can skip admission — the guard
+// prevents a panic and falls through to the secure-HTTPS default.
+func TestBuildDeployment_UIEnabledSecureNil(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: nil}
+
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVar(t, envVars, "ADMIN_UI_HTTP_MODE", "false")
+}
+
 func TestBuildDeployment_UIDisabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
-	node.Spec.UI = &v1alpha1.UISpec{Enabled: false}
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: false, Secure: ptr.To(true)}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
+	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	assertPortNotExists(t, ports, "admin-ui")
+
+	// ADMIN_UI_HTTP_MODE must not be emitted when UI is disabled. Pins the
+	// behavior change at resources.go:290 — prior code emitted whenever the
+	// UI block existed regardless of Enabled.
+	for _, e := range envVars {
+		if e.Name == "ADMIN_UI_HTTP_MODE" {
+			t.Errorf("ADMIN_UI_HTTP_MODE should not be set when UI is disabled, got %q", e.Value)
+		}
+	}
 }
 
 func TestBuildDeployment_EnvironmentVariables(t *testing.T) {
@@ -541,7 +567,7 @@ func TestBuildDeployment_LoggingNodeOverridesCluster(t *testing.T) {
 func TestBuildService_AdminPorts(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
-	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
 
 	svc := buildService(cluster, node)
 
@@ -565,7 +591,7 @@ func TestBuildService_RuntimePorts(t *testing.T) {
 func TestBuildService_CustomPort(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Service = &v1alpha1.ServiceSpec{Port: 9443}
+	node.Spec.Service = v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 9443}
 
 	svc := buildService(cluster, node)
 
@@ -575,7 +601,7 @@ func TestBuildService_CustomPort(t *testing.T) {
 func TestBuildService_LoadBalancerType(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Service = &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer}
+	node.Spec.Service = v1alpha1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer, Port: 8443}
 
 	svc := buildService(cluster, node)
 
@@ -712,7 +738,7 @@ func TestBuildDeployment_UIEnabled_AutoInjectsPassword(t *testing.T) {
 		},
 	}
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
-	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
@@ -736,7 +762,7 @@ func TestBuildDeployment_UIEnabled_ExplicitPasswordMapping_NoDuplicate(t *testin
 		},
 	}
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
-	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
@@ -757,7 +783,7 @@ func TestBuildDeployment_UIEnabled_NoCredentials_NoPassword(t *testing.T) {
 	// When ui.enabled=true but adminCredentials is nil, no PASSWORD should be injected.
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
-	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
@@ -783,7 +809,7 @@ func TestBuildDeployment_UIDisabled_NoAutoInject(t *testing.T) {
 		},
 	}
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
-	node.Spec.UI = &v1alpha1.UISpec{Enabled: false}
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: false, Secure: ptr.To(true)}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
@@ -852,7 +878,7 @@ func TestBuildDeployment_DefaultedCredentials_InjectsEnvVars(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
-	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env

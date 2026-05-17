@@ -22,6 +22,9 @@ spec:
   identityServerClusterRef:
     name: cfg-ar-cluster
   replicas: 1
+  service:
+    type: ClusterIP
+    port: 6789
 status:
   conditions:
     - type: Ready

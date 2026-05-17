@@ -41,6 +41,13 @@ func testCreateCluster(ns, name string) {
 	Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 }
 
+// defaultTestService returns a minimal valid ServiceSpec for tests that don't
+// care about the specific Type/Port — keeps individual test sites free of the
+// magic 8443 literal.
+func defaultTestService() v1alpha1.ServiceSpec {
+	return v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443}
+}
+
 func testCreateNode(ns, name string, nodeType v1alpha1.NodeType, clusterName string) {
 	node := &v1alpha1.IdentityServerNode{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
@@ -49,6 +56,7 @@ func testCreateNode(ns, name string, nodeType v1alpha1.NodeType, clusterName str
 			Role:                     name + "-role",
 			IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
 			Replicas:                 ptr.To(int32(1)),
+			Service:                  defaultTestService(),
 		},
 	}
 	Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -124,6 +132,10 @@ func newUnstructuredNode(ns, name, role, clusterRef string) *unstructured.Unstru
 				"replicas": int64(1),
 				"identityServerClusterRef": map[string]interface{}{
 					"name": clusterRef,
+				},
+				"service": map[string]interface{}{
+					"type": "ClusterIP",
+					"port": int64(8443),
 				},
 			},
 		},
@@ -619,6 +631,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					Role:                     "role-node-1-role", // same role as role-node-1
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-1"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, dupNode)).To(Succeed())
@@ -658,6 +671,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					Role:                     "stuck-node-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "recovery-cluster"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, dupNode)).To(Succeed())
@@ -770,6 +784,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					Role:                     "shared-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-a"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, nodeA)).To(Succeed())
@@ -781,6 +796,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					Role:                     "shared-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-b"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, nodeB)).To(Succeed())
@@ -1187,6 +1203,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
 					Replicas:                 ptr.To(int32(4)),
 					PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -1211,6 +1228,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
 					Replicas:                 ptr.To(int32(2)),
 					PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -1242,6 +1260,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					Role:                     "admin",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
 					PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -1308,6 +1327,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
 					Replicas:                 ptr.To(int32(2)),
 					PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctxLocal, node)).To(Succeed())
@@ -1459,6 +1479,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					Role:                     nodeName + "-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
 				},
 			}
@@ -1518,6 +1539,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
 					Replicas:                 ptr.To(int32(2)),
 					PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctxLocal, node)).To(Succeed())
@@ -1559,6 +1581,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
 					Replicas:                 ptr.To(int32(2)),
 					PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -1638,6 +1661,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "runtime-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-2"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -1662,6 +1686,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 								Name: "test-admin-secret",
 								Items: []v1alpha1.KeyToPath{
 									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 								},
 							},
 						},
@@ -1703,7 +1729,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "admin",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-default-env"},
 					Replicas:                 ptr.To(int32(1)),
-					UI:                       &v1alpha1.UISpec{Enabled: true},
+					Service:                  defaultTestService(),
+					UI:                       &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)},
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -1779,6 +1806,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 								Name: "",
 								Items: []v1alpha1.KeyToPath{
 									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 								},
 							},
 						},
@@ -1806,8 +1835,523 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				},
 			}
 			err := k8sClient.Create(ctx, cluster)
-			Expect(err).To(HaveOccurred(), "empty Items should be rejected by MinItems=1 validation")
+			Expect(err).To(HaveOccurred(), "empty Items should be rejected by MinItems=3 validation")
 			Expect(err.Error()).To(ContainSubstring("secretKeyRef.items"))
+			Expect(err.Error()).To(ContainSubstring("at least 3 items"))
+		})
+
+		It("should reject cluster with two credential items (boundary)", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-two-items", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: "two-items-secret",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "two-item list is below MinItems=3 boundary")
+			Expect(err.Error()).To(ContainSubstring("secretKeyRef.items"))
+			Expect(err.Error()).To(ContainSubstring("at least 3 items"))
+		})
+
+		It("should reject cluster with four credential items (boundary)", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-four-items", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: "four-items-secret",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD_DUP"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "four-item list exceeds MaxItems=3 boundary")
+			Expect(err.Error()).To(ContainSubstring("secretKeyRef.items"))
+			Expect(err.Error()).To(ContainSubstring("at most 3 items"))
+		})
+
+		It("should reject cluster with three credential items missing KEYSTORE_PASSWORD", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-miss-ks", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: "miss-ks-secret",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD2"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "missing KEYSTORE_PASSWORD must be rejected by CEL rule")
+			Expect(err.Error()).To(ContainSubstring("KEYSTORE_PASSWORD"))
+		})
+
+		It("should reject cluster with three credential items missing ADMIN_PASSWORD", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-miss-ap", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: "miss-ap-secret",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "ENC1"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "ENC2"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "missing ADMIN_PASSWORD must be rejected by CEL rule")
+			Expect(err.Error()).To(ContainSubstring("ADMIN_PASSWORD"))
+		})
+
+		It("should reject cluster with three credential items missing CONFIG_ENCRYPTION_KEY", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-miss-enc", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: "miss-enc-secret",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KS1"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KS2"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "missing CONFIG_ENCRYPTION_KEY must be rejected by CEL rule")
+			Expect(err.Error()).To(ContainSubstring("CONFIG_ENCRYPTION_KEY"))
+		})
+
+		It("should reject cluster with package bearerToken secretRef empty name", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-pkg-empty-name", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source: v1alpha1.PackageSource{
+							URL: "https://example.com/pkg.zip",
+							Auth: &v1alpha1.PackageAuthSpec{
+								BearerToken: &v1alpha1.PackageSecretKeyRef{
+									SecretRef: v1alpha1.PackageSecretKeySelector{Name: "", Key: "token"},
+								},
+							},
+						},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "empty package secretRef name should be rejected by MinLength=1")
+			Expect(err.Error()).To(ContainSubstring("secretRef.name"))
+		})
+
+		It("should reject cluster with package basicAuth empty usernameKey", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-pkg-empty-userkey", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source: v1alpha1.PackageSource{
+							URL: "https://example.com/pkg.zip",
+							Auth: &v1alpha1.PackageAuthSpec{
+								BasicAuth: &v1alpha1.PackageBasicAuthRef{
+									SecretRef: v1alpha1.PackageBasicAuthSelector{
+										Name: "creds", UsernameKey: "", PasswordKey: "pw",
+									},
+								},
+							},
+						},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "empty basicAuth usernameKey should be rejected by MinLength=1")
+			Expect(err.Error()).To(ContainSubstring("usernameKey"))
+		})
+
+		It("should reject cluster with clientCert empty secretRef name", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-pkg-cc-empty-name", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source: v1alpha1.PackageSource{
+							URL: "https://example.com/pkg.zip",
+							TLS: &v1alpha1.PackageTLSSpec{
+								Enabled: true,
+								ClientCert: &v1alpha1.PackageClientCertRef{
+									SecretRef: v1alpha1.PackageClientCertSelector{Name: "", Key: "tls.crt"},
+								},
+							},
+						},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "empty clientCert.secretRef.name should be rejected by MinLength=1")
+			Expect(err.Error()).To(ContainSubstring("clientCert.secretRef.name"))
+		})
+
+		It("should reject cluster with clientCert uppercase secretRef name", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-pkg-cc-uc-name", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source: v1alpha1.PackageSource{
+							URL: "https://example.com/pkg.zip",
+							TLS: &v1alpha1.PackageTLSSpec{
+								Enabled: true,
+								ClientCert: &v1alpha1.PackageClientCertRef{
+									SecretRef: v1alpha1.PackageClientCertSelector{Name: "MyCert", Key: "tls.crt"},
+								},
+							},
+						},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "uppercase clientCert.secretRef.name violates DNS-1123 pattern")
+			Expect(err.Error()).To(ContainSubstring("clientCert.secretRef.name"))
+		})
+
+		It("should reject cluster with clientCert empty secretRef key", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-pkg-cc-empty-key", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source: v1alpha1.PackageSource{
+							URL: "https://example.com/pkg.zip",
+							TLS: &v1alpha1.PackageTLSSpec{
+								Enabled: true,
+								ClientCert: &v1alpha1.PackageClientCertRef{
+									SecretRef: v1alpha1.PackageClientCertSelector{Name: "mtls", Key: ""},
+								},
+							},
+						},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "empty clientCert.secretRef.key should be rejected by MinLength=1")
+			Expect(err.Error()).To(ContainSubstring("clientCert.secretRef.key"))
+		})
+
+		It("should reject cluster with clientCert secretRef name exceeding max length", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-pkg-cc-longname", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source: v1alpha1.PackageSource{
+							URL: "https://example.com/pkg.zip",
+							TLS: &v1alpha1.PackageTLSSpec{
+								Enabled: true,
+								ClientCert: &v1alpha1.PackageClientCertRef{
+									SecretRef: v1alpha1.PackageClientCertSelector{Name: longString(254), Key: "tls.crt"},
+								},
+							},
+						},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "clientCert.secretRef.name >253 chars should be rejected by MaxLength=253")
+			Expect(err.Error()).To(ContainSubstring("clientCert.secretRef.name"))
+		})
+
+		It("should reject cluster with whitespace-only admin secret name", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-ws-name", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: " ",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "whitespace-only Secret name slips past MinLength=1; Pattern must reject")
+			Expect(err.Error()).To(ContainSubstring("secretKeyRef.name"))
+			Expect(err.Error()).To(ContainSubstring("should match"))
+		})
+
+		It("should reject cluster with uppercase admin secret name", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-uc-name", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: "BadName",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "uppercase Secret name violates DNS-1123 pattern")
+			Expect(err.Error()).To(ContainSubstring("secretKeyRef.name"))
+		})
+
+		It("should reject cluster with package URL containing whitespace", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-ws-url", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source:    v1alpha1.PackageSource{URL: "https://exa\tmple.com/x.zip"},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "URL with embedded tab must be rejected by Pattern")
+			Expect(err.Error()).To(ContainSubstring("source.url"))
+		})
+
+		It("should reject cluster with package URL containing embedded credentials", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-creds-url", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source:    v1alpha1.PackageSource{URL: "https://user:pass@host/x.zip"},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "URL with userinfo@authority must be rejected — use structured auth field")
+			Expect(err.Error()).To(ContainSubstring("source.url"))
+		})
+
+		It("should reject cluster with empty items[].path", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-path-empty", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: "s",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: ""},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "ENC"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KS"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "empty path slips past Required; MinLength=1 must reject")
+			Expect(err.Error()).To(ContainSubstring("items"))
+		})
+
+		It("should reject cluster with items[].path containing slash", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-path-slash", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: "s",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "a/b"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "ENC"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KS"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "items.path is an env var name; slash is invalid POSIX shape")
+			Expect(err.Error()).To(ContainSubstring("items"))
+		})
+
+		It("should reject cluster with items[].path starting with digit", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-path-digit", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: "s",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "1starts"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "ENC"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KS"},
+								},
+							},
+						},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "POSIX env var names cannot start with a digit")
+			Expect(err.Error()).To(ContainSubstring("items"))
+		})
+
+		It("should accept cluster with items[].path POSIX-valid forms", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-path-ok", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					AdminCredentials: &v1alpha1.CredentialsSource{
+						ValueFrom: v1alpha1.CredentialsValueFrom{
+							SecretKeyRef: v1alpha1.SecretKeyRefSource{
+								Name: "s",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "_LEADING_UNDERSCORE"},
+									{Key: "KEYSTORE_PASSWORD", Path: "Mixed123Case_OK"},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		})
+
+		It("should reject node with whitespace-only clusterRef name", func() {
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-crws", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeRuntime,
+					Role:                     "crws-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: " "},
+					Service:                  defaultTestService(),
+				},
+			}
+			err := k8sClient.Create(ctx, node)
+			Expect(err).To(HaveOccurred(), "whitespace-only clusterRef.name slips past MinLength=1; Pattern must reject")
+			Expect(err.Error()).To(ContainSubstring("identityServerClusterRef.name"))
+		})
+
+		It("should accept cluster with @ only in URL path", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-at-path", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source:    v1alpha1.PackageSource{URL: "https://host/path@with@at/x.zip"},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed(), "@ in path is fine — only authority-section @ is the security smell")
+		})
+
+		It("should accept cluster with https:// package URL", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-pkg-https", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source:    v1alpha1.PackageSource{URL: "https://example.com/pkg.zip"},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed(), "https:// is accepted")
+		})
+
+		It("should accept cluster with http:// package URL (both schemes supported)", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-pkg-http", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source:    v1alpha1.PackageSource{URL: "http://internal-mirror.svc/pkg.zip"},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed(), "http:// is also accepted — CRD doesn't enforce HTTPS; use NetworkPolicy if needed")
+		})
+
+		It("should reject cluster with non-http(s) URL scheme", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-pkg-ftp", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version: "11.0",
+					Packages: []v1alpha1.PackageSpec{{
+						Source:    v1alpha1.PackageSource{URL: "ftp://example.com/pkg.zip"},
+						MountPath: "/opt/x/",
+					}},
+				},
+			}
+			err := k8sClient.Create(ctx, cluster)
+			Expect(err).To(HaveOccurred(), "ftp:// must be rejected — only http and https are allowed")
+			Expect(err.Error()).To(ContainSubstring("source.url"))
 		})
 
 		// --- Node spec validations ---
@@ -1821,6 +2365,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "bad-type-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-type"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			err := k8sClient.Create(ctx, node)
@@ -1837,6 +2382,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-role"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			err := k8sClient.Create(ctx, node)
@@ -1853,6 +2399,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     longString(64),
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-rolelen"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			err := k8sClient.Create(ctx, node)
@@ -1869,6 +2416,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "Admin-Role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-roleup"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			err := k8sClient.Create(ctx, node)
@@ -1885,6 +2433,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "-bad-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-rolehyp"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			err := k8sClient.Create(ctx, node)
@@ -1900,6 +2449,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "empty-ref-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: ""},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			err := k8sClient.Create(ctx, node)
@@ -1916,11 +2466,96 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "rep-zero-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-rep0"},
 					Replicas:                 ptr.To(int32(0)),
+					Service:                  defaultTestService(),
 				},
 			}
 			err := k8sClient.Create(ctx, node)
 			Expect(err).To(HaveOccurred(), "replicas=0 should be rejected by Minimum=1")
 			Expect(err.Error()).To(ContainSubstring("spec.replicas"))
+		})
+
+		It("should reject admin node with replicas > 1 via CEL", func() {
+			testCreateCluster(ns, "val-cluster-admrep")
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-admin-rep5", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeAdmin,
+					Role:                     "admin-rep5-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-admrep"},
+					Replicas:                 ptr.To(int32(5)),
+					Service:                  defaultTestService(),
+				},
+			}
+			err := k8sClient.Create(ctx, node)
+			Expect(err).To(HaveOccurred(), "admin with replicas>1 must be rejected by CEL — Curity admin is single-active")
+			Expect(err.Error()).To(ContainSubstring("replicas must be 1 for admin-type nodes"))
+		})
+
+		It("should accept admin node with replicas = 1 (boundary)", func() {
+			testCreateCluster(ns, "val-cluster-adm1")
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-admin-rep1", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeAdmin,
+					Role:                     "admin-rep1-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-adm1"},
+					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
+				},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed(), "admin with replicas=1 is the only valid admin value")
+		})
+
+		It("should accept admin node with replicas omitted (default=1 fills in)", func() {
+			testCreateCluster(ns, "val-cluster-admdef")
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-admin-repdef", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeAdmin,
+					Role:                     "admin-repdef-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-admdef"},
+					Service:                  defaultTestService(),
+				},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed(), "default=1 fills in, CEL is satisfied")
+		})
+
+		It("should reject admin node with autoscaling enabled via CEL", func() {
+			testCreateCluster(ns, "val-cluster-admas")
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-admin-as", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeAdmin,
+					Role:                     "admin-as-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-admas"},
+					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
+					Autoscaling: &v1alpha1.AutoscalingSpec{
+						Enabled: true, MinReplicas: 1, MaxReplicas: 5, TargetCPUUtilizationPercentage: 80,
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, node)
+			Expect(err).To(HaveOccurred(), "admin with autoscaling.enabled=true must be rejected — would be silently ignored otherwise")
+			Expect(err.Error()).To(ContainSubstring("autoscaling cannot be enabled on admin-type nodes"))
+		})
+
+		It("should accept admin node with autoscaling block but enabled=false", func() {
+			testCreateCluster(ns, "val-cluster-admasf")
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-admin-asf", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeAdmin,
+					Role:                     "admin-asf-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-admasf"},
+					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
+					Autoscaling: &v1alpha1.AutoscalingSpec{
+						Enabled: false, MinReplicas: 1, MaxReplicas: 1, TargetCPUUtilizationPercentage: 80,
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed(), "explicit autoscaling.enabled=false is fine on admin")
 		})
 
 		// --- Autoscaling validations ---
@@ -1934,6 +2569,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "bad-hpa-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-hpa"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Autoscaling: &v1alpha1.AutoscalingSpec{
 						Enabled:                        true,
 						MinReplicas:                    10,
@@ -1956,6 +2592,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "hpa-eq-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-hpa-eq"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Autoscaling: &v1alpha1.AutoscalingSpec{
 						Enabled:                        true,
 						MinReplicas:                    5,
@@ -1978,7 +2615,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "bad-svc-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-svctype"},
 					Replicas:                 ptr.To(int32(1)),
-					Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceType("InvalidType"), Port: 8443},
+					Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceType("InvalidType"), Port: 8443},
 				},
 			}
 			err := k8sClient.Create(ctx, node)
@@ -2007,7 +2644,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "port-max-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-portmax"},
 					Replicas:                 ptr.To(int32(1)),
-					Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 70000},
+					Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 70000},
 				},
 			}
 			err := k8sClient.Create(ctx, node)
@@ -2026,6 +2663,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "bad-loglvl-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-loglvl"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Logging:                  &v1alpha1.LoggingSpec{Level: "VERBOSE"},
 				},
 			}
@@ -2043,6 +2681,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "bad-logstr-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-logstr"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Logging:                  &v1alpha1.LoggingSpec{Level: "INFO", Logs: []string{"invalid-stream"}},
 				},
 			}
@@ -2060,6 +2699,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "long-logimg-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-logimg"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Logging:                  &v1alpha1.LoggingSpec{Level: "INFO", Image: longString(513)},
 				},
 			}
@@ -2121,6 +2761,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "as-maxhi-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-asmax"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Autoscaling:              &v1alpha1.AutoscalingSpec{Enabled: true, MinReplicas: 1, MaxReplicas: 10001, TargetCPUUtilizationPercentage: 80},
 				},
 			}
@@ -2138,6 +2779,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "cpu101-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-cpu101"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Autoscaling:              &v1alpha1.AutoscalingSpec{Enabled: true, MinReplicas: 1, MaxReplicas: 5, TargetCPUUtilizationPercentage: 101},
 				},
 			}
@@ -2169,6 +2811,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "my-runtime-node-1",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-ok-role"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -2183,7 +2826,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "extname-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-extname"},
 					Replicas:                 ptr.To(int32(1)),
-					Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeExternalName, Port: 8443},
+					Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeExternalName, Port: 8443},
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -2198,6 +2841,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "logok-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-logok"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Logging: &v1alpha1.LoggingSpec{
 						Level: "INFO",
 						Logs:  []string{"audit", "request", "cluster", "confsvc", "confsvc-internal", "post-commit-scripts"},
@@ -2251,6 +2895,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     role63,
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-role63"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -2265,6 +2910,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "rep1-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-rep1"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -2279,7 +2925,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "port-max-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-portbd"},
 					Replicas:                 ptr.To(int32(1)),
-					Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 65535},
+					Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 65535},
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -2294,6 +2940,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "as-boundary-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-asbd"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Autoscaling:              &v1alpha1.AutoscalingSpec{Enabled: true, MinReplicas: 1, MaxReplicas: 10000, TargetCPUUtilizationPercentage: 100},
 				},
 			}
@@ -2309,6 +2956,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "logimg512-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-logimgbd"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Logging:                  &v1alpha1.LoggingSpec{Level: "INFO", Image: longString(512)},
 				},
 			}
@@ -2347,6 +2995,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "tol101-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-tol101"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 					Tolerations:              tols,
 				},
 			}
@@ -2372,12 +3021,154 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                      "tsc33-role",
 					IdentityServerClusterRef:  v1alpha1.ObjectReference{Name: "val-cluster-tsc33"},
 					Replicas:                  ptr.To(int32(1)),
+					Service:                   defaultTestService(),
 					TopologySpreadConstraints: tscs,
 				},
 			}
 			err := k8sClient.Create(ctx, node)
 			Expect(err).To(HaveOccurred(), "topologySpreadConstraints with 33 items should be rejected by MaxItems=32")
 			Expect(err.Error()).To(ContainSubstring("spec.topologySpreadConstraints"))
+		})
+
+		It("should reject admin node UI enabled=true without secure field via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-uisecure")
+			obj := newUnstructuredNode(ns, "node-ui-no-secure", "ui-no-secure-role", "val-cluster-uisecure")
+			_ = unstructured.SetNestedField(obj.Object, "admin", "spec", "type")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"enabled": true,
+			}, "spec", "ui")
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred(), "UI enabled=true without secure should be rejected by CEL rule")
+			Expect(err.Error()).To(ContainSubstring("secure is required when enabled is true"))
+		})
+
+		It("should accept admin node UI enabled=false without secure field via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-uidisabled")
+			obj := newUnstructuredNode(ns, "node-ui-disabled", "ui-disabled-role", "val-cluster-uidisabled")
+			_ = unstructured.SetNestedField(obj.Object, "admin", "spec", "type")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"enabled": false,
+			}, "spec", "ui")
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed(), "UI enabled=false should not require secure")
+		})
+
+		It("should accept admin node UI enabled=true with secure=false (HTTP mode)", func() {
+			// Invariant guard: the CEL rule on UISpec is `!self.enabled || has(self.secure)` —
+			// it checks PRESENCE of secure, not its value. HTTP-mode admin UI is a supported
+			// configuration. Any future tightening of the CEL (e.g. "secure must be true")
+			// must fail this named test, forcing the author to consider whether breaking
+			// HTTP admin UI is intentional.
+			testCreateCluster(ns, "val-cluster-uihttp")
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-ui-http", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeAdmin,
+					Role:                     "ui-http-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-uihttp"},
+					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
+					UI:                       &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(false)},
+				},
+			}
+			Expect(k8sClient.Create(ctx, node)).To(Succeed(), "admin UI with enabled=true + secure=false (HTTP mode) is a valid configuration")
+		})
+
+		It("should reject node with negative PDB minAvailable via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-pdbneg")
+			obj := newUnstructuredNode(ns, "node-pdb-neg", "pdb-neg-role", "val-cluster-pdbneg")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"minAvailable": "-1",
+			}, "spec", "podDisruptionBudget")
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred(), "negative minAvailable should be rejected by Pattern")
+			Expect(err.Error()).To(ContainSubstring("spec.podDisruptionBudget.minAvailable"))
+		})
+
+		It("should reject node with negative integer PDB minAvailable via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-pdbnegint")
+			obj := newUnstructuredNode(ns, "node-pdb-negint", "pdb-negint-role", "val-cluster-pdbnegint")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"minAvailable": int64(-2),
+			}, "spec", "podDisruptionBudget")
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred(), "negative integer minAvailable should be rejected by CEL rule")
+			Expect(err.Error()).To(ContainSubstring("minAvailable must be non-negative"))
+		})
+
+		It("should reject node with non-numeric PDB minAvailable string via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-pdbstr")
+			obj := newUnstructuredNode(ns, "node-pdb-str", "pdb-str-role", "val-cluster-pdbstr")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"minAvailable": "half",
+			}, "spec", "podDisruptionBudget")
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred(), "non-numeric minAvailable should be rejected by Pattern")
+			Expect(err.Error()).To(ContainSubstring("spec.podDisruptionBudget.minAvailable"))
+		})
+
+		It("should accept node with PDB minAvailable integer zero boundary via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-pdbzero")
+			obj := newUnstructuredNode(ns, "node-pdb-zero", "pdb-zero-role", "val-cluster-pdbzero")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"minAvailable": int64(0),
+			}, "spec", "podDisruptionBudget")
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed(), "minAvailable=0 is the non-negative boundary and must be accepted")
+		})
+
+		It("should accept node with PDB minAvailable string 100% boundary via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-pdbpct")
+			obj := newUnstructuredNode(ns, "node-pdb-pct", "pdb-pct-role", "val-cluster-pdbpct")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"minAvailable": "100%",
+			}, "spec", "podDisruptionBudget")
+			Expect(k8sClient.Create(ctx, obj)).To(Succeed(), "minAvailable=100% is a valid percentage and must be accepted")
+		})
+
+		It("should reject service block missing type via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-svcnotype")
+			obj := newUnstructuredNode(ns, "node-svc-notype", "svc-notype-role", "val-cluster-svcnotype")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"port": int64(8443),
+			}, "spec", "service")
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred(), "service without type should be rejected by Required")
+			Expect(err.Error()).To(ContainSubstring("spec.service.type"))
+		})
+
+		It("should reject service block missing port via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-svcnoport")
+			obj := newUnstructuredNode(ns, "node-svc-noport", "svc-noport-role", "val-cluster-svcnoport")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"type": "ClusterIP",
+			}, "spec", "service")
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred(), "service without port should be rejected by Required")
+			Expect(err.Error()).To(ContainSubstring("spec.service.port"))
+		})
+
+		It("should reject ui block missing enabled via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-uinoenabled")
+			obj := newUnstructuredNode(ns, "node-ui-noenabled", "ui-noenabled-role", "val-cluster-uinoenabled")
+			_ = unstructured.SetNestedField(obj.Object, "admin", "spec", "type")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"secure": true,
+			}, "spec", "ui")
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred(), "ui without enabled should be rejected by Required")
+			Expect(err.Error()).To(ContainSubstring("spec.ui.enabled"))
+		})
+
+		It("should reject autoscaling block missing enabled via unstructured", func() {
+			testCreateCluster(ns, "val-cluster-asnoenabled")
+			obj := newUnstructuredNode(ns, "node-as-noenabled", "as-noenabled-role", "val-cluster-asnoenabled")
+			_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+				"minReplicas":                    int64(2),
+				"maxReplicas":                    int64(5),
+				"targetCPUUtilizationPercentage": int64(80),
+			}, "spec", "autoscaling")
+			err := k8sClient.Create(ctx, obj)
+			Expect(err).To(HaveOccurred(), "autoscaling without enabled should be rejected by Required")
+			Expect(err.Error()).To(ContainSubstring("spec.autoscaling.enabled"))
 		})
 	})
 
@@ -2395,6 +3186,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "cc-admin-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cc-cluster"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -2656,8 +3448,12 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					AdminCredentials: &v1alpha1.CredentialsSource{
 						ValueFrom: v1alpha1.CredentialsValueFrom{
 							SecretKeyRef: v1alpha1.SecretKeyRefSource{
-								Name:  "enckey-creds",
-								Items: []v1alpha1.KeyToPath{{Key: "ADMIN_PASSWORD", Path: "PASSWORD"}},
+								Name: "enckey-creds",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
+								},
 							},
 						},
 					},
@@ -2729,8 +3525,12 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					AdminCredentials: &v1alpha1.CredentialsSource{
 						ValueFrom: v1alpha1.CredentialsValueFrom{
 							SecretKeyRef: v1alpha1.SecretKeyRefSource{
-								Name:  "firstkey-creds",
-								Items: []v1alpha1.KeyToPath{{Key: "ADMIN_PASSWORD", Path: "PASSWORD"}},
+								Name: "firstkey-creds",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
+								},
 							},
 						},
 					},
@@ -3021,8 +3821,12 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					AdminCredentials: &v1alpha1.CredentialsSource{
 						ValueFrom: v1alpha1.CredentialsValueFrom{
 							SecretKeyRef: v1alpha1.SecretKeyRefSource{
-								Name:  "wf-enckey-creds",
-								Items: []v1alpha1.KeyToPath{{Key: "ADMIN_PASSWORD", Path: "PASSWORD"}},
+								Name: "wf-enckey-creds",
+								Items: []v1alpha1.KeyToPath{
+									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
+								},
 							},
 						},
 					},
@@ -3323,6 +4127,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Role:                     "block-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-del"},
 					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
 				},
 			}
 			Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -3418,6 +4223,7 @@ var _ = Describe("Deployment scheduling", func() {
 				Role:                     "override-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "override-cluster"},
 				Replicas:                 ptr.To(int32(1)),
+				Service:                  defaultTestService(),
 				NodeSelector:             map[string]string{"pool": "gpu"},
 				Tolerations: []corev1.Toleration{
 					{Key: "new-taint", Operator: corev1.TolerationOpEqual, Value: "yes"},
@@ -3500,6 +4306,7 @@ var _ = Describe("Deployment scheduling", func() {
 				Role:                     "hpa-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-cluster"},
 				Replicas:                 ptr.To(int32(1)),
+				Service:                  defaultTestService(),
 				Autoscaling: &v1alpha1.AutoscalingSpec{
 					Enabled:                        true,
 					MinReplicas:                    2,
@@ -3536,6 +4343,7 @@ var _ = Describe("Deployment scheduling", func() {
 					MaxReplicas:                    10,
 					TargetCPUUtilizationPercentage: 80,
 				},
+				Service: defaultTestService(),
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -3552,38 +4360,11 @@ var _ = Describe("Deployment scheduling", func() {
 		}, 30*time.Second, 250*time.Millisecond).Should(Equal(int32(3)))
 	})
 
-	It("should not create HPA for admin node", func() {
-		testCreateCluster(ns, "hpa-adm-cluster")
-		node := &v1alpha1.IdentityServerNode{
-			ObjectMeta: metav1.ObjectMeta{Name: "hpa-admin", Namespace: ns},
-			Spec: v1alpha1.IdentityServerNodeSpec{
-				Type:                     v1alpha1.NodeTypeAdmin,
-				Role:                     "admin-role",
-				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-adm-cluster"},
-				Replicas:                 ptr.To(int32(1)),
-				Autoscaling: &v1alpha1.AutoscalingSpec{
-					Enabled:                        true,
-					MinReplicas:                    2,
-					MaxReplicas:                    10,
-					TargetCPUUtilizationPercentage: 80,
-				},
-			},
-		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
-		testSimulateClusterConfigReady(ns, "hpa-adm-cluster")
-
-		// Wait for Deployment to confirm reconciliation happened
-		deploy := &appsv1.Deployment{}
-		eventuallyGetResource(ns, ownedName("hpa-adm-cluster", "hpa-admin"), deploy)
-		Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
-
-		// HPA should never be created
-		Consistently(func() bool {
-			return apierrors.IsNotFound(k8sClient.Get(ctx,
-				types.NamespacedName{Name: ownedName("hpa-adm-cluster", "hpa-admin"), Namespace: ns},
-				&autoscalingv2.HorizontalPodAutoscaler{}))
-		}, 5*time.Second, 250*time.Millisecond).Should(BeTrue())
-	})
+	// Note: "admin + autoscaling.enabled=true" is now rejected at admission
+	// by a CEL rule on IdentityServerNodeSpec (see CRD validation tests for
+	// the rejection assertion). The runtime "ignored on admin" path is no
+	// longer reachable via the API; the admission-rejection test supersedes
+	// what this Describe used to cover.
 
 	It("should delete HPA when autoscaling is disabled", func() {
 		testCreateCluster(ns, "hpa-del-cluster")
@@ -3594,6 +4375,7 @@ var _ = Describe("Deployment scheduling", func() {
 				Role:                     "del-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-del-cluster"},
 				Replicas:                 ptr.To(int32(1)),
+				Service:                  defaultTestService(),
 				Autoscaling: &v1alpha1.AutoscalingSpec{
 					Enabled:                        true,
 					MinReplicas:                    2,
@@ -3629,6 +4411,7 @@ var _ = Describe("Deployment scheduling", func() {
 				Role:                     "stale-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-stale-cluster"},
 				Replicas:                 ptr.To(int32(1)),
+				Service:                  defaultTestService(),
 				Autoscaling: &v1alpha1.AutoscalingSpec{
 					Enabled:                        true,
 					MinReplicas:                    2,
@@ -3642,12 +4425,14 @@ var _ = Describe("Deployment scheduling", func() {
 		// Wait for HPA to be created
 		eventuallyGetResource(ns, ownedName("hpa-stale-cluster", "hpa-stale"), &autoscalingv2.HorizontalPodAutoscaler{})
 
-		// Change node type to admin
+		// Change node type to admin. CEL admission rejects admin+autoscaling.enabled=true,
+		// so the type-change update must also disable autoscaling in the same patch.
 		Eventually(func() error {
 			if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hpa-stale", Namespace: ns}, node); err != nil {
 				return err
 			}
 			node.Spec.Type = v1alpha1.NodeTypeAdmin
+			node.Spec.Autoscaling.Enabled = false
 			return k8sClient.Update(ctx, node)
 		}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
 

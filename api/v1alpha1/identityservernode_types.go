@@ -7,7 +7,11 @@ import (
 
 // IdentityServerNodeSpec defines the desired state of IdentityServerNode.
 // Each node creates a Deployment and Service for a Curity Identity Server instance.
+// Admin nodes are single-active by Curity design: replicas must be 1 and
+// autoscaling must not be enabled — both enforced at admission.
 // +kubebuilder:object:generate=true
+// +kubebuilder:validation:XValidation:rule="self.type != 'admin' || self.replicas <= 1",message="replicas must be 1 for admin-type nodes (Curity admin is single-active)"
+// +kubebuilder:validation:XValidation:rule="self.type != 'admin' || !has(self.autoscaling) || !self.autoscaling.enabled",message="autoscaling cannot be enabled on admin-type nodes (Curity admin is single-active)"
 type IdentityServerNodeSpec struct {
 	// Type determines whether this is an admin or runtime node.
 	// Only one admin node is allowed per cluster.
@@ -30,7 +34,8 @@ type IdentityServerNodeSpec struct {
 	IdentityServerClusterRef ObjectReference `json:"identityServerClusterRef"`
 
 	// Replicas is the number of pods (Deployment replicas) for this node.
-	// For admin-type nodes, this is always forced to 1 regardless of the value.
+	// Admin-type nodes are restricted to replicas=1 by the CEL rule on
+	// IdentityServerNodeSpec (Curity admin is single-active).
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10000
@@ -52,8 +57,11 @@ type IdentityServerNodeSpec struct {
 	// Overrides cluster-level probes when set.
 	Probes *ProbeSpec `json:"probes,omitempty"`
 
-	// Service configures the Kubernetes Service for this node.
-	Service *ServiceSpec `json:"service,omitempty"`
+	// Service configures the Kubernetes Service for this node. Required —
+	// Curity inter-node DNS depends on the Service, so every node must declare
+	// its type and port explicitly.
+	// +kubebuilder:validation:Required
+	Service ServiceSpec `json:"service"`
 
 	// EnvironmentVariables are additional environment variables passed to the
 	// Curity container. Uses standard Kubernetes env var format with support

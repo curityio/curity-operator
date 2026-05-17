@@ -12,3 +12,6 @@ spec:
   ui:
     enabled: {{ .uiEnabled }}
     secure: {{ .uiSecure }}
+  service:
+    type: ClusterIP
+    port: 6789

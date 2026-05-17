@@ -9,5 +9,8 @@ spec:
   identityServerClusterRef:
     name: {{ .clusterName }}
   replicas: 1
+  service:
+    type: ClusterIP
+    port: 8443
   podLabels:
     team: identity

@@ -7,6 +7,10 @@ metadata:
   # Namespace where the node workload and related objects are created.
   # +kubebuilder:validation:Required
   namespace: curity
+  # Admin nodes are single-active by Curity design. On admin nodes, replicas
+  # must be 1 and autoscaling must not be enabled — both enforced at admission.
+  # +kubebuilder:validation:XValidation:rule="self.type != 'admin' || self.replicas <= 1",message="replicas must be 1 for admin-type nodes (Curity admin is single-active)"
+  # +kubebuilder:validation:XValidation:rule="self.type != 'admin' || !has(self.autoscaling) || !self.autoscaling.enabled",message="autoscaling cannot be enabled on admin-type nodes (Curity admin is single-active)"
 spec:
   # Node role in the cluster: admin (configuration/UI) or runtime (token/OAuth traffic).
   # Only one admin node is allowed per cluster; all other nodes must be runtime.
@@ -22,13 +26,17 @@ spec:
   role: node-role-1
 
   # Admin UI and REST config API exposure. Required when `type` is `admin`; omit when `type` is `runtime`.
+  # `enabled` is always required when the ui block is present. `secure` is required only when
+  # enabled is true — the CEL rule allows omitting `secure` when the UI is disabled.
   # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:XValidation:rule="!self.enabled || has(self.secure)",message="secure is required when enabled is true"
   ui:
     # When true, the Admin UI is enabled; when false, it is disabled.
     # +kubebuilder:validation:Required
     enabled: true
     # When true, the Admin UI is served over HTTPS; when false, over HTTP.
-    # +kubebuilder:validation:Required
+    # Required only when enabled=true.
+    # +kubebuilder:validation:Optional
     secure: true
 
   # Reference to the IdentityServerCluster that owns configuration and shared settings for this node.
@@ -36,13 +44,17 @@ spec:
   identityServerClusterRef:
     # Name of the IdentityServerCluster resource.
     # +kubebuilder:validation:Required
+    # +kubebuilder:validation:MinLength=1
+    # +kubebuilder:validation:MaxLength=253
+    # +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
     name: cluster-1
     # Namespace of the IdentityServerCluster. Omit or leave empty to use this node’s namespace.
     # +kubebuilder:validation:Optional
     namespace: curity
 
   # Desired number of pods for this node’s Deployment. Runtime nodes often run multiple replicas for scale and availability; admin is typically one.
-  # +kubebuilder:validation:Required
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:default=1
   # +kubebuilder:validation:Minimum=1
   # +kubebuilder:validation:Maximum=10000
   replicas: 1
@@ -80,6 +92,8 @@ spec:
     readiness: {}
 
   # Kubernetes Service that exposes this node’s pods inside the cluster (and optionally outside it).
+  # Required — Curity inter-node DNS depends on the Service, so every node must
+  # declare its type and port explicitly.
   # +kubebuilder:validation:Required
   service:
     # How the Service is exposed (`ClusterIP`, `NodePort`, `LoadBalancer`, or `ExternalName`).
@@ -132,6 +146,7 @@ spec:
   # Horizontal pod autoscaling for this node. Most useful for runtime nodes; admin nodes often leave this disabled.
   # Requires a metrics server (or compatible provider) for CPU- and memory-based scaling. Memory utilization targets are supported when exposed by the operator API.
   # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:XValidation:rule="self.minReplicas <= self.maxReplicas",message="minReplicas must be less than or equal to maxReplicas"
   autoscaling:
     # +kubebuilder:validation:Required
     enabled: true
@@ -158,8 +173,11 @@ spec:
   # +kubebuilder:validation:Optional
   podDisruptionBudget:
     # Minimum pods that must stay available during a disruption (integer or percentage string). Use this or `maxUnavailable`, not both.
+    # Must be non-negative.
     # +kubebuilder:validation:Optional
-    # +kubebuilder:validation:Minimum=0
+    # +kubebuilder:validation:XIntOrString
+    # +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
+    # +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="minAvailable must be non-negative"
     minAvailable: 1
   
   # Restrict this node’s pods to nodes with matching labels.

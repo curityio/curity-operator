@@ -53,6 +53,13 @@ func ownedName(clusterName, nodeName string) string {
 	return controller.OwnedResourceName(clusterName, nodeName)
 }
 
+// defaultTestService returns a minimal valid ServiceSpec for tests that don't
+// care about the specific Type/Port — keeps individual test sites free of the
+// magic 8443 literal.
+func defaultTestService() v1alpha1.ServiceSpec {
+	return v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443}
+}
+
 // e2eHasCfgVolume checks if a Deployment has a volume with the given prefix.
 func e2eHasCfgVolume(deploy *appsv1.Deployment, volumeName string) bool {
 	for _, v := range deploy.Spec.Template.Spec.Volumes {
@@ -458,6 +465,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role-2",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "dup-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node2)).To(Succeed())
@@ -503,6 +511,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "orphan-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "does-not-exist"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -541,6 +550,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "recovery-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "recovery-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -604,6 +614,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "role-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node2)).To(Succeed())
@@ -647,6 +658,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "shared-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "role-cluster-a"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, nodeA)).To(Succeed())
@@ -657,6 +669,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "shared-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "role-cluster-b"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, nodeB)).To(Succeed())
@@ -693,6 +706,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "recover-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, peer)).To(Succeed())
@@ -764,6 +778,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "role-a",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "foo-bar"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, nodeA)).To(Succeed())
@@ -774,6 +789,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "role-b",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "foo"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, nodeB)).To(Succeed())
@@ -794,12 +810,12 @@ var _ = Describe("IdentityServerNode", func() {
 			})
 		})
 
-		Describe("Admin replicas forced to 1", Ordered, func() {
+		Describe("Admin replicas rejected at admission", Ordered, func() {
 			const ns = "e2e-admin-rep"
 			BeforeAll(func() { createNS(ns) })
 			AfterAll(func() { deleteNS(ns) })
 
-			It("should force admin Deployment to 1 replica", func() {
+			It("should reject admin node with replicas > 1 via CEL", func() {
 				ctx := context.Background()
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
 					map[string]interface{}{"name": "rep-cluster", "namespace": ns})
@@ -810,23 +826,26 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "rep-cluster"},
 						Replicas:                 ptr.To(int32(5)),
+						Service:                  defaultTestService(),
+					},
+				}
+				err := k().Create(ctx, node)
+				Expect(err).To(HaveOccurred(), "admin node with replicas=5 must be rejected by CEL")
+				Expect(err.Error()).To(ContainSubstring("replicas must be 1 for admin-type nodes"))
+			})
+
+			It("should accept admin node with replicas = 1 (boundary)", func() {
+				ctx := context.Background()
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "admin-1", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "rep-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
-				utils.SimulateClusterConfigReady(ns, "rep-cluster", e2eTimeout, e2eInterval)
-
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("rep-cluster", "admin-5"), Namespace: ns}}
-				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
-				Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
-
-				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "rep-cluster", Namespace: ns}}
-				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
-				utils.WaitForConditions(node, e2eTimeout, e2eInterval)
-
-				Expect(k().Get(ctx, client.ObjectKey{Name: "rep-cluster", Namespace: ns}, cluster)).To(Succeed())
-				utils.MatchCRDResource(cluster, "rep-cluster")
-				Expect(k().Get(ctx, client.ObjectKey{Name: "admin-5", Namespace: ns}, node)).To(Succeed())
-				utils.MatchCRDResource(node, "admin-5")
 			})
 		})
 
@@ -848,6 +867,7 @@ var _ = Describe("IdentityServerNode", func() {
 							Type: v1alpha1.NodeTypeRuntime, Role: fmt.Sprintf("role-%d", i),
 							IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "multi-cluster"},
 							Replicas:                 ptr.To(int32(1)),
+							Service:                  defaultTestService(),
 						},
 					}
 					Expect(k().Create(ctx, node)).To(Succeed())
@@ -1084,6 +1104,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "log-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "log-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -1144,6 +1165,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "off-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "off-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -1185,6 +1207,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "off-sidecar-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "off-sidecar-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -2210,6 +2233,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeAdmin, Role: "my-admin-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "args-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -2245,6 +2269,7 @@ var _ = Describe("IdentityServerNode", func() {
 						Type: v1alpha1.NodeTypeRuntime, Role: "my-runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "rtargs-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -2506,6 +2531,9 @@ spec:
   identityServerClusterRef:
     name: ovr-cluster
   replicas: 1
+  service:
+    type: ClusterIP
+    port: 8443
   nodeSelector:
     node-pool: gpu
     disk: ssd`, ns)
@@ -2552,6 +2580,7 @@ spec:
 						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 						Autoscaling: &v1alpha1.AutoscalingSpec{
 							Enabled:                        true,
 							MinReplicas:                    2,
@@ -2592,22 +2621,21 @@ spec:
 			BeforeAll(func() { createNS(ns) })
 			AfterAll(func() { deleteNS(ns) })
 
-			It("should not create HPA for admin node even with autoscaling enabled", func() {
+			It("should reject admin node with autoscaling.enabled=true via CEL", func() {
 				ctx := context.Background()
 
 				By("creating cluster")
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
 					map[string]interface{}{"name": "hpa-adm-cluster", "namespace": ns})
-				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "hpa-adm-cluster", Namespace: ns}}
-				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
 
-				By("creating admin node with autoscaling enabled")
+				By("attempting to create admin node with autoscaling enabled (must be rejected)")
 				node := &v1alpha1.IdentityServerNode{
 					ObjectMeta: metav1.ObjectMeta{Name: "hpa-admin", Namespace: ns},
 					Spec: v1alpha1.IdentityServerNodeSpec{
 						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-adm-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 						Autoscaling: &v1alpha1.AutoscalingSpec{
 							Enabled:                        true,
 							MinReplicas:                    2,
@@ -2616,20 +2644,9 @@ spec:
 						},
 					},
 				}
-				Expect(k().Create(ctx, node)).To(Succeed())
-				utils.SimulateClusterConfigReady(ns, "hpa-adm-cluster", e2eTimeout, e2eInterval)
-
-				By("verifying Deployment exists")
-				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-adm-cluster", "hpa-admin"), Namespace: ns}}
-				utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
-				Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
-
-				By("verifying HPA never created")
-				Consistently(func() bool {
-					return apierrors.IsNotFound(k().Get(ctx,
-						client.ObjectKey{Name: ownedName("hpa-adm-cluster", "hpa-admin"), Namespace: ns},
-						&autoscalingv2.HorizontalPodAutoscaler{}))
-				}, 5*time.Second, e2eInterval).Should(BeTrue())
+				err := k().Create(ctx, node)
+				Expect(err).To(HaveOccurred(), "admin with autoscaling.enabled=true must be rejected by CEL — previously silently ignored")
+				Expect(err.Error()).To(ContainSubstring("autoscaling cannot be enabled on admin-type nodes"))
 			})
 		})
 
@@ -2653,6 +2670,7 @@ spec:
 						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-tog-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 						Autoscaling: &v1alpha1.AutoscalingSpec{
 							Enabled:                        true,
 							MinReplicas:                    2,
@@ -2705,6 +2723,7 @@ spec:
 						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-upd-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 						Autoscaling: &v1alpha1.AutoscalingSpec{
 							Enabled:                        true,
 							MinReplicas:                    2,
@@ -2800,6 +2819,7 @@ spec:
 						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-cl-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -2857,6 +2877,7 @@ spec:
 						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-clcm-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -2893,6 +2914,7 @@ spec:
 						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-cust-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 						Autoscaling: &v1alpha1.AutoscalingSpec{
 							Enabled:                        true,
 							MinReplicas:                    2,
@@ -2975,6 +2997,7 @@ spec:
 						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-nr-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 						Autoscaling: &v1alpha1.AutoscalingSpec{
 							Enabled:                        true,
 							MinReplicas:                    2,
@@ -3052,6 +3075,7 @@ spec:
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-cluster"},
 						Replicas:                 ptr.To(int32(3)),
 						PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -3098,6 +3122,7 @@ spec:
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-pct-cluster"},
 						Replicas:                 ptr.To(int32(4)),
 						PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -3136,6 +3161,7 @@ spec:
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-del-cluster"},
 						Replicas:                 ptr.To(int32(2)),
 						PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
+						Service:                  defaultTestService(),
 					},
 				}
 				Expect(k().Create(ctx, node)).To(Succeed())
@@ -3185,6 +3211,7 @@ spec:
 						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-adm-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 						PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
 					},
 				}
@@ -3226,6 +3253,7 @@ spec:
 						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-hpa-cluster"},
 						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
 						Autoscaling: &v1alpha1.AutoscalingSpec{
 							Enabled:                        true,
 							MinReplicas:                    2,

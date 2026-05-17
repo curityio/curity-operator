@@ -12,3 +12,6 @@ spec:
   ui:
     enabled: true
     secure: true
+  service:
+    type: ClusterIP
+    port: 6789

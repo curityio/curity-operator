@@ -123,6 +123,7 @@ type IdentityServerClusterStatus struct {
 // +kubebuilder:printcolumn:name="Ready Nodes",type="integer",JSONPath=".status.readyNodes"
 // +kubebuilder:printcolumn:name="Issues",type="integer",JSONPath=".status.managedResourceIssueCount"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:validation:XValidation:rule="!self.metadata.name.contains('.')",message="cluster name must not contain '.'; the operator derives DNS-1035 Service names from it, and dots are not valid in DNS-1035 labels"
 
 // IdentityServerCluster is the Schema for the identityserverclusters API.
 // It defines cluster-wide shared configuration for Curity Identity Server deployments.

@@ -115,29 +115,46 @@ const (
 
 // ObjectReference identifies a Kubernetes resource by name and namespace.
 type ObjectReference struct {
+	// Name must be a valid DNS-1123 subdomain.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// KeyToPath maps a key in a Secret or ConfigMap to a mount path.
+// KeyToPath maps a Secret key to the env var name projected into the
+// container. Path is the env var Name (not a filesystem path), so it must be
+// a valid POSIX env var identifier: starts with letter or underscore, then
+// alphanumerics or underscore.
 type KeyToPath struct {
 	// +kubebuilder:validation:Required
 	Key string `json:"key"`
 
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
 	Path string `json:"path"`
 }
 
-// SecretKeyRefSource references a Secret with selectable items.
+// SecretKeyRefSource references the admin-credentials Secret. Items must
+// contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY,
+// and KEYSTORE_PASSWORD — these specific keys are what the operator projects
+// into Curity pods.
 type SecretKeyRefSource struct {
+	// Name must be a valid DNS-1123 subdomain Secret name.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
-	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MinItems=3
+	// +kubebuilder:validation:MaxItems=3
+	// +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY') && self.exists_one(i, i.key == 'KEYSTORE_PASSWORD')",message="items must contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD"
 	Items []KeyToPath `json:"items"`
 }
 
@@ -151,26 +168,29 @@ type CredentialsValueFrom struct {
 	SecretKeyRef SecretKeyRefSource `json:"secretKeyRef"`
 }
 
-// UISpec configures the admin UI (admin nodes only).
+// UISpec configures the admin UI (admin nodes only). Enabled is required;
+// secure is required only when enabled is true.
+// +kubebuilder:validation:XValidation:rule="!self.enabled || has(self.secure)",message="secure is required when enabled is true"
 type UISpec struct {
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
+	// +kubebuilder:validation:Required
+	Enabled bool `json:"enabled"`
 
 	// Secure controls whether the admin UI uses HTTPS (true) or HTTP (false).
-	// Defaults to true when not explicitly set.
+	// Required when enabled=true.
 	Secure *bool `json:"secure,omitempty"`
 }
 
-// ServiceSpec configures the Kubernetes Service for the node.
+// ServiceSpec configures the Kubernetes Service for the node. Both type
+// and port are required.
 type ServiceSpec struct {
-	// +kubebuilder:default=ClusterIP
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort;ExternalName
-	Type corev1.ServiceType `json:"type,omitempty"`
+	Type corev1.ServiceType `json:"type"`
 
-	// +kubebuilder:default=8443
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
-	Port int32 `json:"port,omitempty"`
+	Port int32 `json:"port"`
 }
 
 // ProbeSpec configures liveness and readiness probes.
@@ -197,25 +217,27 @@ type ProbeConfig struct {
 	SuccessThreshold *int32 `json:"successThreshold,omitempty"`
 }
 
-// AutoscalingSpec configures horizontal pod autoscaling.
+// AutoscalingSpec configures horizontal pod autoscaling. All four primary
+// fields are required when the block is present; omit the block entirely
+// to disable autoscaling.
 // +kubebuilder:validation:XValidation:rule="self.minReplicas <= self.maxReplicas",message="minReplicas must be less than or equal to maxReplicas"
 type AutoscalingSpec struct {
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
+	// +kubebuilder:validation:Required
+	Enabled bool `json:"enabled"`
 
-	// +kubebuilder:default=2
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
-	MinReplicas int32 `json:"minReplicas,omitempty"`
+	MinReplicas int32 `json:"minReplicas"`
 
-	// +kubebuilder:default=10
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10000
-	MaxReplicas int32 `json:"maxReplicas,omitempty"`
+	MaxReplicas int32 `json:"maxReplicas"`
 
-	// +kubebuilder:default=80
+	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=100
-	TargetCPUUtilizationPercentage int32 `json:"targetCPUUtilizationPercentage,omitempty"`
+	TargetCPUUtilizationPercentage int32 `json:"targetCPUUtilizationPercentage"`
 
 	// CustomMetrics defines additional HPA metrics beyond CPU utilization.
 	// A CPU utilization metric is always included automatically; do not duplicate it here.
@@ -232,7 +254,11 @@ type PDBSpec struct {
 	// during voluntary disruption. Accepts an integer (e.g., 2) or a
 	// percentage string (e.g., "50%"). Matches upstream
 	// policy/v1.PodDisruptionBudgetSpec.MinAvailable.
+	// Pattern catches invalid string forms; CEL catches negative integers
+	// (Pattern does not apply to the int variant of x-kubernetes-int-or-string).
 	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
+	// +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="minAvailable must be non-negative"
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
 }
 
@@ -333,12 +359,16 @@ type PackageSpec struct {
 // for unauthenticated downloads.
 // +kubebuilder:validation:XValidation:rule="!has(self.auth) || ((has(self.auth.basicAuth) ? 1 : 0) + (has(self.auth.bearerToken) ? 1 : 0) == 1)",message="exactly one of auth.basicAuth or auth.bearerToken must be set when auth is configured"
 type PackageSource struct {
-	// URL is the full URL of the ZIP archive to fetch. HTTPS is strongly
-	// recommended; the pattern allows http:// only because the proposal
-	// schema does — production deployments should set NetworkPolicy to
-	// block plain-HTTP egress.
+	// URL is the full HTTP or HTTPS URL of the ZIP archive to fetch.
+	// Both schemes are supported; use NetworkPolicy at the cluster level
+	// to restrict plain-HTTP egress if your deployment requires it.
+	// The pattern also rejects URLs with embedded credentials
+	// (userinfo@host) — use the structured `auth` field instead — and
+	// disallows whitespace or control characters anywhere in the URL.
+	// The tail accepts `/path`, `?query`, or `#fragment` after the host,
+	// so bare-host, query-only and fragment-only URLs all parse.
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Pattern=`^https?://`
+	// +kubebuilder:validation:Pattern=`^https?://[^/@\s]+([/?#][^\s]*)?$`
 	// +kubebuilder:validation:MaxLength=2048
 	URL string `json:"url"`
 
@@ -404,10 +434,13 @@ type PackageSecretKeyRef struct {
 // PackageSecretKeySelector identifies one key inside a Secret.
 type PackageSecretKeySelector struct {
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	Key string `json:"key"`
 }
 
@@ -425,10 +458,13 @@ type PackageClientCertRef struct {
 // "crt" with "key" (so `tls.crt` → `tls.key`).
 type PackageClientCertSelector struct {
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	Key string `json:"key"`
 }
 
@@ -442,14 +478,18 @@ type PackageBasicAuthRef struct {
 // credentials and the keys within it for username and password.
 type PackageBasicAuthSelector struct {
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
 	// UsernameKey is the key in the Secret that holds the username.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	UsernameKey string `json:"usernameKey"`
 
 	// PasswordKey is the key in the Secret that holds the password.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
 	PasswordKey string `json:"passwordKey"`
 }

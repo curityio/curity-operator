@@ -173,7 +173,7 @@ helmify: manifests kustomize helmify-bin yq ## Generate Helm chart from Kustomiz
 	$(KUSTOMIZE) build config/default | $(YQ) 'del(.. | .imagePullSecrets?)' | $(HELMIFY) -image-pull-secrets $(HELM_CHART_DIR)
 	@if [ -n "$(HELMIFY_POSTPROCESS)" ] && [ -x "$(HELMIFY_POSTPROCESS)" ]; then \
 		echo "Running Helm postprocessing..."; \
-		HELM_CHART_DIR=$(HELM_CHART_DIR) $(HELMIFY_POSTPROCESS); \
+		HELM_CHART_DIR=$(HELM_CHART_DIR) YQ=$(YQ) $(HELMIFY_POSTPROCESS); \
 	fi
 
 .PHONY: helm-lint

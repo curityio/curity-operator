@@ -3,6 +3,7 @@ kind: CustomResourceDefinition
 metadata:
   name: identityserverclusters.curity.io
   annotations:
+    helm.sh/resource-policy: '{{ if .Values.crds.keep }}keep{{ end }}'
     controller-gen.kubebuilder.io/version: v0.20.1
   labels:
   {{- include "curity-operator.labels" . | nindent 4 }}

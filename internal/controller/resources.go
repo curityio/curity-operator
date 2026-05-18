@@ -14,6 +14,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
@@ -36,6 +37,13 @@ const (
 	defaultProbeTimeout      = int32(1)
 	defaultProbeFailure      = int32(3)
 	defaultProbeSuccess      = int32(3)
+
+	// Liveness probes only accept SuccessThreshold=1.
+	livenessSuccessThreshold = int32(1)
+
+	// Kube apiserver default for --default-{not-ready,unreachable}-toleration-seconds.
+	// Override at runtime via DEFAULT_TOLERATION_SECONDS env var (cmd/manager).
+	defaultTolerationSeconds = int64(300)
 )
 
 // ownedResourceNameMaxLen caps the output of OwnedResourceName so that K8s's
@@ -68,9 +76,11 @@ func OwnedResourceName(clusterName, nodeName string) string {
 }
 
 // buildDeployment constructs the desired Deployment for an IdentityServerNode.
-// configs contains the validated discovered ConfigMaps/Secrets to mount (may be nil).
-// fetcherImage is the operator-level package init-container image, resolved
-// once at controller construction (see ResolvePackageFetcherImage).
+// fetcherImage is the package init-container image (see ResolvePackageFetcherImage).
+//
+// Fields tagged "// apiserver-default" throughout this file are set explicitly
+// to prevent the reconciler's wholesale `deploy.Spec = desiredDeploy.Spec`
+// assignment from stripping them, causing a drift loop.
 func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode, configs []DiscoveredManagedResource, fetcherImage string) *appsv1.Deployment {
 	labels := buildLabels(cluster, node)
 	podAnnotations := mergeMaps(cluster.Spec.PodAnnotations, node.Spec.PodAnnotations)
@@ -89,6 +99,9 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 		Env:             buildEnvVars(cluster, node),
 		LivenessProbe:   buildLivenessProbe(probes),
 		ReadinessProbe:  buildReadinessProbe(probes),
+		// apiserver-default
+		TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 		// TODO: Add container-level security context in Phase 2
 		// SecurityContext: &corev1.SecurityContext{
 		// 	RunAsNonRoot:             ptr.To(true),
@@ -153,6 +166,15 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 			Selector: &metav1.LabelSelector{
 				MatchLabels: buildSelectorLabels(cluster, node),
 			},
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxSurge:       ptr.To(intstr.FromString("25%")),
+					MaxUnavailable: ptr.To(intstr.FromString("25%")),
+				},
+			},
+			RevisionHistoryLimit:    ptr.To(int32(10)),
+			ProgressDeadlineSeconds: ptr.To(int32(600)),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:      podLabels,
@@ -164,13 +186,24 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 						RunAsGroup: ptr.To(int64(10000)),
 						FSGroup:    ptr.To(int64(10000)),
 					},
-					InitContainers:            buildPackageInitContainers(cluster.Spec.Packages, fetcherImage),
-					Containers:                containers,
-					Volumes:                   volumes,
-					NodeSelector:              resolveNodeSelector(cluster, node),
-					Tolerations:               resolveTolerations(cluster, node),
-					Affinity:                  resolveAffinity(cluster, node),
-					TopologySpreadConstraints: resolveTopologySpreadConstraints(cluster, node),
+					InitContainers:                buildPackageInitContainers(cluster.Spec.Packages, fetcherImage),
+					Containers:                    containers,
+					Volumes:                       volumes,
+					NodeSelector:                  resolveNodeSelector(cluster, node),
+					Tolerations:                   mergeDefaultTolerations(resolveTolerations(cluster, node)),
+					Affinity:                      resolveAffinity(cluster, node),
+					TopologySpreadConstraints:     resolveTopologySpreadConstraints(cluster, node),
+					DNSPolicy:                     corev1.DNSClusterFirst,
+					RestartPolicy:                 corev1.RestartPolicyAlways,
+					SchedulerName:                 corev1.DefaultSchedulerName,
+					TerminationGracePeriodSeconds: ptr.To(int64(30)),
+					// WARNING: Priority is apiserver-derived from PriorityClassName.
+					// If `priorityClassName` is ever exposed on the CRD, remove
+					// this line — otherwise it stomps the resolved Priority and
+					// reintroduces drift. apiserver-default.
+					Priority:           ptr.To(int32(0)),
+					EnableServiceLinks: ptr.To(true),
+					PreemptionPolicy:   ptr.To(corev1.PreemptLowerPriority),
 				},
 			},
 		},
@@ -250,24 +283,25 @@ func buildContainerPorts(node *v1alpha1.IdentityServerNode) []corev1.ContainerPo
 	return ports
 }
 
-// buildServicePorts returns the service ports based on node type.
+// buildServicePorts returns the service ports based on node type. Protocol
+// is set explicitly on every port (apiserver-default; see buildDeployment).
 func buildServicePorts(node *v1alpha1.IdentityServerNode) []corev1.ServicePort {
 	ports := []corev1.ServicePort{
-		{Name: "health-check", Port: portHealthCheck, TargetPort: intstr.FromString("health-check")},
-		{Name: "metrics", Port: portMetrics, TargetPort: intstr.FromString("metrics")},
+		{Name: "health-check", Port: portHealthCheck, TargetPort: intstr.FromString("health-check"), Protocol: corev1.ProtocolTCP},
+		{Name: "metrics", Port: portMetrics, TargetPort: intstr.FromString("metrics"), Protocol: corev1.ProtocolTCP},
 	}
 
 	if node.Spec.Type == v1alpha1.NodeTypeAdmin {
 		ports = append(ports,
-			corev1.ServicePort{Name: "config", Port: portConfig, TargetPort: intstr.FromString("config")},
-			corev1.ServicePort{Name: "ds-port", Port: portDistributedService, TargetPort: intstr.FromString("ds-port")},
+			corev1.ServicePort{Name: "config", Port: portConfig, TargetPort: intstr.FromString("config"), Protocol: corev1.ProtocolTCP},
+			corev1.ServicePort{Name: "ds-port", Port: portDistributedService, TargetPort: intstr.FromString("ds-port"), Protocol: corev1.ProtocolTCP},
 		)
 		if node.Spec.UI != nil && node.Spec.UI.Enabled {
-			ports = append(ports, corev1.ServicePort{Name: "admin-ui", Port: portAdminUI, TargetPort: intstr.FromString("admin-ui")})
+			ports = append(ports, corev1.ServicePort{Name: "admin-ui", Port: portAdminUI, TargetPort: intstr.FromString("admin-ui"), Protocol: corev1.ProtocolTCP})
 		}
 	} else {
 		ports = append(ports,
-			corev1.ServicePort{Name: "http", Port: node.Spec.Service.Port, TargetPort: intstr.FromString("http")},
+			corev1.ServicePort{Name: "http", Port: node.Spec.Service.Port, TargetPort: intstr.FromString("http"), Protocol: corev1.ProtocolTCP},
 		)
 	}
 
@@ -358,6 +392,8 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 					{Key: "cluster.xml", Path: "cluster.xml"},
 				},
 				Optional: ptr.To(true),
+				// apiserver-default
+				DefaultMode: ptr.To(corev1.SecretVolumeSourceDefaultMode),
 			},
 		},
 	})
@@ -384,13 +420,15 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 			continue
 		}
 
+		// apiserver-default
 		volName := configVolumeName(cfg.IsSecret, cfg.Name)
 		if cfg.IsSecret {
 			volumes = append(volumes, corev1.Volume{
 				Name: volName,
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
-						SecretName: cfg.Name,
+						SecretName:  cfg.Name,
+						DefaultMode: ptr.To(corev1.SecretVolumeSourceDefaultMode),
 					},
 				},
 			})
@@ -400,6 +438,7 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{Name: cfg.Name},
+						DefaultMode:          ptr.To(corev1.ConfigMapVolumeSourceDefaultMode),
 					},
 				},
 			})
@@ -535,6 +574,44 @@ func resolveTolerations(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.
 	return cluster.Spec.Tolerations
 }
 
+// DefaultTolerationSeconds is the runtime-overridable seconds value for the
+// not-ready/unreachable defaults. cmd/manager reassigns it from the
+// DEFAULT_TOLERATION_SECONDS env var. Must match the cluster's apiserver
+// flag or the drift loop returns.
+var DefaultTolerationSeconds = defaultTolerationSeconds
+
+// mergeDefaultTolerations appends the two NoExecute tolerations the kube
+// `DefaultTolerationSeconds` admission controller would otherwise add.
+// Matching uses `Toleration.ToleratesTaint` so a user `{Operator: Exists}`
+// is recognised as already covering the defaults (no duplicate appended).
+func mergeDefaultTolerations(user []corev1.Toleration) []corev1.Toleration {
+	defaults := []corev1.Taint{
+		{Key: corev1.TaintNodeNotReady, Effect: corev1.TaintEffectNoExecute},
+		{Key: corev1.TaintNodeUnreachable, Effect: corev1.TaintEffectNoExecute},
+	}
+	logger := klog.Background()
+	out := append([]corev1.Toleration(nil), user...)
+	for i := range defaults {
+		taint := &defaults[i]
+		tolerated := false
+		for j := range user {
+			if user[j].ToleratesTaint(logger, taint, false) {
+				tolerated = true
+				break
+			}
+		}
+		if !tolerated {
+			out = append(out, corev1.Toleration{
+				Key:               taint.Key,
+				Operator:          corev1.TolerationOpExists,
+				Effect:            taint.Effect,
+				TolerationSeconds: ptr.To(DefaultTolerationSeconds),
+			})
+		}
+	}
+	return out
+}
+
 // resolveAffinity returns the effective affinity, preferring node over cluster entirely.
 func resolveAffinity(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *corev1.Affinity {
 	if node.Spec.Affinity != nil {
@@ -579,6 +656,9 @@ func buildLogSidecars(logging *v1alpha1.LoggingSpec) []corev1.Container {
 					ReadOnly:  true,
 				},
 			},
+			// apiserver-default
+			TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+			TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 		}
 		if logging.Resources != nil {
 			sidecar.Resources = *logging.Resources
@@ -602,12 +682,15 @@ func buildLivenessProbe(probes *v1alpha1.ProbeSpec) *corev1.Probe {
 			HTTPGet: &corev1.HTTPGetAction{
 				Path: "/",
 				Port: intstr.FromInt32(portHealthCheck),
+				// apiserver-default
+				Scheme: corev1.URISchemeHTTP,
 			},
 		},
 		InitialDelaySeconds: defaultProbeInitialDelay,
 		PeriodSeconds:       defaultProbePeriod,
 		TimeoutSeconds:      defaultProbeTimeout,
 		FailureThreshold:    defaultProbeFailure,
+		SuccessThreshold:    livenessSuccessThreshold,
 	}
 
 	if probes != nil && probes.Liveness != nil {
@@ -624,6 +707,8 @@ func buildReadinessProbe(probes *v1alpha1.ProbeSpec) *corev1.Probe {
 			HTTPGet: &corev1.HTTPGetAction{
 				Path: "/",
 				Port: intstr.FromInt32(portHealthCheck),
+				// apiserver-default
+				Scheme: corev1.URISchemeHTTP,
 			},
 		},
 		InitialDelaySeconds: defaultProbeInitialDelay,

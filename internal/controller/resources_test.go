@@ -1345,9 +1345,10 @@ func TestBuildDeployment_TolerationsClusterOnly(t *testing.T) {
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
+	// User toleration first, then 2 NoExecute defaults appended.
 	tols := deploy.Spec.Template.Spec.Tolerations
-	if len(tols) != 1 || tols[0].Key != "special" {
-		t.Errorf("expected cluster tolerations, got %v", tols)
+	if len(tols) != 3 || tols[0].Key != "special" {
+		t.Errorf("expected cluster toleration + 2 defaults, got %v", tols)
 	}
 }
 
@@ -1361,8 +1362,8 @@ func TestBuildDeployment_TolerationsNodeOnly(t *testing.T) {
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	tols := deploy.Spec.Template.Spec.Tolerations
-	if len(tols) != 1 || tols[0].Key != "gpu" {
-		t.Errorf("expected node tolerations, got %v", tols)
+	if len(tols) != 3 || tols[0].Key != "gpu" {
+		t.Errorf("expected node toleration + 2 defaults, got %v", tols)
 	}
 }
 
@@ -1380,8 +1381,11 @@ func TestBuildDeployment_TolerationsNodeOverridesCluster(t *testing.T) {
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	tols := deploy.Spec.Template.Spec.Tolerations
-	if len(tols) != 1 || tols[0].Key != "new" {
-		t.Errorf("expected node tolerations to fully replace cluster, got %v", tols)
+	// Node tolerations fully replace cluster tolerations; the two NoExecute
+	// defaults are then appended unconditionally to avoid drift against the
+	// DefaultTolerationSeconds admission controller.
+	if len(tols) != 3 || tols[0].Key != "new" {
+		t.Errorf("expected node tolerations + 2 defaults, got %v", tols)
 	}
 }
 
@@ -1515,8 +1519,13 @@ func TestBuildDeployment_SchedulingNilSafe(t *testing.T) {
 	if deploy.Spec.Template.Spec.NodeSelector != nil {
 		t.Error("expected nil nodeSelector")
 	}
-	if deploy.Spec.Template.Spec.Tolerations != nil {
-		t.Error("expected nil tolerations")
+	// Tolerations always include the two NoExecute defaults that the
+	// DefaultTolerationSeconds admission controller would otherwise add
+	// (not-ready, unreachable). The operator sets them explicitly to avoid
+	// drift on every reconcile.
+	if got := len(deploy.Spec.Template.Spec.Tolerations); got != 2 {
+		t.Errorf("expected 2 default tolerations when user has none, got %d: %+v",
+			got, deploy.Spec.Template.Spec.Tolerations)
 	}
 	if deploy.Spec.Template.Spec.Affinity != nil {
 		t.Error("expected nil affinity")
@@ -2659,4 +2668,164 @@ func TestOwnedResourceName_NoTrailingDash(t *testing.T) {
 			t.Errorf("found double dash before hash suffix in (%q, %q) = %q", tc[0], tc[1], got)
 		}
 	}
+}
+
+// TestMergeDefaultTolerations exercises the two NoExecute defaults injected
+// by mergeDefaultTolerations against the cases the kube apiserver's
+// DefaultTolerationSeconds admission controller cares about. The matching
+// rule must agree with the apiserver's, otherwise we duplicate-write or
+// strip-and-rewrite on every reconcile and reintroduce the drift loop.
+func TestMergeDefaultTolerations(t *testing.T) {
+	notReady := corev1.TaintNodeNotReady
+	unreachable := corev1.TaintNodeUnreachable
+	noExec := corev1.TaintEffectNoExecute
+
+	hasToleration := func(out []corev1.Toleration, key string, effect corev1.TaintEffect) bool {
+		for _, tol := range out {
+			if tol.Key == key && tol.Effect == effect {
+				return true
+			}
+		}
+		return false
+	}
+
+	cases := []struct {
+		name           string
+		in             []corev1.Toleration
+		wantHasDefault map[string]bool // key -> should a default for this key be in the output
+		wantUserKeysIn []string        // user keys that must still be present
+		wantLen        int
+	}{
+		{
+			name:           "nil_input_appends_both_defaults",
+			in:             nil,
+			wantHasDefault: map[string]bool{notReady: true, unreachable: true},
+			wantLen:        2,
+		},
+		{
+			name:           "empty_slice_appends_both_defaults",
+			in:             []corev1.Toleration{},
+			wantHasDefault: map[string]bool{notReady: true, unreachable: true},
+			wantLen:        2,
+		},
+		{
+			name: "user_has_not_ready_already_partial_overlap",
+			in: []corev1.Toleration{
+				{Key: notReady, Operator: corev1.TolerationOpExists, Effect: noExec, TolerationSeconds: ptr.To(int64(600))},
+			},
+			wantHasDefault: map[string]bool{notReady: true, unreachable: true},
+			wantUserKeysIn: []string{notReady},
+			wantLen:        2, // user's not-ready preserved; default unreachable appended
+		},
+		{
+			name: "user_has_unreachable_already_partial_overlap",
+			in: []corev1.Toleration{
+				{Key: unreachable, Operator: corev1.TolerationOpExists, Effect: noExec, TolerationSeconds: ptr.To(int64(900))},
+			},
+			wantHasDefault: map[string]bool{notReady: true, unreachable: true},
+			wantUserKeysIn: []string{unreachable},
+			wantLen:        2,
+		},
+		{
+			name: "user_has_both_no_defaults_appended",
+			in: []corev1.Toleration{
+				{Key: notReady, Operator: corev1.TolerationOpExists, Effect: noExec, TolerationSeconds: ptr.To(int64(60))},
+				{Key: unreachable, Operator: corev1.TolerationOpExists, Effect: noExec, TolerationSeconds: ptr.To(int64(60))},
+			},
+			wantHasDefault: map[string]bool{notReady: true, unreachable: true},
+			wantLen:        2, // both preserved; nothing appended
+		},
+		{
+			name: "operator_exists_with_no_key_tolerates_everything",
+			in: []corev1.Toleration{
+				// Empty Key + Operator=Exists matches all taints regardless of effect.
+				{Operator: corev1.TolerationOpExists},
+			},
+			wantLen: 1, // user's universal toleration covers both; nothing appended
+		},
+		{
+			name: "operator_exists_no_key_with_noexecute_effect",
+			in: []corev1.Toleration{
+				// Empty Key + Operator=Exists + Effect=NoExecute matches all NoExecute taints.
+				{Operator: corev1.TolerationOpExists, Effect: noExec},
+			},
+			wantLen: 1,
+		},
+		{
+			name: "mismatched_effect_does_not_cover_default",
+			in: []corev1.Toleration{
+				// User tolerates not-ready as NoSchedule, not NoExecute — our default
+				// is NoExecute and is NOT tolerated by this entry.
+				{Key: notReady, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+			},
+			wantHasDefault: map[string]bool{notReady: true, unreachable: true},
+			wantUserKeysIn: []string{notReady},
+			wantLen:        3, // user's NoSchedule entry + 2 NoExecute defaults
+		},
+		{
+			name: "unrelated_user_toleration_preserved",
+			in: []corev1.Toleration{
+				{Key: "gpu", Operator: corev1.TolerationOpEqual, Value: "true"},
+			},
+			wantHasDefault: map[string]bool{notReady: true, unreachable: true},
+			wantUserKeysIn: []string{"gpu"},
+			wantLen:        3,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mergeDefaultTolerations(tc.in)
+			if len(got) != tc.wantLen {
+				t.Errorf("len=%d, want %d, got=%+v", len(got), tc.wantLen, got)
+			}
+			for key, wantPresent := range tc.wantHasDefault {
+				if hasToleration(got, key, noExec) != wantPresent {
+					t.Errorf("expected default for key=%q effect=NoExecute present=%v, got %+v", key, wantPresent, got)
+				}
+			}
+			for _, key := range tc.wantUserKeysIn {
+				found := false
+				for _, tol := range got {
+					if tol.Key == key {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected user-supplied key %q to survive merge, got %+v", key, got)
+				}
+			}
+		})
+	}
+
+	// Idempotency: running mergeDefaultTolerations on its own output produces
+	// the same list (no growth, no reordering). Critical: the drift loop
+	// returns the moment this property breaks.
+	t.Run("idempotent_on_own_output", func(t *testing.T) {
+		in := []corev1.Toleration{
+			{Key: "gpu", Operator: corev1.TolerationOpEqual, Value: "true"},
+		}
+		once := mergeDefaultTolerations(in)
+		twice := mergeDefaultTolerations(once)
+		if !reflect.DeepEqual(once, twice) {
+			t.Errorf("not idempotent:\n  once=%+v\n twice=%+v", once, twice)
+		}
+	})
+
+	// DefaultTolerationSeconds package-level variable is honored on each
+	// appended toleration. cmd/manager/main.go sets this from the
+	// DEFAULT_TOLERATION_SECONDS env var; the operator must emit whatever
+	// the cluster's apiserver flags are tuned to or drift will return.
+	t.Run("respects_DefaultTolerationSeconds_package_var", func(t *testing.T) {
+		orig := DefaultTolerationSeconds
+		defer func() { DefaultTolerationSeconds = orig }()
+		DefaultTolerationSeconds = int64(900)
+		got := mergeDefaultTolerations(nil)
+		for _, tol := range got {
+			if tol.TolerationSeconds == nil || *tol.TolerationSeconds != 900 {
+				t.Errorf("default toleration seconds not honored: got %+v", tol.TolerationSeconds)
+			}
+		}
+	})
 }

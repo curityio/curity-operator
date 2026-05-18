@@ -280,6 +280,9 @@ func buildPackageInitContainer(p v1alpha1.PackageSpec, idx int, image string) co
 			AllowPrivilegeEscalation: ptr.To(false),
 			Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		},
+		// apiserver-default
+		TerminationMessagePath:   corev1.TerminationMessagePathDefault,
+		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 	}
 	return c
 }

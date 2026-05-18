@@ -4198,7 +4198,9 @@ var _ = Describe("Deployment scheduling", func() {
 		eventuallyGetResource(ns, ownedName("sched-cluster", "sched-node"), deploy)
 		Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("disk", "ssd"))
 		Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("zone", "us-west"))
-		Expect(deploy.Spec.Template.Spec.Tolerations).To(HaveLen(1))
+		// 1 user-supplied toleration + 2 NoExecute defaults appended by buildDeployment
+		// to match what the DefaultTolerationSeconds admission controller would add.
+		Expect(deploy.Spec.Template.Spec.Tolerations).To(HaveLen(3))
 		Expect(deploy.Spec.Template.Spec.Affinity).NotTo(BeNil())
 		Expect(deploy.Spec.Template.Spec.Affinity.NodeAffinity).NotTo(BeNil())
 	})
@@ -4237,8 +4239,8 @@ var _ = Describe("Deployment scheduling", func() {
 
 		// nodeSelector merges: node wins on conflict
 		Expect(deploy.Spec.Template.Spec.NodeSelector).To(HaveKeyWithValue("pool", "gpu"))
-		// tolerations: node fully replaces cluster
-		Expect(deploy.Spec.Template.Spec.Tolerations).To(HaveLen(1))
+		// tolerations: node fully replaces cluster, then 2 NoExecute defaults are appended.
+		Expect(deploy.Spec.Template.Spec.Tolerations).To(HaveLen(3))
 		Expect(deploy.Spec.Template.Spec.Tolerations[0].Key).To(Equal("new-taint"))
 	})
 

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/spf13/cobra"
 	appsv1 "k8s.io/api/apps/v1"
@@ -58,6 +59,19 @@ func run(cmd *cobra.Command, _ []string) error {
 	log := ctrl.Log.WithName("setup")
 
 	log.Info("starting curity-operator")
+
+	// Override toleration-seconds when the cluster admin has tuned
+	// --default-{not-ready,unreachable}-toleration-seconds away from 300.
+	// Admission doesn't replace operator-supplied tolerations, so a
+	// mismatch silently shortens pod eviction timing on this cluster.
+	if v := os.Getenv("DEFAULT_TOLERATION_SECONDS"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			return fmt.Errorf("DEFAULT_TOLERATION_SECONDS must be a non-negative integer, got %q", v)
+		}
+		controller.DefaultTolerationSeconds = n
+		log.Info("override default toleration seconds from env", "seconds", n)
+	}
 
 	cfg := ctrl.GetConfigOrDie()
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{

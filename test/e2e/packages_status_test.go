@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
@@ -206,20 +207,28 @@ var _ = Describe("packages status visibility (E2E)", Ordered, Label("packages-st
 		// eventually fail, but we don't wait that long — we assert the
 		// PRE-EMPTIVE Pending state shows up within ~5s.
 		By("patching the cluster to add a package referencing the Secret + unreachable URL")
-		c := &v1alpha1.IdentityServerCluster{}
-		Expect(k().Get(ctx, client.ObjectKey{Name: clusterName, Namespace: e2ePackagesNS}, c)).To(Succeed())
-		c.Spec.Packages = []v1alpha1.PackageSpec{{
-			MountPath: "/etc/plugins/p",
-			Source: v1alpha1.PackageSource{
-				URL: "https://example.invalid/x.zip",
-				Auth: &v1alpha1.PackageAuthSpec{
-					BearerToken: &v1alpha1.PackageSecretKeyRef{
-						SecretRef: v1alpha1.PackageSecretKeySelector{Name: secretName, Key: "token"},
+		// Retry on Conflict: the operator's status writer races against this
+		// Update under suite load (other tests in the same namespace leave
+		// CRs that keep the operator reconciling, bumping ResourceVersion
+		// between our Get and Update).
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			c := &v1alpha1.IdentityServerCluster{}
+			if err := k().Get(ctx, client.ObjectKey{Name: clusterName, Namespace: e2ePackagesNS}, c); err != nil {
+				return err
+			}
+			c.Spec.Packages = []v1alpha1.PackageSpec{{
+				MountPath: "/etc/plugins/p",
+				Source: v1alpha1.PackageSource{
+					URL: "https://example.invalid/x.zip",
+					Auth: &v1alpha1.PackageAuthSpec{
+						BearerToken: &v1alpha1.PackageSecretKeyRef{
+							SecretRef: v1alpha1.PackageSecretKeySelector{Name: secretName, Key: "token"},
+						},
 					},
 				},
-			},
-		}}
-		Expect(k().Update(ctx, c)).To(Succeed())
+			}}
+			return k().Update(ctx, c)
+		})).To(Succeed())
 
 		By("within 10s the node transitions to PackagesPending and Ready=False — BEFORE any pod failure")
 		Eventually(func(g Gomega) {

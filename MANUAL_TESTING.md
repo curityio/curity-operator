@@ -53,45 +53,51 @@ make cluster-destroy      # delete the Kind cluster
 
 ---
 
-## 2. Run on a remote/public cluster (AKS / EKS / GKE / on-prem)
+## 2. Run on a cluster
 
-`make deploy-helm` is Kind-only. For a real cluster, build and push to a registry the cluster can pull from, then `helm install` against your kubectl context.
+`make deploy-helm` is Kind-only. For a real cluster, install the published chart and image from GHCR.
 
-### Step 1 — point `kubectl` at the target cluster
+Point `kubectl` at the target cluster first (your user needs cluster-admin for CRDs + RBAC + namespaces):
 
 ```bash
 kubectl config use-context <my-cluster>
 kubectl config current-context        # verify
 ```
 
-Your user needs cluster-admin (CRDs + RBAC + namespaces).
+### Install the published chart from GHCR
 
-### Step 2 — build and push the image
+Installs a tagged release from `oci://ghcr.io/curityio/charts/curity-operator` with the matching image at `ghcr.io/curityio/curity-operator`. No local build required.
 
-```bash
-docker login <registry>                                       # if private
-make docker-build docker-push IMG=<registry>/curity-operator:<tag>
-```
+> **Note:** The chart and image are currently published as **private** GHCR packages. You need a GitHub Personal Access Token (PAT) with `read:packages` scope (create one at <https://github.com/settings/tokens>) for both the Helm login and the pull secret below.
 
-For multi-arch (recommended for production targets that mix arm64/amd64 nodes):
+**Steps:**
 
 ```bash
-make docker-buildx IMG=<registry>/curity-operator:<tag>
+# 1. Authenticate Helm to ghcr.io
+export GHCR_USERNAME=<github-username>
+read -s GHCR_TOKEN                          # paste PAT, hidden input, press enter
+export GHCR_TOKEN
+echo "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+
+# 2. Create the operator namespace
+kubectl create namespace curity-operator
+
+# 3. Create the image pull secret
+kubectl create secret docker-registry ghcr-pull \
+  --docker-server=ghcr.io \
+  --docker-username="$GHCR_USERNAME" \
+  --docker-password="$GHCR_TOKEN" \
+  -n curity-operator
+
+# 4. Install from the OCI chart
+helm install curity-operator \
+  oci://ghcr.io/curityio/charts/curity-operator \
+  --version 0.0.1 \
+  --namespace curity-operator \
+  --set 'imagePullSecrets[0].name=ghcr-pull'
 ```
 
-### Step 3 — install via Helm
-
-```bash
-make helmify                                                  # regen charts/curity-operator/
-helm upgrade --install curity-operator charts/curity-operator \
-  --namespace curity-operator --create-namespace --wait \
-  --set controllerManager.manager.image.repository=<registry>/curity-operator \
-  --set controllerManager.manager.image.tag=<tag>
-```
-
-If the registry is private, ensure a pull secret exists in the `curity-operator` namespace and reference it via the chart's `imagePullSecrets` value.
-
-### Step 4 — verify
+### Verify the install
 
 ```bash
 kubectl -n curity-operator get pods,deploy
@@ -99,12 +105,25 @@ kubectl get crd | grep curity
 kubectl -n curity-operator logs deploy/curity-operator-controller-manager -c manager --tail=50
 ```
 
-### Tear it down
+Expected: `curity-operator-controller-manager` pod `2/2 Running`, plus `identityserverclusters.curity.io` and `identityservernodes.curity.io` CRDs.
+
+### Tear down the remote install
 
 ```bash
 helm uninstall curity-operator -n curity-operator
-kubectl delete crd identityserverclusters.curity.io identityservernodes.curity.io
 kubectl delete namespace curity-operator
+```
+
+`helm uninstall` does **not** delete the Curity CRDs — they ship with `helm.sh/resource-policy: keep` (gated by `crds.keep=true`, default). Existing `IdentityServerCluster` and `IdentityServerNode` resources survive a reinstall. To delete the CRDs and cascade-delete every CR cluster-wide:
+
+```bash
+kubectl delete crd identityserverclusters.curity.io identityservernodes.curity.io
+```
+
+To opt out of the keep behavior at install time (test/throwaway clusters only):
+
+```bash
+helm install ... --set crds.keep=false
 ```
 
 ---

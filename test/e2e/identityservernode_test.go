@@ -2313,7 +2313,7 @@ var _ = Describe("IdentityServerNode", func() {
 
 				rp := deploy.Spec.Template.Spec.Containers[0].ReadinessProbe
 				Expect(rp.HTTPGet.Path).To(Equal("/"))
-				Expect(rp.SuccessThreshold).To(Equal(int32(3)))
+				Expect(rp.SuccessThreshold).To(Equal(int32(1)))
 
 				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "probe-cluster", Namespace: ns}}
 				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)

@@ -89,7 +89,7 @@ func computeNodeConditions(deploy *appsv1.Deployment, generation int64) ([]metav
 		setCondition(&conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue, "PartiallyAvailable",
 			fmt.Sprintf("Only %d/%d replicas ready, but serving traffic", deploy.Status.ReadyReplicas, desired), generation)
 	} else {
-		setCondition(&conditions, v1alpha1.ConditionDegraded, metav1.ConditionFalse, "Healthy", "All replicas are healthy", generation)
+		setCondition(&conditions, v1alpha1.ConditionDegraded, metav1.ConditionFalse, "NotDegraded", "No partial-availability degradation detected", generation)
 	}
 
 	return conditions, rs
@@ -172,7 +172,7 @@ func computeClusterConditions(nodes []v1alpha1.IdentityServerNode, generation in
 	} else if anyDegraded {
 		setCondition(&conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue, "NodeDegraded", "One or more nodes are degraded", generation)
 	} else {
-		setCondition(&conditions, v1alpha1.ConditionDegraded, metav1.ConditionFalse, "Healthy", "Cluster is healthy", generation)
+		setCondition(&conditions, v1alpha1.ConditionDegraded, metav1.ConditionFalse, "NotDegraded", "No partial-availability degradation detected", generation)
 	}
 
 	// PackagesReady rollup: aggregate child-node PackagesReady values into

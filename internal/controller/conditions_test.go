@@ -135,6 +135,49 @@ func TestComputeNodeConditions_ObservedGeneration(t *testing.T) {
 	}
 }
 
+// Regression: the Degraded=False branch at node level must not claim "Healthy"
+// when zero replicas are ready. The condition value is still False (we are not
+// in the partial-availability "degraded" state), but the reason/message must
+// not assert overall health — Ready and Available already signal that.
+func TestComputeNodeConditions_ZeroReady_NotClaimingHealthy(t *testing.T) {
+	deploy := &appsv1.Deployment{
+		Spec:   appsv1.DeploymentSpec{Replicas: ptr.To(int32(2))},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: 0, AvailableReplicas: 0, UpdatedReplicas: 2},
+	}
+
+	conditions, _ := computeNodeConditions(deploy, 1)
+
+	degraded := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionDegraded)
+	if degraded == nil {
+		t.Fatal("Degraded condition not set")
+	}
+	if degraded.Status != metav1.ConditionFalse {
+		t.Errorf("Degraded status = %s, want False", degraded.Status)
+	}
+	if degraded.Reason == "Healthy" {
+		t.Errorf("Degraded reason must not claim 'Healthy' when 0/%d replicas are ready", 2)
+	}
+}
+
+// Locks in the chosen reason name on the Degraded=False branch so a future
+// drive-by rename trips this test.
+func TestComputeNodeConditions_AllReady_ReasonNotDegraded(t *testing.T) {
+	deploy := &appsv1.Deployment{
+		Spec:   appsv1.DeploymentSpec{Replicas: ptr.To(int32(3))},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: 3, AvailableReplicas: 3, UpdatedReplicas: 3},
+	}
+
+	conditions, _ := computeNodeConditions(deploy, 1)
+
+	degraded := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionDegraded)
+	if degraded == nil {
+		t.Fatal("Degraded condition not set")
+	}
+	if degraded.Reason != "NotDegraded" {
+		t.Errorf("Degraded reason = %q, want %q", degraded.Reason, "NotDegraded")
+	}
+}
+
 func TestComputeClusterConditions_AllNodesReady(t *testing.T) {
 	nodes := []v1alpha1.IdentityServerNode{
 		{Spec: v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeAdmin}, Status: v1alpha1.IdentityServerNodeStatus{
@@ -199,6 +242,34 @@ func TestComputeClusterConditions_DegradedNode(t *testing.T) {
 	conditions := computeClusterConditions(nodes, 1)
 
 	assertCondition(t, conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue)
+}
+
+// Regression for the user-reported bug: during bootstrap (nodes exist but none
+// Ready) the cluster-level Degraded=False branch must not announce "Healthy".
+// Ready=False / Available=False / Progressing=True already signal that the
+// cluster is not yet up; Degraded only knows about partial-availability.
+func TestComputeClusterConditions_BootstrapDoesNotClaimHealthy(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		{Spec: v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeAdmin}, Status: v1alpha1.IdentityServerNodeStatus{
+			Conditions: notReadyConditions(),
+		}},
+		{Spec: v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeRuntime}, Status: v1alpha1.IdentityServerNodeStatus{
+			Conditions: notReadyConditions(),
+		}},
+	}
+
+	conditions := computeClusterConditions(nodes, 1)
+
+	assertCondition(t, conditions, v1alpha1.ConditionReady, metav1.ConditionFalse)
+	assertCondition(t, conditions, v1alpha1.ConditionDegraded, metav1.ConditionFalse)
+
+	degraded := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionDegraded)
+	if degraded == nil {
+		t.Fatal("Degraded condition not set")
+	}
+	if degraded.Reason == "Healthy" {
+		t.Errorf("Degraded reason must not claim 'Healthy' while no nodes are Ready")
+	}
 }
 
 // =========================================================================

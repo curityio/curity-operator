@@ -117,7 +117,7 @@ const (
 // must live in the same namespace as the referring object: K8s GC treats
 // OwnerReference as namespace-local, so a cross-namespace controller
 // ownerRef silently cascade-deletes the dependent.
-// +kubebuilder:validation:XValidation:rule="!has(self.__namespace__) || self.__namespace__ == ''",message="cross-namespace references are not supported; omit this field"
+// +kubebuilder:validation:XValidation:rule="!has(self.__namespace__) || size(self.__namespace__) == 0",message="cross-namespace references are not supported; omit this field"
 type ObjectReference struct {
 	// Name must be a valid DNS-1123 subdomain.
 	// +kubebuilder:validation:Required

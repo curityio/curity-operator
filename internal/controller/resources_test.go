@@ -260,8 +260,11 @@ func TestBuildDeployment_ProbeDefaults(t *testing.T) {
 	if liveness.InitialDelaySeconds != 30 {
 		t.Errorf("expected liveness initialDelay 30, got %d", liveness.InitialDelaySeconds)
 	}
-	if readiness.SuccessThreshold != 3 {
-		t.Errorf("expected readiness successThreshold 3, got %d", readiness.SuccessThreshold)
+	if readiness.SuccessThreshold != 1 {
+		t.Errorf("expected readiness successThreshold 1, got %d", readiness.SuccessThreshold)
+	}
+	if liveness.SuccessThreshold != 1 {
+		t.Errorf("expected liveness successThreshold 1, got %d", liveness.SuccessThreshold)
 	}
 }
 
@@ -283,6 +286,31 @@ func TestBuildDeployment_ProbeOverrides(t *testing.T) {
 	// Other fields should keep defaults
 	if liveness.PeriodSeconds != 10 {
 		t.Errorf("expected liveness period 10, got %d", liveness.PeriodSeconds)
+	}
+}
+
+// TestBuildDeployment_LivenessSuccessThresholdCoerced verifies that a
+// user-supplied (or defaulted) SuccessThreshold > 1 on the liveness probe is
+// silently coerced to 1. K8s rejects any other value at admission, so the
+// operator pins this regardless of what the spec says.
+func TestBuildDeployment_LivenessSuccessThresholdCoerced(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Probes = &v1alpha1.ProbeSpec{
+		Liveness:  &v1alpha1.ProbeConfig{SuccessThreshold: ptr.To(int32(5))},
+		Readiness: &v1alpha1.ProbeConfig{SuccessThreshold: ptr.To(int32(5))},
+	}
+
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+	liveness := deploy.Spec.Template.Spec.Containers[0].LivenessProbe
+	readiness := deploy.Spec.Template.Spec.Containers[0].ReadinessProbe
+
+	if liveness.SuccessThreshold != 1 {
+		t.Errorf("liveness SuccessThreshold must be coerced to 1, got %d", liveness.SuccessThreshold)
+	}
+	// Readiness can legitimately take other values — user's 5 stands.
+	if readiness.SuccessThreshold != 5 {
+		t.Errorf("readiness SuccessThreshold honors spec, expected 5 got %d", readiness.SuccessThreshold)
 	}
 }
 

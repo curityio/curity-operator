@@ -213,7 +213,8 @@ type ProbeConfig struct {
 	// +kubebuilder:default=3
 	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
 
-	// +kubebuilder:default=3
+	// Default 1 — K8s rejects livenessProbe.successThreshold != 1.
+	// +kubebuilder:default=1
 	SuccessThreshold *int32 `json:"successThreshold,omitempty"`
 }
 

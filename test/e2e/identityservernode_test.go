@@ -2313,7 +2313,7 @@ var _ = Describe("IdentityServerNode", func() {
 
 				rp := deploy.Spec.Template.Spec.Containers[0].ReadinessProbe
 				Expect(rp.HTTPGet.Path).To(Equal("/"))
-				Expect(rp.SuccessThreshold).To(Equal(int32(3)))
+				Expect(rp.SuccessThreshold).To(Equal(int32(1)))
 
 				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "probe-cluster", Namespace: ns}}
 				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
@@ -3043,6 +3043,187 @@ spec:
 					}
 					return *deploy.Spec.Replicas
 				}, 5*time.Second, e2eInterval).Should(Equal(int32(5)))
+			})
+		})
+
+		// E2 — Lifecycle: foreign HPA → Degraded=HPANotOwned + cluster NodeDegraded;
+		// delete foreign → Degraded clears.
+		Describe("HPA name collision degrades the node", Label("smoke"), Ordered, func() {
+			const ns = "e2e-hpa-collision"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("sets Degraded=HPANotOwned and clears it after the foreign HPA is deleted", func() {
+				ctx := context.Background()
+
+				By("creating cluster")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "hpa-coll-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "hpa-coll-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				const nodeName = "hpa-coll"
+				hpaName := ownedName("hpa-coll-cluster", nodeName)
+
+				By("pre-creating a foreign HPA with the operator's owned name")
+				foreignHPA := &autoscalingv2.HorizontalPodAutoscaler{
+					ObjectMeta: metav1.ObjectMeta{Name: hpaName, Namespace: ns},
+					Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+						ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+							APIVersion: "apps/v1", Kind: "Deployment", Name: "other-deployment",
+						},
+						MinReplicas: ptr.To(int32(1)),
+						MaxReplicas: 3,
+					},
+				}
+				Expect(k().Create(ctx, foreignHPA)).To(Succeed())
+
+				By("creating runtime node WITHOUT autoscaling — cleanup branch runs and detects collision")
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-coll-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("verifying node Degraded=True, reason=HPANotOwned")
+				Eventually(func() string {
+					var fresh v1alpha1.IdentityServerNode
+					if err := k().Get(ctx, client.ObjectKey{Name: nodeName, Namespace: ns}, &fresh); err != nil {
+						return ""
+					}
+					for _, c := range fresh.Status.Conditions {
+						if c.Type == v1alpha1.ConditionDegraded {
+							return c.Reason
+						}
+					}
+					return ""
+				}, e2eTimeout, e2eInterval).Should(Equal("HPANotOwned"))
+
+				By("verifying parent cluster aggregates into Degraded=NodeDegraded")
+				Eventually(func() string {
+					var fresh v1alpha1.IdentityServerCluster
+					if err := k().Get(ctx, client.ObjectKey{Name: "hpa-coll-cluster", Namespace: ns}, &fresh); err != nil {
+						return ""
+					}
+					for _, c := range fresh.Status.Conditions {
+						if c.Type == v1alpha1.ConditionDegraded && c.Status == metav1.ConditionTrue {
+							return c.Reason
+						}
+					}
+					return ""
+				}, e2eTimeout, e2eInterval).Should(Equal("NodeDegraded"))
+
+				By("verifying foreign HPA is unmodified")
+				Consistently(func(g Gomega) {
+					var fresh autoscalingv2.HorizontalPodAutoscaler
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: hpaName, Namespace: ns}, &fresh)).To(Succeed())
+					g.Expect(fresh.Spec.MaxReplicas).To(Equal(int32(3)))
+				}, 5*time.Second, e2eInterval).Should(Succeed())
+
+				By("deleting the foreign HPA and nudging the node")
+				Expect(k().Delete(ctx, foreignHPA)).To(Succeed())
+				// Foreign HPA has no owner-ref to our node; its deletion does
+				// not wake the reconciler. Nudge the node to force a reconcile.
+				Eventually(func() error {
+					var fresh v1alpha1.IdentityServerNode
+					if err := k().Get(ctx, client.ObjectKey{Name: nodeName, Namespace: ns}, &fresh); err != nil {
+						return err
+					}
+					if fresh.Labels == nil {
+						fresh.Labels = map[string]string{}
+					}
+					fresh.Labels["e2e.curity.io/nudge"] = fmt.Sprintf("%d", time.Now().UnixNano())
+					return k().Update(ctx, &fresh)
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+
+				By("verifying node Degraded reason is no longer HPANotOwned")
+				Eventually(func() string {
+					var fresh v1alpha1.IdentityServerNode
+					if err := k().Get(ctx, client.ObjectKey{Name: nodeName, Namespace: ns}, &fresh); err != nil {
+						return ""
+					}
+					for _, c := range fresh.Status.Conditions {
+						if c.Type == v1alpha1.ConditionDegraded {
+							return c.Reason
+						}
+					}
+					return ""
+				}, e2eTimeout, e2eInterval).ShouldNot(Equal("HPANotOwned"))
+			})
+		})
+
+		// E3 — Regression guard: HPAUnsatisfiable does not false-fire on the
+		// default e2e Kind cluster, which has no metrics-server. KCM may or
+		// may not write Status.ObservedGeneration; either way no flood of
+		// Warning events should accumulate during a 10s steady state.
+		Describe("HPAUnsatisfiable does not false-fire on Kind without metrics-server", Label("smoke"), Ordered, func() {
+			const ns = "e2e-hpa-noflood"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("emits at most a small bounded number of HPAUnsatisfiable events", func() {
+				ctx := context.Background()
+
+				By("creating cluster and runtime node with autoscaling")
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "hpa-nf-cluster", "namespace": ns})
+				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "hpa-nf-cluster", Namespace: ns}}
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
+
+				const nodeName = "hpa-noflood"
+				node := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type: v1alpha1.NodeTypeRuntime, Role: "runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-nf-cluster"},
+						Replicas:                 ptr.To(int32(1)),
+						Service:                  defaultTestService(),
+						Autoscaling: &v1alpha1.AutoscalingSpec{
+							Enabled:                        true,
+							MinReplicas:                    2,
+							MaxReplicas:                    10,
+							TargetCPUUtilizationPercentage: 80,
+						},
+					},
+				}
+				Expect(k().Create(ctx, node)).To(Succeed())
+
+				By("waiting for HPA to exist")
+				hpa := &autoscalingv2.HorizontalPodAutoscaler{
+					ObjectMeta: metav1.ObjectMeta{Name: ownedName("hpa-nf-cluster", nodeName), Namespace: ns},
+				}
+				utils.WaitForResource(hpa, e2eTimeout, e2eInterval)
+
+				// Sum Event.Count (K8s dedup folds repeated emits into the
+				// count field). Persistent failure WITHOUT the transition gate
+				// would compound to dozens within 10s; with the gate, the
+				// count stays at most a small handful even if KCM does flag a
+				// failure condition.
+				By("counting HPAUnsatisfiable emits over 10s")
+				countUnsat := func() int {
+					var events corev1.EventList
+					if err := k().List(ctx, &events, client.InNamespace(ns)); err != nil {
+						return -1
+					}
+					total := 0
+					for _, e := range events.Items {
+						if e.InvolvedObject.Name == nodeName && e.Reason == "HPAUnsatisfiable" {
+							if e.Count > 0 {
+								total += int(e.Count)
+							} else {
+								total++
+							}
+						}
+					}
+					return total
+				}
+				Consistently(countUnsat, 10*time.Second, 1*time.Second).Should(BeNumerically("<=", 2),
+					"HPAUnsatisfiable should not flood — the transition gate caps emits at one per failing condition")
 			})
 		})
 	})

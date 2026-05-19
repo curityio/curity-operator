@@ -1908,7 +1908,9 @@ spec:
                         format: int32
                         type: integer
                       successThreshold:
-                        default: 3
+                        default: 1
+                        description: Default 1 — K8s rejects livenessProbe.successThreshold
+                          != 1.
                         format: int32
                         type: integer
                       timeoutSeconds:
@@ -1932,7 +1934,9 @@ spec:
                         format: int32
                         type: integer
                       successThreshold:
-                        default: 3
+                        default: 1
+                        description: Default 1 — K8s rejects livenessProbe.successThreshold
+                          != 1.
                         format: int32
                         type: integer
                       timeoutSeconds:

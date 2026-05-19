@@ -36,7 +36,7 @@ const (
 	defaultProbePeriod       = int32(10)
 	defaultProbeTimeout      = int32(1)
 	defaultProbeFailure      = int32(3)
-	defaultProbeSuccess      = int32(3)
+	defaultProbeSuccess      = int32(1)
 
 	// Liveness probes only accept SuccessThreshold=1.
 	livenessSuccessThreshold = int32(1)
@@ -696,6 +696,9 @@ func buildLivenessProbe(probes *v1alpha1.ProbeSpec) *corev1.Probe {
 	if probes != nil && probes.Liveness != nil {
 		applyProbeConfig(p, probes.Liveness)
 	}
+	// Pin to 1 — K8s rejects any other livenessProbe.successThreshold at
+	// admission. Shared ProbeConfig allows user values for readiness's sake.
+	p.SuccessThreshold = livenessSuccessThreshold
 
 	return p
 }

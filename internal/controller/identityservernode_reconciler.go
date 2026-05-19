@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -16,6 +17,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -34,6 +36,10 @@ import (
 // reach the running idsvr process.
 const annotationManagedConfigsHash = "curity.io/managed-configs-hash"
 
+// HPAHealthGracePeriod gates Gate B for fresh HPAs. Variable (not const) so
+// tests can shorten it; production callers must not mutate at runtime.
+var HPAHealthGracePeriod = time.Minute
+
 // IdentityServerNodeReconciler reconciles an IdentityServerNode object.
 // It creates and manages a Deployment and Service for each node.
 type IdentityServerNodeReconciler struct {
@@ -47,6 +53,62 @@ type IdentityServerNodeReconciler struct {
 	// cmd/manager/main.go) so reconciles never re-read process env.
 	// Empty value falls back to DefaultPackageFetcherImage at use site.
 	PackageFetcherImage string
+
+	// hpaUnsatisfiableSeen gates Gate B emission to per-condition transitions.
+	// Zero value is valid (lazy init).
+	hpaUnsatisfiableSeen hpaUnsatisfiableCache
+}
+
+// Node UID (not name) so a delete+recreate of the same name does not
+// inherit stale transition stamps.
+type hpaCondKey struct {
+	NodeUID  types.UID
+	CondType autoscalingv2.HorizontalPodAutoscalerConditionType
+}
+
+type hpaUnsatisfiableCache struct {
+	mu      sync.Mutex
+	entries map[hpaCondKey]time.Time
+}
+
+// transition returns true when t is strictly newer than the stored stamp
+// for key (or no stamp exists), and updates the stamp as a side effect.
+func (c *hpaUnsatisfiableCache) transition(key hpaCondKey, t time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[hpaCondKey]time.Time)
+	}
+	prev, ok := c.entries[key]
+	if ok && !t.After(prev) {
+		return false
+	}
+	c.entries[key] = t
+	return true
+}
+
+// reap drops entries for nodeUID whose CondType is no longer present-and-False
+// in current — clears the cache on recovery so the next failure re-emits.
+func (c *hpaUnsatisfiableCache) reap(nodeUID types.UID, current []autoscalingv2.HorizontalPodAutoscalerCondition) {
+	failing := make(map[autoscalingv2.HorizontalPodAutoscalerConditionType]struct{}, len(current))
+	for _, cond := range current {
+		if cond.Status != corev1.ConditionFalse {
+			continue
+		}
+		if cond.Type == autoscalingv2.AbleToScale || cond.Type == autoscalingv2.ScalingActive {
+			failing[cond.Type] = struct{}{}
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key := range c.entries {
+		if key.NodeUID != nodeUID {
+			continue
+		}
+		if _, stillFailing := failing[key.CondType]; !stillFailing {
+			delete(c.entries, key)
+		}
+	}
 }
 
 // +kubebuilder:rbac:groups=curity.io,resources=identityservernodes,verbs=get;list;watch;create;update;patch;delete
@@ -533,8 +595,54 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// 7. Reconcile HorizontalPodAutoscaler
-	if node.Spec.Type != v1alpha1.NodeTypeAdmin && as != nil && as.Enabled {
+	isAdmin := node.Spec.Type == v1alpha1.NodeTypeAdmin
+	autoscalingRequested := as != nil && as.Enabled
+
+	// Non-empty when cleanup found a foreign HPA at our owned name.
+	var hpaCollisionName string
+
+	// Resources whose Utilization metric is declared on the HPA but lacks a
+	// matching container request. Drives the Degraded overlay below.
+	var hpaMissingRequestResources []corev1.ResourceName
+
+	// Gate A: admin-with-autoscaling. CEL rejects this for new objects;
+	// this branch only fires for pre-CEL stored data. Emit on Generation
+	// transition only.
+	if isAdmin && autoscalingRequested {
+		log.Info("ignoring autoscaling spec on admin node",
+			"node", node.Name, "minReplicas", as.MinReplicas, "maxReplicas", as.MaxReplicas)
+		if node.Status.ObservedGeneration < node.Generation {
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "AutoscalingIgnored",
+				"Autoscaling spec is set but ignored: HPA is not supported on admin nodes")
+		}
+	}
+
+	if !isAdmin && autoscalingRequested {
 		desiredHPA := buildHPA(&cluster, &node, as)
+
+		// Gate D: pre-flight check for HPA Utilization metrics whose
+		// matching container request is unset. K8s does not enforce this at
+		// admission, so we surface it before KCM's FailedGetResourceMetric.
+		resolvedResources := resolveResources(&cluster, &node)
+		for _, m := range desiredHPA.Spec.Metrics {
+			if m.Type != autoscalingv2.ResourceMetricSourceType || m.Resource == nil {
+				continue
+			}
+			if m.Resource.Target.Type != autoscalingv2.UtilizationMetricType {
+				continue
+			}
+			resName := m.Resource.Name
+			if resolvedResources != nil {
+				if q, ok := resolvedResources.Requests[resName]; ok && !q.IsZero() {
+					continue
+				}
+			}
+			hpaMissingRequestResources = append(hpaMissingRequestResources, resName)
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "HPAMissingResourceRequest",
+				"HPA targets %s Utilization but spec.resources.requests.%s is unset on the node or cluster; HPA will be unable to scale",
+				resName, resName)
+		}
+
 		hpa := &autoscalingv2.HorizontalPodAutoscaler{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      desiredHPA.Name,
@@ -554,33 +662,72 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			r.Recorder.Eventf(&node, corev1.EventTypeNormal, "HPAReconciled",
 				"HorizontalPodAutoscaler %q %s", hpa.Name, result)
 		}
-	} else {
-		// HPA not needed (admin node, autoscaling disabled, or nil) — clean up if stale.
-		var existingHPA autoscalingv2.HorizontalPodAutoscaler
-		if err := r.Get(ctx, client.ObjectKey{
-			Name: OwnedResourceName(cluster.Name, node.Name), Namespace: node.Namespace,
-		}, &existingHPA); err == nil {
-			if !metav1.IsControlledBy(&existingHPA, &node) {
-				log.Info("skipping HPA deletion, not owned by this node", "name", existingHPA.Name)
-				r.Recorder.Eventf(&node, corev1.EventTypeWarning, "HPANotOwned",
-					"HPA %q exists but is not managed by this node; skipping deletion", existingHPA.Name)
-			} else {
-				if err := r.Delete(ctx, &existingHPA); err != nil {
-					if !apierrors.IsNotFound(err) {
-						return ctrl.Result{}, fmt.Errorf("failed to delete HPA: %w", err)
-					}
-				} else {
-					log.Info("HPA deleted", "name", existingHPA.Name)
-					if node.Spec.Type == v1alpha1.NodeTypeAdmin {
-						r.Recorder.Eventf(&node, corev1.EventTypeWarning, "AutoscalingIgnored",
-							"HPA %q deleted: autoscaling is not supported on admin nodes", existingHPA.Name)
-					} else {
-						r.Recorder.Eventf(&node, corev1.EventTypeNormal, "HPADeleted",
-							"HorizontalPodAutoscaler %q deleted", existingHPA.Name)
-					}
+
+		// Gate B: surface KCM's AbleToScale/ScalingActive=False via Warning.
+		// Age-grace skips fresh HPAs whose first KCM conditions are transient
+		// (status.observedGeneration is unreliable on some KCMs, so we don't
+		// use it). Per-(node, cond) cache gates on LastTransitionTime so the
+		// 15s status churn doesn't spam events.
+		if time.Since(hpa.CreationTimestamp.Time) > HPAHealthGracePeriod {
+			// When Gate D fired this reconcile, KCM will emit
+			// FailedGetResourceMetric for the same root cause — skip the
+			// redundant Warning but still stamp the cache so a later
+			// transition (user fixes requests, then breaks them again)
+			// re-emits cleanly.
+			suppressFailedGetResourceMetric := len(hpaMissingRequestResources) > 0
+			for _, c := range hpa.Status.Conditions {
+				if c.Status != corev1.ConditionFalse {
+					continue
+				}
+				if c.Type != autoscalingv2.AbleToScale && c.Type != autoscalingv2.ScalingActive {
+					continue
+				}
+				// ScalingDisabled is a legitimate paused state, not a failure.
+				if c.Reason == "ScalingDisabled" {
+					continue
+				}
+				if suppressFailedGetResourceMetric &&
+					c.Type == autoscalingv2.ScalingActive &&
+					c.Reason == "FailedGetResourceMetric" {
+					r.hpaUnsatisfiableSeen.transition(hpaCondKey{NodeUID: node.UID, CondType: c.Type}, c.LastTransitionTime.Time)
+					continue
+				}
+				key := hpaCondKey{NodeUID: node.UID, CondType: c.Type}
+				if r.hpaUnsatisfiableSeen.transition(key, c.LastTransitionTime.Time) {
+					r.Recorder.Eventf(&node, corev1.EventTypeWarning, "HPAUnsatisfiable",
+						"HorizontalPodAutoscaler %q cannot scale: %s=%s reason=%s message=%q",
+						hpa.Name, c.Type, c.Status, c.Reason, c.Message)
 				}
 			}
-		} else if !apierrors.IsNotFound(err) {
+			r.hpaUnsatisfiableSeen.reap(node.UID, hpa.Status.Conditions)
+		}
+	} else {
+		// Cleanup branch — autoscaling disabled or admin. Delete owned HPA
+		// or surface a foreign collision via Degraded.
+		var existingHPA autoscalingv2.HorizontalPodAutoscaler
+		err := r.Get(ctx, client.ObjectKey{
+			Name: OwnedResourceName(cluster.Name, node.Name), Namespace: node.Namespace,
+		}, &existingHPA)
+		switch {
+		case err == nil && !metav1.IsControlledBy(&existingHPA, &node):
+			log.Info("skipping HPA deletion, not owned by this node", "name", existingHPA.Name)
+			hpaCollisionName = existingHPA.Name
+			// Emit every reconcile; K8s server-side Event dedup folds repeats
+			// into one Event with incrementing count and fresh lastTimestamp.
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "HPANotOwned",
+				"HPA %q exists but is not managed by this node; skipping deletion", existingHPA.Name)
+		case err == nil:
+			if delErr := r.Delete(ctx, &existingHPA); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("failed to delete HPA: %w", delErr)
+			}
+			log.Info("HPA deleted", "name", existingHPA.Name)
+			// Gate A above already covered AutoscalingIgnored for the admin
+			// case; emit Normal HPADeleted uniformly here.
+			r.Recorder.Eventf(&node, corev1.EventTypeNormal, "HPADeleted",
+				"HorizontalPodAutoscaler %q deleted", existingHPA.Name)
+		case apierrors.IsNotFound(err):
+			// No HPA exists — nothing to clean up.
+		default:
 			return ctrl.Result{}, fmt.Errorf("failed to get HPA: %w", err)
 		}
 	}
@@ -588,7 +735,6 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// 8. Reconcile PodDisruptionBudget (runtime nodes only, when minAvailable is set).
 	pdbSpec := resolvePDB(&cluster, &node)
 	pdbRequested := pdbSpec != nil && pdbSpec.MinAvailable != nil
-	isAdmin := node.Spec.Type == v1alpha1.NodeTypeAdmin
 
 	// Admin guard: log + event whenever PDB is requested on an admin node, regardless
 	// of whether a stale PDB exists. K8s Event server-side dedup absorbs repeats.
@@ -701,6 +847,27 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// just confirmed absent in the new slice.
 	if priorPackagesReady != nil {
 		node.Status.Conditions = append(node.Status.Conditions, *priorPackagesReady)
+	}
+
+	// HPA/PDB Degraded overlays — applied in this order so the PDB collision
+	// (applied last below) wins when a node has both.
+	if hpaCollisionName != "" {
+		setCondition(&node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
+			"HPANotOwned",
+			fmt.Sprintf("A HorizontalPodAutoscaler named %q exists but is not owned by this node", hpaCollisionName),
+			node.Generation)
+	}
+
+	if len(hpaMissingRequestResources) > 0 {
+		names := make([]string, len(hpaMissingRequestResources))
+		for i, n := range hpaMissingRequestResources {
+			names[i] = string(n)
+		}
+		joined := strings.Join(names, ", ")
+		setCondition(&node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
+			"HPAMissingResourceRequest",
+			fmt.Sprintf("HPA targets %s Utilization but spec.resources.requests is unset for: %s — HPA will be unable to scale", joined, joined),
+			node.Generation)
 	}
 
 	// Overlay PDB-specific Degraded condition after computeNodeConditions, which

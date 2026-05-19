@@ -38,6 +38,11 @@ func TestController(t *testing.T) {
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
+	// Disable the post-creation grace period in tests — every test HPA is
+	// freshly created, and we cannot meaningfully wait the production 1min.
+	// Individual specs that need the grace can opt back in.
+	controller.HPAHealthGracePeriod = 0
+
 	ctx, cancel = context.WithCancel(context.Background())
 
 	testEnv = &envtest.Environment{

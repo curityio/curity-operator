@@ -747,6 +747,39 @@ func applyProbeConfig(probe *corev1.Probe, config *v1alpha1.ProbeConfig) {
 	}
 }
 
+var operatorLabelPrefixes = []string{
+	"app.kubernetes.io/",
+	"curity.io/",
+}
+
+// mergeManagedLabels returns desired overlaid onto existing, preserving any
+// existing keys whose prefix is not operator-owned. Use in CreateOrUpdate
+// mutators so user- or GitOps-added labels survive reconciles.
+func mergeManagedLabels(existing, desired map[string]string) map[string]string {
+	if existing == nil && desired == nil {
+		return nil
+	}
+	out := make(map[string]string, len(existing)+len(desired))
+	for k, v := range existing {
+		if !isOperatorOwnedLabel(k) {
+			out[k] = v
+		}
+	}
+	for k, v := range desired {
+		out[k] = v
+	}
+	return out
+}
+
+func isOperatorOwnedLabel(key string) bool {
+	for _, p := range operatorLabelPrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // mergeMaps merges two maps, with values from the override map taking precedence.
 func mergeMaps(base, override map[string]string) map[string]string {
 	if base == nil && override == nil {

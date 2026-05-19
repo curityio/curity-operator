@@ -343,7 +343,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: desiredSvc.Name, Namespace: desiredSvc.Namespace}}
 
 	svcResult, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		svc.Labels = desiredSvc.Labels
+		svc.Labels = mergeManagedLabels(svc.Labels, desiredSvc.Labels)
 		svc.Spec.Type = desiredSvc.Spec.Type
 		svc.Spec.Selector = desiredSvc.Spec.Selector
 		svc.Spec.Ports = desiredSvc.Spec.Ports
@@ -536,7 +536,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		currentReplicas := deploy.Spec.Replicas
 		existingConfigHash := deploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
 
-		deploy.Labels = desiredDeploy.Labels
+		deploy.Labels = mergeManagedLabels(deploy.Labels, desiredDeploy.Labels)
 		deploy.Spec = desiredDeploy.Spec
 
 		// Preserve cluster-config-hash if the desired Deployment doesn't set one.
@@ -650,7 +650,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			},
 		}
 		result, err = controllerutil.CreateOrUpdate(ctx, r.Client, hpa, func() error {
-			hpa.Labels = desiredHPA.Labels
+			hpa.Labels = mergeManagedLabels(hpa.Labels, desiredHPA.Labels)
 			hpa.Spec = desiredHPA.Spec
 			return controllerutil.SetControllerReference(&node, hpa, r.Scheme)
 		})
@@ -756,7 +756,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			ObjectMeta: metav1.ObjectMeta{Name: desiredPDB.Name, Namespace: desiredPDB.Namespace},
 		}
 		result, err = controllerutil.CreateOrUpdate(ctx, r.Client, existingPDB, func() error {
-			existingPDB.Labels = desiredPDB.Labels
+			existingPDB.Labels = mergeManagedLabels(existingPDB.Labels, desiredPDB.Labels)
 			existingPDB.Spec = desiredPDB.Spec
 			return controllerutil.SetControllerReference(&node, existingPDB, r.Scheme)
 		})

@@ -2296,6 +2296,41 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(err.Error()).To(ContainSubstring("identityServerClusterRef.name"))
 		})
 
+		// Cross-namespace clusterRef is rejected because K8s GC treats
+		// OwnerReference as namespace-local: a node with a controller
+		// ownerRef to a foreign-namespace cluster is silently cascade-
+		// deleted by the garbage collector when the UID is not found in
+		// the dependent's namespace.
+		It("should reject node with cross-namespace clusterRef.namespace", func() {
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-crns-foreign", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeRuntime,
+					Role:                     "crns-foreign-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "c", Namespace: "other-ns"},
+					Service:                  defaultTestService(),
+				},
+			}
+			err := k8sClient.Create(ctx, node)
+			Expect(err).To(HaveOccurred(), "cross-namespace clusterRef.namespace must be rejected — K8s GC would cascade-delete the node")
+			Expect(err.Error()).To(ContainSubstring("cross-namespace references are not supported"))
+		})
+
+		It("should reject node with same-namespace clusterRef.namespace (any non-empty value)", func() {
+			node := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "node-crns-same", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeRuntime,
+					Role:                     "crns-same-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "c", Namespace: ns},
+					Service:                  defaultTestService(),
+				},
+			}
+			err := k8sClient.Create(ctx, node)
+			Expect(err).To(HaveOccurred(), "any non-empty namespace is rejected; the field has no legitimate use")
+			Expect(err.Error()).To(ContainSubstring("cross-namespace references are not supported"))
+		})
+
 		It("should accept cluster with @ only in URL path", func() {
 			cluster := &v1alpha1.IdentityServerCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: "cluster-at-path", Namespace: ns},

@@ -340,13 +340,8 @@ func (r *IdentityServerClusterReconciler) findClusterForNode(ctx context.Context
 	}
 
 	clusterRef := node.Spec.IdentityServerClusterRef
-	ns := clusterRef.Namespace
-	if ns == "" {
-		ns = node.Namespace
-	}
-
 	requests := []ctrl.Request{
-		{NamespacedName: client.ObjectKey{Name: clusterRef.Name, Namespace: ns}},
+		{NamespacedName: client.ObjectKey{Name: clusterRef.Name, Namespace: node.Namespace}},
 	}
 
 	if owner := metav1.GetControllerOf(node); owner != nil &&

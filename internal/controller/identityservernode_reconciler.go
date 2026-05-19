@@ -125,13 +125,8 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 4. Fetch the referenced IdentityServerCluster
 	// (clusterRef was already extracted in step 3)
-	clusterNS := clusterRef.Namespace
-	if clusterNS == "" {
-		clusterNS = node.Namespace
-	}
-
 	var cluster v1alpha1.IdentityServerCluster
-	if err := r.Get(ctx, client.ObjectKey{Name: clusterRef.Name, Namespace: clusterNS}, &cluster); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Name: clusterRef.Name, Namespace: node.Namespace}, &cluster); err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Info("referenced cluster not found", "cluster", clusterRef.Name)
 			setCondition(&node.Status.Conditions, v1alpha1.ConditionClusterReady, metav1.ConditionFalse,
@@ -148,7 +143,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 				return ctrl.Result{}, fmt.Errorf("failed to update status: %w", statusErr)
 			}
 			r.Recorder.Eventf(&node, corev1.EventTypeWarning, v1alpha1.ReasonClusterNotFound,
-				"Referenced IdentityServerCluster %q not found in namespace %q", clusterRef.Name, clusterNS)
+				"Referenced IdentityServerCluster %q not found in namespace %q", clusterRef.Name, node.Namespace)
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get IdentityServerCluster: %w", err)

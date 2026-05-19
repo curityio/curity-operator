@@ -653,6 +653,114 @@ func TestMergeMaps(t *testing.T) {
 	}
 }
 
+func TestMergeManagedLabels(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing map[string]string
+		desired  map[string]string
+		expected map[string]string
+	}{
+		{
+			name:     "both nil",
+			existing: nil,
+			desired:  nil,
+			expected: nil,
+		},
+		{
+			name:     "nil existing, desired only",
+			existing: nil,
+			desired:  map[string]string{"app.kubernetes.io/name": "curity-identity-server"},
+			expected: map[string]string{"app.kubernetes.io/name": "curity-identity-server"},
+		},
+		{
+			name:     "foreign keys preserved",
+			existing: map[string]string{"monitoring": "prometheus", "team": "identity"},
+			desired:  map[string]string{"app.kubernetes.io/name": "curity-identity-server"},
+			expected: map[string]string{
+				"app.kubernetes.io/name": "curity-identity-server",
+				"monitoring":             "prometheus",
+				"team":                   "identity",
+			},
+		},
+		{
+			name: "operator keys overwritten, foreign preserved",
+			existing: map[string]string{
+				"app.kubernetes.io/version":   "10.0.0",
+				"curity.io/role":              "stale",
+				"argocd.argoproj.io/instance": "my-app",
+			},
+			desired: map[string]string{
+				"app.kubernetes.io/version": "11.2.0",
+				"curity.io/role":            "primary",
+			},
+			expected: map[string]string{
+				"app.kubernetes.io/version":   "11.2.0",
+				"curity.io/role":              "primary",
+				"argocd.argoproj.io/instance": "my-app",
+			},
+		},
+		{
+			name:     "stale operator key dropped when not in desired",
+			existing: map[string]string{"curity.io/legacy": "x", "foo": "bar"},
+			desired:  map[string]string{"app.kubernetes.io/name": "curity-identity-server"},
+			expected: map[string]string{
+				"app.kubernetes.io/name": "curity-identity-server",
+				"foo":                    "bar",
+			},
+		},
+		{
+			name:     "empty desired keeps only foreign existing",
+			existing: map[string]string{"app.kubernetes.io/name": "x", "team": "id"},
+			desired:  map[string]string{},
+			expected: map[string]string{"team": "id"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeManagedLabels(tt.existing, tt.desired)
+			if tt.expected == nil {
+				if got != nil {
+					t.Fatalf("expected nil, got %v", got)
+				}
+				return
+			}
+			if len(got) != len(tt.expected) {
+				t.Fatalf("length mismatch: expected %d (%v), got %d (%v)",
+					len(tt.expected), tt.expected, len(got), got)
+			}
+			for k, v := range tt.expected {
+				if got[k] != v {
+					t.Errorf("key %q: expected %q, got %q", k, v, got[k])
+				}
+			}
+		})
+	}
+}
+
+func TestIsOperatorOwnedLabel(t *testing.T) {
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"app.kubernetes.io/name", true},
+		{"app.kubernetes.io/", true},
+		{"curity.io/cluster", true},
+		{"curity.io/", true},
+		{"monitoring", false},
+		{"argocd.argoproj.io/instance", false},
+		{"app.kubernetes.iox/name", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			if got := isOperatorOwnedLabel(tt.key); got != tt.want {
+				t.Errorf("isOperatorOwnedLabel(%q) = %v, want %v", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildDeployment_AdminCredentialsEnvVarUsesPath(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{

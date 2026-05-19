@@ -852,6 +852,86 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 		})
 	})
 
+	Context("Label preservation", func() {
+		It("preserves foreign labels on Service across reconciles", func() {
+			testCreateCluster(ns, "lbl-cluster")
+			testCreateNode(ns, "lbl-node", v1alpha1.NodeTypeRuntime, "lbl-cluster")
+
+			svc := &corev1.Service{}
+			eventuallyGetResource(ns, ownedName("lbl-cluster", "lbl-node"), svc)
+
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				current := &corev1.Service{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("lbl-cluster", "lbl-node"), Namespace: ns}, current); err != nil {
+					return err
+				}
+				if current.Labels == nil {
+					current.Labels = map[string]string{}
+				}
+				current.Labels["monitoring"] = "prometheus"
+				current.Labels["argocd.argoproj.io/instance"] = "my-app"
+				current.Labels["app.kubernetes.io/version"] = "hijacked"
+				return k8sClient.Update(ctx, current)
+			})).To(Succeed())
+
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lbl-node", Namespace: ns}, node); err != nil {
+					return err
+				}
+				node.Spec.Replicas = ptr.To(int32(2))
+				return k8sClient.Update(ctx, node)
+			})).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("lbl-cluster", "lbl-node"), Namespace: ns}, svc)).To(Succeed())
+				g.Expect(svc.Labels).To(HaveKeyWithValue("monitoring", "prometheus"))
+				g.Expect(svc.Labels).To(HaveKeyWithValue("argocd.argoproj.io/instance", "my-app"))
+				g.Expect(svc.Labels).To(HaveKeyWithValue("app.kubernetes.io/version", "11.0"))
+				g.Expect(svc.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "curity-operator"))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("preserves foreign labels on Deployment across reconciles", func() {
+			testCreateCluster(ns, "lbl-cluster")
+			testCreateNode(ns, "lbl-node", v1alpha1.NodeTypeRuntime, "lbl-cluster")
+
+			deploy := &appsv1.Deployment{}
+			eventuallyGetResource(ns, ownedName("lbl-cluster", "lbl-node"), deploy)
+
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				current := &appsv1.Deployment{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("lbl-cluster", "lbl-node"), Namespace: ns}, current); err != nil {
+					return err
+				}
+				if current.Labels == nil {
+					current.Labels = map[string]string{}
+				}
+				current.Labels["monitoring"] = "prometheus"
+				current.Labels["argocd.argoproj.io/instance"] = "my-app"
+				return k8sClient.Update(ctx, current)
+			})).To(Succeed())
+
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "lbl-node", Namespace: ns}, node); err != nil {
+					return err
+				}
+				node.Spec.Replicas = ptr.To(int32(2))
+				return k8sClient.Update(ctx, node)
+			})).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("lbl-cluster", "lbl-node"), Namespace: ns}, deploy)).To(Succeed())
+				g.Expect(deploy.Spec.Replicas).ToNot(BeNil())
+				g.Expect(*deploy.Spec.Replicas).To(Equal(int32(2)))
+				g.Expect(deploy.Labels).To(HaveKeyWithValue("monitoring", "prometheus"))
+				g.Expect(deploy.Labels).To(HaveKeyWithValue("argocd.argoproj.io/instance", "my-app"))
+				g.Expect(deploy.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "curity-operator"))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	Context("Config discovery", func() {
 		It("should mount validated base ConfigMap on Deployment", func() {
 			testCreateCluster(ns, "cfg-cluster")

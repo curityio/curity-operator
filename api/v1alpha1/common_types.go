@@ -47,6 +47,12 @@ const (
 	// is False — the package-fetch failure delegates to the PackagesReady
 	// condition for the detailed message.
 	ReasonPackagesNotReady = "PackagesNotReady"
+
+	// ReasonInvalidSpec is set on ConditionDegraded (True) and ConditionReady
+	// (False) when the apiserver rejects a child-resource write with HTTP 422
+	// (apierrors.IsInvalid). Only a CR spec edit can resolve this; the
+	// reconciler does not requeue.
+	ReasonInvalidSpec = "InvalidSpec"
 )
 
 // Reason values for ConditionPackagesReady (set by the pre-check leg or the

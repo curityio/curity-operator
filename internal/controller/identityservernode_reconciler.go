@@ -350,6 +350,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return controllerutil.SetControllerReference(&node, svc, r.Scheme)
 	})
 	if err != nil {
+		if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, "Service", err); handled {
+			return res, statusErr
+		}
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile Service: %w", err)
 	}
 	if svcResult != controllerutil.OperationResultNone {
@@ -561,6 +564,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return controllerutil.SetControllerReference(&node, deploy, r.Scheme)
 	})
 	if err != nil {
+		if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, "Deployment", err); handled {
+			return res, statusErr
+		}
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile Deployment: %w", err)
 	}
 	if result != controllerutil.OperationResultNone {
@@ -655,6 +661,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return controllerutil.SetControllerReference(&node, hpa, r.Scheme)
 		})
 		if err != nil {
+			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, "HPA", err); handled {
+				return res, statusErr
+			}
 			return ctrl.Result{}, fmt.Errorf("failed to reconcile HPA: %w", err)
 		}
 		if result != controllerutil.OperationResultNone {
@@ -761,6 +770,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return controllerutil.SetControllerReference(&node, existingPDB, r.Scheme)
 		})
 		if err != nil {
+			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, "PDB", err); handled {
+				return res, statusErr
+			}
 			return ctrl.Result{}, fmt.Errorf("failed to reconcile PDB: %w", err)
 		}
 		if result != controllerutil.OperationResultNone {

@@ -828,6 +828,99 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 		})
 	})
 
+	// Regression for the invalid-spec retry storm: a CR with podLabels that
+	// the apiserver rejects must surface Degraded=InvalidSpec instead of
+	// hot-looping silently. On `main` before the fix, Degraded stayed False
+	// indefinitely and the operator logged 41 errors in 10 min for one CR.
+	Context("InvalidSpec — permanent error classification", func() {
+		It("should set Degraded=InvalidSpec when podLabels are syntactically invalid", func() {
+			testCreateCluster(ns, "is-cluster")
+			testCreateNode(ns, "is-admin", v1alpha1.NodeTypeAdmin, "is-cluster")
+			testSimulateClusterConfigReady(ns, "is-cluster")
+			eventuallyGetResource(ns, ownedName("is-cluster", "is-admin"), &appsv1.Deployment{})
+
+			badNode := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "is-rt", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeRuntime,
+					Role:                     "is-rt-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "is-cluster"},
+					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
+					PodLabels:                map[string]string{"bad/label": "with spaces and !"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, badNode)).To(Succeed())
+
+			Eventually(func() string {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "is-rt", Namespace: ns}, node); err != nil {
+					return ""
+				}
+				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
+			}, timeout, interval).Should(Equal(v1alpha1.ReasonInvalidSpec))
+
+			node := &v1alpha1.IdentityServerNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "is-rt", Namespace: ns}, node)).To(Succeed())
+			Expect(hasCondition(node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue)).To(BeTrue())
+			Expect(hasCondition(node.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse)).To(BeTrue())
+			Expect(conditionReason(node.Status.Conditions, v1alpha1.ConditionReady)).To(Equal(v1alpha1.ReasonInvalidSpec))
+
+			// No Deployment should have been created for the bad-spec runtime node.
+			Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("is-cluster", "is-rt"), Namespace: ns}, &appsv1.Deployment{}))).To(BeTrue())
+		})
+
+		It("should clear Degraded=InvalidSpec after the spec is fixed", func() {
+			testCreateCluster(ns, "isf-cluster")
+			testCreateNode(ns, "isf-admin", v1alpha1.NodeTypeAdmin, "isf-cluster")
+			testSimulateClusterConfigReady(ns, "isf-cluster")
+			eventuallyGetResource(ns, ownedName("isf-cluster", "isf-admin"), &appsv1.Deployment{})
+
+			badNode := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "isf-rt", Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeRuntime,
+					Role:                     "isf-rt-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "isf-cluster"},
+					Replicas:                 ptr.To(int32(1)),
+					Service:                  defaultTestService(),
+					PodLabels:                map[string]string{"bad/label": "with spaces and !"},
+				},
+			}
+			Expect(k8sClient.Create(ctx, badNode)).To(Succeed())
+
+			By("waiting for Degraded=InvalidSpec on the bad spec")
+			Eventually(func() string {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "isf-rt", Namespace: ns}, node); err != nil {
+					return ""
+				}
+				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
+			}, timeout, interval).Should(Equal(v1alpha1.ReasonInvalidSpec))
+
+			By("patching to a valid podLabels value")
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "isf-rt", Namespace: ns}, node); err != nil {
+					return err
+				}
+				node.Spec.PodLabels = map[string]string{"team": "identity"}
+				return k8sClient.Update(ctx, node)
+			})).To(Succeed())
+
+			By("expecting Degraded to leave InvalidSpec and the Deployment to be created")
+			Eventually(func() string {
+				node := &v1alpha1.IdentityServerNode{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "isf-rt", Namespace: ns}, node); err != nil {
+					return ""
+				}
+				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
+			}, timeout, interval).ShouldNot(Equal(v1alpha1.ReasonInvalidSpec))
+
+			eventuallyGetResource(ns, ownedName("isf-cluster", "isf-rt"), &appsv1.Deployment{})
+		})
+	})
+
 	Context("Updates", func() {
 		It("should update Deployment when replicas change", func() {
 			testCreateCluster(ns, "cluster-1")

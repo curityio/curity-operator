@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -67,6 +68,60 @@ func (r *IdentityServerNodeReconciler) handlePermanentWriteError(
 
 	r.Recorder.Eventf(node, corev1.EventTypeWarning, v1alpha1.ReasonInvalidSpec,
 		"%s rejected by apiserver: %s", resourceKind, msg)
+
+	return ctrl.Result{}, true, nil
+}
+
+// handlePermanentWriteError classifies an apiserver IsInvalid write error
+// as a permanent spec error: sets Degraded=True/InvalidSpec, emits one event,
+// returns handled=true. Operational conditions are deliberately left alone
+// (they observe pod state, not spec validity).
+func (r *IdentityServerClusterReconciler) handlePermanentWriteError(
+	ctx context.Context,
+	cluster *v1alpha1.IdentityServerCluster,
+	writeErr error,
+) (ctrl.Result, bool, error) {
+	if !apierrors.IsInvalid(writeErr) {
+		return ctrl.Result{}, false, nil
+	}
+
+	// Extract apiserver text directly to skip the fmt.Errorf wrap that
+	// sub-helpers (ensureAdminCredentialsSecret, ensureClusterConfig) apply
+	// — otherwise the condition message ends up doubly-prefixed.
+	var statusErr *apierrors.StatusError
+	if !errors.As(writeErr, &statusErr) || statusErr == nil {
+		return ctrl.Result{}, false, nil
+	}
+
+	kind := "Resource"
+	if statusErr.ErrStatus.Details != nil && statusErr.ErrStatus.Details.Kind != "" {
+		kind = statusErr.ErrStatus.Details.Kind
+	}
+	apiMsg := truncateReplicaFailureMessage(statusErr.ErrStatus.Message)
+
+	degChanged := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             v1alpha1.ReasonInvalidSpec,
+		Message:            fmt.Sprintf("%s rejected by apiserver: %s", kind, apiMsg),
+		ObservedGeneration: cluster.Generation,
+	})
+
+	if !degChanged {
+		return ctrl.Result{}, true, nil
+	}
+
+	cluster.Status.ObservedGeneration = cluster.Generation
+
+	if err := r.Status().Update(ctx, cluster); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, true, nil
+		}
+		return ctrl.Result{}, true, fmt.Errorf("updating status after invalid %s: %w", kind, err)
+	}
+
+	r.Recorder.Eventf(cluster, corev1.EventTypeWarning, v1alpha1.ReasonInvalidSpec,
+		"%s rejected by apiserver: %s", kind, apiMsg)
 
 	return ctrl.Result{}, true, nil
 }

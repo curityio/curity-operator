@@ -117,6 +117,9 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		log.Info("defaulting adminCredentials", "secretName", cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name)
 	}
 	if err := r.ensureAdminCredentialsSecret(ctx, &cluster); err != nil {
+		if res, handled, helperErr := r.handlePermanentWriteError(ctx, &cluster, err); handled {
+			return res, helperErr
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -128,6 +131,9 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 
 	// 5. Ensure cluster config (cluster.xml via genclust Job)
 	if err := r.ensureClusterConfig(ctx, &cluster, childNodes); err != nil {
+		if res, handled, helperErr := r.handlePermanentWriteError(ctx, &cluster, err); handled {
+			return res, helperErr
+		}
 		return ctrl.Result{}, err
 	}
 	// If logs aren't readable yet, requeue with backoff instead of relying

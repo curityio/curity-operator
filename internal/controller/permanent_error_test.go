@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -285,4 +286,333 @@ func tail(s string, n int) string {
 		return s
 	}
 	return s[len(s)-n:]
+}
+
+// ============================================================================
+// Cluster-side helper tests
+// ============================================================================
+
+func newClusterReconcilerForHelperTest(t *testing.T, cluster *v1alpha1.IdentityServerCluster, statusUpdateErr error) (*IdentityServerClusterReconciler, *record.FakeRecorder) {
+	t.Helper()
+	s := newScheme(t)
+	if err := v1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("adding v1alpha1 to scheme: %v", err)
+	}
+
+	builder := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(cluster).
+		WithStatusSubresource(&v1alpha1.IdentityServerCluster{})
+
+	if statusUpdateErr != nil {
+		builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if subResourceName == "status" {
+					return statusUpdateErr
+				}
+				return c.Status().Update(ctx, obj, opts...)
+			},
+		})
+	}
+
+	rec := record.NewFakeRecorder(8)
+	return &IdentityServerClusterReconciler{
+		Client:   builder.Build(),
+		Scheme:   s,
+		Recorder: rec,
+	}, rec
+}
+
+func freshTestCluster() *v1alpha1.IdentityServerCluster {
+	return &v1alpha1.IdentityServerCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "c-1",
+			Namespace:  "ns",
+			Generation: 5,
+		},
+	}
+}
+
+// invalidErrForKind builds an apierrors.NewInvalid for an arbitrary Kind,
+// so cluster-side tests can simulate Secret rejection (admin creds path)
+// AND Job rejection (genclust path) from the same factory.
+func invalidErrForKind(kind, name, message string) error {
+	gk := schema.GroupKind{Kind: kind}
+	return apierrors.NewInvalid(gk, name, field.ErrorList{
+		field.Invalid(field.NewPath("metadata", "name"), name, message),
+	})
+}
+
+// T-1.
+func TestClusterHandlePermanentWriteError_IsInvalid_FlipsDegraded(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, rec := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	res, handled, err := r.handlePermanentWriteError(ctx, cluster,
+		invalidErrForKind("Secret", "bad..secret..name", "must be DNS-1123 subdomain"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if res != (ctrl.Result{}) {
+		t.Errorf("expected zero Result, got %+v", res)
+	}
+
+	deg := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionDegraded)
+	if deg == nil || deg.Status != metav1.ConditionTrue || deg.Reason != v1alpha1.ReasonInvalidSpec {
+		t.Errorf("Degraded condition wrong: %+v", deg)
+	}
+	if deg != nil && !strings.Contains(deg.Message, "Secret rejected by apiserver:") {
+		t.Errorf("Degraded message lacks expected prefix: %q", deg.Message)
+	}
+	if deg != nil && strings.Contains(deg.Message, "failed to create") {
+		t.Errorf("Degraded message contains operator-wrap text: %q", deg.Message)
+	}
+	if deg != nil && deg.ObservedGeneration != 5 {
+		t.Errorf("Degraded ObservedGeneration = %d, want 5", deg.ObservedGeneration)
+	}
+
+	// Assert no operational conditions written.
+	for _, condType := range []string{v1alpha1.ConditionReady, v1alpha1.ConditionAvailable, v1alpha1.ConditionProgressing, v1alpha1.ConditionClusterConfigReady} {
+		if c := apimeta.FindStatusCondition(cluster.Status.Conditions, condType); c != nil {
+			t.Errorf("helper must not write %s, got: %+v", condType, c)
+		}
+	}
+
+	if cluster.Status.ObservedGeneration != 5 {
+		t.Errorf("top-level ObservedGeneration = %d, want 5", cluster.Status.ObservedGeneration)
+	}
+
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, "Warning "+v1alpha1.ReasonInvalidSpec) {
+			t.Errorf("unexpected event: %q", ev)
+		}
+	default:
+		t.Error("expected one Warning event, got none")
+	}
+}
+
+// T-2. Regression test for the operator-wrap unwrap behavior.
+func TestClusterHandlePermanentWriteError_IsInvalid_FromWrappedError(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	raw := invalidErrForKind("Secret", "bad..secret..name", "must be DNS-1123 subdomain")
+	wrapped := fmt.Errorf("failed to create admin credentials secret: %w", raw)
+
+	_, handled, err := r.handlePermanentWriteError(ctx, cluster, wrapped)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true (IsInvalid unwraps via %w)")
+	}
+
+	deg := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionDegraded)
+	if deg == nil {
+		t.Fatal("Degraded not set")
+	}
+	if strings.Contains(deg.Message, "failed to create admin credentials secret") {
+		t.Errorf("operator wrap leaked into condition message: %q", deg.Message)
+	}
+	if !strings.Contains(deg.Message, "bad..secret..name") {
+		t.Errorf("apiserver detail missing from message: %q", deg.Message)
+	}
+}
+
+// T-3.
+func TestClusterHandlePermanentWriteError_IsConflict_NotHandled(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	conflictErr := apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, "x", errors.New("the object has been modified"))
+
+	_, handled, err := r.handlePermanentWriteError(ctx, cluster, conflictErr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if handled {
+		t.Error("expected handled=false for IsConflict")
+	}
+	if len(cluster.Status.Conditions) != 0 {
+		t.Errorf("expected no conditions touched, got: %+v", cluster.Status.Conditions)
+	}
+}
+
+// T-4.
+func TestClusterHandlePermanentWriteError_IsNotFound_NotHandled(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	nfErr := apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, "x")
+
+	_, handled, err := r.handlePermanentWriteError(ctx, cluster, nfErr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if handled {
+		t.Error("expected handled=false for IsNotFound")
+	}
+}
+
+// T-5.
+func TestClusterHandlePermanentWriteError_GenericError_NotHandled(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	_, handled, err := r.handlePermanentWriteError(ctx, cluster, errors.New("network blip"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if handled {
+		t.Error("expected handled=false for generic error")
+	}
+}
+
+// T-6.
+func TestClusterHandlePermanentWriteError_TruncatesLongMessage(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	longMsg := strings.Repeat("x", replicaFailureMessageMaxLen+500)
+
+	_, handled, err := r.handlePermanentWriteError(ctx, cluster,
+		invalidErrForKind("Secret", "n", longMsg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+
+	deg := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionDegraded)
+	if deg == nil {
+		t.Fatal("Degraded not set")
+	}
+	if !strings.Contains(deg.Message, "(truncated") {
+		t.Errorf("expected truncation indicator; got tail: %q", tail(deg.Message, 80))
+	}
+}
+
+// T-7. Regression test for the Layer-2 self-trigger defense.
+func TestClusterHandlePermanentWriteError_NoChange_SkipsWrite(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+
+	preErr := invalidErrForKind("Secret", "bad..secret..name", "must be DNS-1123 subdomain")
+	var preStatusErr *apierrors.StatusError
+	if !errors.As(preErr, &preStatusErr) {
+		t.Fatal("test setup: errors.As on NewInvalid output should succeed")
+	}
+	preApiMsg := truncateReplicaFailureMessage(preStatusErr.ErrStatus.Message)
+	apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             v1alpha1.ReasonInvalidSpec,
+		Message:            "Secret rejected by apiserver: " + preApiMsg,
+		ObservedGeneration: 5,
+	})
+	cluster.Status.ObservedGeneration = 5
+
+	// Status updater would error if invoked — proves the helper skips the call.
+	r, rec := newClusterReconcilerForHelperTest(t, cluster, errors.New("status update must not be called"))
+
+	_, handled, err := r.handlePermanentWriteError(ctx, cluster, preErr)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+
+	select {
+	case ev := <-rec.Events:
+		t.Errorf("expected no event on no-change, got: %s", ev)
+	default:
+	}
+}
+
+// T-8.
+func TestClusterHandlePermanentWriteError_StatusConflict_RequeueTrue(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+
+	statusConflictErr := apierrors.NewConflict(schema.GroupResource{Group: "curity.io", Resource: "identityserverclusters"}, "c-1", errors.New("status conflict"))
+
+	r, rec := newClusterReconcilerForHelperTest(t, cluster, statusConflictErr)
+
+	res, handled, err := r.handlePermanentWriteError(ctx, cluster,
+		invalidErrForKind("Secret", "bad..secret..name", "anything"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if res != (ctrl.Result{Requeue: true}) {
+		t.Errorf("expected Requeue:true, got %+v", res)
+	}
+
+	select {
+	case ev := <-rec.Events:
+		t.Errorf("expected no event when status update conflicted, got: %s", ev)
+	default:
+	}
+}
+
+// T-9.
+func TestClusterHandlePermanentWriteError_StatusNonConflictError_Bubbles(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+
+	apiDownErr := errors.New("connection refused")
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, apiDownErr)
+
+	_, handled, err := r.handlePermanentWriteError(ctx, cluster,
+		invalidErrForKind("Secret", "n", "anything"))
+	if !handled {
+		t.Fatal("expected handled=true even on bubbled error")
+	}
+	if err == nil {
+		t.Fatal("expected wrapped status error to bubble")
+	}
+	if !errors.Is(err, apiDownErr) {
+		t.Errorf("expected wrapped %v; got: %v", apiDownErr, err)
+	}
+}
+
+// T-10. Kind comes from the structured error, not a hardcoded string.
+func TestClusterHandlePermanentWriteError_KindFromJob(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	_, handled, err := r.handlePermanentWriteError(ctx, cluster,
+		invalidErrForKind("Job", "long-cluster-name-genclust", "invalid"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+
+	deg := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionDegraded)
+	if deg == nil {
+		t.Fatal("Degraded not set")
+	}
+	if !strings.Contains(deg.Message, "Job rejected by apiserver:") {
+		t.Errorf("Kind label is wrong; want 'Job', got message: %q", deg.Message)
+	}
+	if strings.Contains(deg.Message, "Secret rejected by apiserver:") {
+		t.Errorf("Kind label leaked from another test; got: %q", deg.Message)
+	}
 }

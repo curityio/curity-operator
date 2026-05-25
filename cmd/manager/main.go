@@ -11,9 +11,12 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -82,6 +85,23 @@ func run(cmd *cobra.Command, _ []string) error {
 		},
 		LeaderElection:   leaderElect,
 		LeaderElectionID: "curity-operator-leader",
+		// Scope the Event informer server-side so the cache holds only
+		// Warning FailedCreate Events on Jobs — the cluster reconciler uses
+		// these to surface genclust pod-admission failures. Unscoped Event
+		// watching is a documented anti-pattern (Events on a busy cluster
+		// reach tens of thousands of objects); the field selector keeps the
+		// cache to ~tens of KB.
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Event{}: {
+					Field: fields.SelectorFromSet(fields.Set{
+						"type":                "Warning",
+						"reason":              "FailedCreate",
+						"involvedObject.kind": "Job",
+					}),
+				},
+			},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create manager: %w", err)

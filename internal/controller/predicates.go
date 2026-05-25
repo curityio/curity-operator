@@ -395,6 +395,150 @@ func equalInitContainerStatus(a, b *corev1.ContainerStatus) bool {
 	return equalContainerState(a.LastTerminationState, b.LastTerminationState)
 }
 
+// clusterConfigPodChangedPredicate filters Pod events down to genclust Job
+// pods (label curity.io/component=cluster-config) whose status delta
+// matters for admission/scheduling/pull classification. Drops Create (no
+// status yet), passes Delete (Pod going away is recovery-relevant), passes
+// Update only when Phase, PodScheduled condition, container Waiting/
+// Terminated state, or RestartCount transitioned.
+type clusterConfigPodChangedPredicate struct {
+	predicate.Funcs
+}
+
+func (p clusterConfigPodChangedPredicate) Create(_ event.CreateEvent) bool {
+	return false
+}
+
+func (p clusterConfigPodChangedPredicate) Delete(e event.DeleteEvent) bool {
+	return isClusterConfigPod(e.Object)
+}
+
+func (p clusterConfigPodChangedPredicate) Generic(_ event.GenericEvent) bool {
+	return false
+}
+
+func (p clusterConfigPodChangedPredicate) Update(e event.UpdateEvent) bool {
+	if e.ObjectOld == nil || e.ObjectNew == nil {
+		return false
+	}
+	newPod, ok := e.ObjectNew.(*corev1.Pod)
+	if !ok {
+		return false
+	}
+	if !isClusterConfigPod(newPod) {
+		return false
+	}
+	oldPod, ok := e.ObjectOld.(*corev1.Pod)
+	if !ok {
+		return false
+	}
+	return clusterConfigPodStatusDiffers(oldPod, newPod)
+}
+
+func isClusterConfigPod(obj client.Object) bool {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod == nil {
+		return false
+	}
+	return pod.Labels["curity.io/component"] == "cluster-config"
+}
+
+// clusterConfigPodStatusDiffers reports whether two snapshots of a
+// cluster-config Pod differ on the fields the translator inspects: Phase,
+// the PodScheduled condition, and the genclust container's
+// State/LastTerminationState/RestartCount.
+func clusterConfigPodStatusDiffers(oldPod, newPod *corev1.Pod) bool {
+	if oldPod.Status.Phase != newPod.Status.Phase {
+		return true
+	}
+	if !equalPodScheduledCondition(oldPod.Status.Conditions, newPod.Status.Conditions) {
+		return true
+	}
+	oldByName := indexContainerStatusesByName(oldPod.Status.ContainerStatuses)
+	for i := range newPod.Status.ContainerStatuses {
+		newStat := &newPod.Status.ContainerStatuses[i]
+		if newStat.Name != "genclust" {
+			continue
+		}
+		oldStat, found := oldByName[newStat.Name]
+		if !found {
+			return true
+		}
+		if !equalInitContainerStatus(oldStat, newStat) {
+			return true
+		}
+	}
+	return false
+}
+
+func equalPodScheduledCondition(oldConds, newConds []corev1.PodCondition) bool {
+	oldCond := findPodCondition(oldConds, corev1.PodScheduled)
+	newCond := findPodCondition(newConds, corev1.PodScheduled)
+	if oldCond == nil && newCond == nil {
+		return true
+	}
+	if oldCond == nil || newCond == nil {
+		return false
+	}
+	return oldCond.Status == newCond.Status &&
+		oldCond.Reason == newCond.Reason &&
+		oldCond.Message == newCond.Message
+}
+
+func findPodCondition(conds []corev1.PodCondition, condType corev1.PodConditionType) *corev1.PodCondition {
+	for i := range conds {
+		if conds[i].Type == condType {
+			return &conds[i]
+		}
+	}
+	return nil
+}
+
+func indexContainerStatusesByName(statuses []corev1.ContainerStatus) map[string]*corev1.ContainerStatus {
+	out := make(map[string]*corev1.ContainerStatus, len(statuses))
+	for i := range statuses {
+		out[statuses[i].Name] = &statuses[i]
+	}
+	return out
+}
+
+// jobFailedCreateEventPredicate gates the cluster reconciler's Event watch
+// to Warning FailedCreate events on Jobs. The cache is already filtered
+// server-side via cache.Options.ByObject (cmd/manager/main.go), but the
+// predicate provides defense-in-depth and documents intent.
+//
+// Create, Update pass when the Event matches the filter; Delete and Generic
+// drop (a Delete on a stale FailedCreate Event carries no diagnostic value).
+type jobFailedCreateEventPredicate struct {
+	predicate.Funcs
+}
+
+func (p jobFailedCreateEventPredicate) Create(e event.CreateEvent) bool {
+	return matchesJobFailedCreate(e.Object)
+}
+
+func (p jobFailedCreateEventPredicate) Update(e event.UpdateEvent) bool {
+	return matchesJobFailedCreate(e.ObjectNew)
+}
+
+func (p jobFailedCreateEventPredicate) Delete(_ event.DeleteEvent) bool {
+	return false
+}
+
+func (p jobFailedCreateEventPredicate) Generic(_ event.GenericEvent) bool {
+	return false
+}
+
+func matchesJobFailedCreate(obj client.Object) bool {
+	ev, ok := obj.(*corev1.Event)
+	if !ok || ev == nil {
+		return false
+	}
+	return ev.Type == corev1.EventTypeWarning &&
+		ev.Reason == "FailedCreate" &&
+		ev.InvolvedObject.Kind == "Job"
+}
+
 // equalContainerState compares two ContainerState values on the fields the
 // translator inspects: Waiting{Reason,Message}, Running.StartedAt presence,
 // Terminated{ExitCode,Reason,Message}.

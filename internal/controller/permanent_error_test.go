@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -20,6 +25,17 @@ import (
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
+
+// schemeWithBatch returns a scheme with corev1 + batchv1 registered.
+// Used by job-pod-admission tests that need to fake batch/v1.Job objects.
+func schemeWithBatch(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := newScheme(t)
+	if err := batchv1.AddToScheme(s); err != nil {
+		t.Fatalf("adding batchv1 to scheme: %v", err)
+	}
+	return s
+}
 
 func newNodeReconcilerForHelperTest(t *testing.T, node *v1alpha1.IdentityServerNode, statusUpdateErr error) (*IdentityServerNodeReconciler, *record.FakeRecorder) {
 	t.Helper()
@@ -615,4 +631,685 @@ func TestClusterHandlePermanentWriteError_KindFromJob(t *testing.T) {
 	if strings.Contains(deg.Message, "Secret rejected by apiserver:") {
 		t.Errorf("Kind label leaked from another test; got: %q", deg.Message)
 	}
+}
+
+// ============================================================================
+// U7 - handleAdmissionForbidden (Layer 1)
+// ============================================================================
+
+// forbiddenErrForPod builds an apierrors.NewForbidden modeling SCC/PSA/quota
+// denial from apiserver dry-run admission. The message field is what the
+// helper truncates into the condition.
+func forbiddenErrForPod(podName, msg string) error {
+	gr := schema.GroupResource{Group: "", Resource: "pods"}
+	return apierrors.NewForbidden(gr, podName, errors.New(msg))
+}
+
+func TestHandleAdmissionForbidden_IsForbidden_SetsCondition(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, rec := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	res, handled, err := r.handleAdmissionForbidden(ctx, cluster,
+		forbiddenErrForPod("pss-cluster-config-job-dryrun-preflight",
+			"violates PodSecurity \"restricted:latest\": ..."))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if res.RequeueAfter != 5*time.Minute {
+		t.Errorf("expected RequeueAfter=5m, got %v", res.RequeueAfter)
+	}
+
+	c := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != "JobPodAdmissionForbidden" {
+		t.Errorf("ClusterConfigReady wrong: %+v", c)
+	}
+	if c != nil && !strings.Contains(c.Message, "genclust pod admission denied:") {
+		t.Errorf("message lacks prefix: %q", c.Message)
+	}
+	if c != nil && !strings.Contains(c.Message, "violates PodSecurity") {
+		t.Errorf("message lacks apiserver text: %q", c.Message)
+	}
+	if c != nil && c.ObservedGeneration != 5 {
+		t.Errorf("ObservedGeneration=%d want=5", c.ObservedGeneration)
+	}
+
+	// Operational conditions must NOT be touched.
+	for _, condType := range []string{v1alpha1.ConditionReady, v1alpha1.ConditionAvailable, v1alpha1.ConditionDegraded} {
+		if got := apimeta.FindStatusCondition(cluster.Status.Conditions, condType); got != nil {
+			t.Errorf("helper must not write %s, got: %+v", condType, got)
+		}
+	}
+
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, "Warning JobPodAdmissionForbidden") {
+			t.Errorf("unexpected event: %q", ev)
+		}
+	default:
+		t.Error("expected one Warning event, got none")
+	}
+}
+
+func TestHandleAdmissionForbidden_IsInvalid_NotHandled(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	res, handled, err := r.handleAdmissionForbidden(ctx, cluster,
+		invalidErrForKind("Pod", "n", "invalid"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if handled {
+		t.Error("IsInvalid must NOT be handled by handleAdmissionForbidden (handlePermanentWriteError covers it)")
+	}
+	if res != (ctrl.Result{}) {
+		t.Errorf("expected zero Result, got %+v", res)
+	}
+}
+
+func TestHandleAdmissionForbidden_GenericError_NotHandled(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	_, handled, err := r.handleAdmissionForbidden(ctx, cluster, errors.New("network down"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if handled {
+		t.Error("plain error must NOT be handled")
+	}
+}
+
+func TestHandleAdmissionForbidden_NoChange_SkipsWrite(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+
+	// Pre-seed the condition with the message the helper would produce for our
+	// fixture error → SetStatusCondition will return changed=false.
+	apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionClusterConfigReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "JobPodAdmissionForbidden",
+		Message:            `genclust pod admission denied: pods "p" is forbidden: SCC denied`,
+		ObservedGeneration: 5,
+	})
+	cluster.Status.ObservedGeneration = 5
+
+	// Status updater errors loudly if called.
+	r, rec := newClusterReconcilerForHelperTest(t, cluster, errors.New("status update must not be called"))
+
+	res, handled, err := r.handleAdmissionForbidden(ctx, cluster, forbiddenErrForPod("p", "SCC denied"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	// Requeue must STILL fire on no-change so subsequent reconciles keep checking.
+	if res.RequeueAfter != 5*time.Minute {
+		t.Errorf("no-change path must still return 5m requeue, got %v", res.RequeueAfter)
+	}
+	select {
+	case ev := <-rec.Events:
+		t.Errorf("expected no event on no-change, got: %s", ev)
+	default:
+	}
+}
+
+func TestHandleAdmissionForbidden_StatusConflict_RequeueTrue(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+
+	statusConflictErr := apierrors.NewConflict(
+		schema.GroupResource{Group: "curity.io", Resource: "identityserverclusters"},
+		"c-1", errors.New("status conflict"))
+
+	r, rec := newClusterReconcilerForHelperTest(t, cluster, statusConflictErr)
+
+	res, handled, err := r.handleAdmissionForbidden(ctx, cluster,
+		forbiddenErrForPod("p", "SCC denied"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if res != (ctrl.Result{Requeue: true}) {
+		t.Errorf("expected Requeue:true, got %+v", res)
+	}
+	select {
+	case ev := <-rec.Events:
+		t.Errorf("expected no event when status conflicted, got: %s", ev)
+	default:
+	}
+}
+
+func TestHandleAdmissionForbidden_TruncatesLongMessage(t *testing.T) {
+	ctx := context.Background()
+	cluster := freshTestCluster()
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	longMsg := strings.Repeat("x", 1000)
+	_, handled, err := r.handleAdmissionForbidden(ctx, cluster, forbiddenErrForPod("p", longMsg))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	c := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+	if c == nil {
+		t.Fatal("condition not set")
+	}
+	// The truncation helper used by both classifiers caps at ~256 chars; we
+	// just check the message is bounded to keep apiserver responses sane.
+	if len(c.Message) > 4096 {
+		t.Errorf("message length %d exceeds reasonable cap", len(c.Message))
+	}
+}
+
+// ============================================================================
+// U8 - dryRunPodAdmission shape
+// ============================================================================
+
+func TestDryRunPodAdmission_PodShapeMirrorsJobTemplate(t *testing.T) {
+	// Verify that the helper constructs a Pod with the deterministic name
+	// (NOT GenerateName — that was the smoke-test bug) and inherits the Job's
+	// pod-template labels/annotations and Spec. We use the fake client to
+	// intercept the Create call rather than actually hitting an apiserver;
+	// the apiserver's admission chain is exercised in envtest/E2E.
+	ctx := context.Background()
+	s := newScheme(t)
+	if err := v1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("scheme: %v", err)
+	}
+	cluster := &v1alpha1.IdentityServerCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "ns"},
+	}
+
+	var captured *corev1.Pod
+	cli := fake.NewClientBuilder().
+		WithScheme(s).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if pod, ok := obj.(*corev1.Pod); ok {
+					captured = pod.DeepCopy()
+				}
+				// Return success — the helper doesn't care since it just bubbles err.
+				return nil
+			},
+		}).
+		Build()
+
+	r := &IdentityServerClusterReconciler{Client: cli, Scheme: s}
+	job := buildClusterConfigJob(cluster, "admin", "config-hash-1")
+
+	if err := r.dryRunPodAdmission(ctx, cluster, job); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if captured == nil {
+		t.Fatal("Create was not invoked")
+	}
+
+	// Deterministic name (smoke-test fix).
+	wantName := job.Name + "-dryrun-preflight"
+	if captured.Name != wantName {
+		t.Errorf("Pod name = %q, want %q", captured.Name, wantName)
+	}
+	if captured.GenerateName != "" {
+		t.Errorf("GenerateName must be empty (deterministic name only), got %q", captured.GenerateName)
+	}
+	if captured.Namespace != cluster.Namespace {
+		t.Errorf("Pod namespace = %q, want %q", captured.Namespace, cluster.Namespace)
+	}
+	// Labels inherited from Job pod template.
+	for k, v := range job.Spec.Template.Labels {
+		if captured.Labels[k] != v {
+			t.Errorf("label %q = %q, want %q", k, captured.Labels[k], v)
+		}
+	}
+	// Spec mirrors the Job pod template.
+	if captured.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("RestartPolicy = %q, want Never", captured.Spec.RestartPolicy)
+	}
+	if len(captured.Spec.Containers) == 0 || captured.Spec.Containers[0].Name != "genclust" {
+		t.Errorf("expected genclust container, got %+v", captured.Spec.Containers)
+	}
+}
+
+// jobPodFor builds a Pod whose Spec matches what the cluster-config Job
+// template stamps. Test cases override status fields as needed.
+func jobPodFor(name string, created time.Time) corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         "ns",
+			Labels:            map[string]string{"curity.io/component": "cluster-config"},
+			CreationTimestamp: metav1.NewTime(created),
+		},
+	}
+}
+
+// withWaitingGenclust returns a copy of pod with a genclust container in the
+// given Waiting state.
+func withWaitingGenclust(pod corev1.Pod, reason, message string) corev1.Pod {
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "genclust",
+		State: corev1.ContainerState{
+			Waiting: &corev1.ContainerStateWaiting{
+				Reason:  reason,
+				Message: message,
+			},
+		},
+	}}
+	return pod
+}
+
+// withTerminatedGenclust returns a copy of pod with a genclust container in
+// the given Terminated state.
+func withTerminatedGenclust(pod corev1.Pod, exitCode int32) corev1.Pod {
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: "genclust",
+		State: corev1.ContainerState{
+			Terminated: &corev1.ContainerStateTerminated{ExitCode: exitCode},
+		},
+	}}
+	return pod
+}
+
+// withPodScheduledUnschedulable returns a copy of pod marked Phase=Pending
+// with PodScheduled=False/Unschedulable.
+func withPodScheduledUnschedulable(pod corev1.Pod, msg string) corev1.Pod {
+	pod.Status.Phase = corev1.PodPending
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type:    corev1.PodScheduled,
+		Status:  corev1.ConditionFalse,
+		Reason:  corev1.PodReasonUnschedulable,
+		Message: msg,
+	}}
+	return pod
+}
+
+func TestTranslateJobPodAdmission(t *testing.T) {
+	t0 := time.Now()
+
+	cases := []struct {
+		name            string
+		pods            []corev1.Pod
+		failedCreateMsg string
+		wantSet         bool
+		wantReason      string
+		wantInMessage   string
+	}{
+		{
+			name:    "no pods, no event => set=false",
+			pods:    nil,
+			wantSet: false,
+		},
+		{
+			name:            "no pods + FailedCreate event => JobPodAdmissionFailed",
+			failedCreateMsg: "SCC denied",
+			wantSet:         true,
+			wantReason:      "JobPodAdmissionFailed",
+			wantInMessage:   "SCC denied",
+		},
+		{
+			name: "pod Pending + Unschedulable => JobPodSchedulingFailed",
+			pods: []corev1.Pod{
+				withPodScheduledUnschedulable(jobPodFor("p", t0), "0/3 nodes match"),
+			},
+			wantSet:       true,
+			wantReason:    "JobPodSchedulingFailed",
+			wantInMessage: "0/3 nodes match",
+		},
+		{
+			name: "pod ImagePullBackOff => JobPodImagePullFailed",
+			pods: []corev1.Pod{
+				withWaitingGenclust(jobPodFor("p", t0), "ImagePullBackOff", "Back-off"),
+			},
+			wantSet:       true,
+			wantReason:    "JobPodImagePullFailed",
+			wantInMessage: "Back-off",
+		},
+		{
+			name: "pod ErrImagePull => JobPodImagePullFailed",
+			pods: []corev1.Pod{
+				withWaitingGenclust(jobPodFor("p", t0), "ErrImagePull", "manifest unknown"),
+			},
+			wantSet:       true,
+			wantReason:    "JobPodImagePullFailed",
+			wantInMessage: "manifest unknown",
+		},
+		{
+			name: "pod InvalidImageName => JobPodImagePullFailed",
+			pods: []corev1.Pod{
+				withWaitingGenclust(jobPodFor("p", t0), "InvalidImageName", "bad ref"),
+			},
+			wantSet:    true,
+			wantReason: "JobPodImagePullFailed",
+		},
+		{
+			name: "pod CreateContainerConfigError => JobPodCreateConfigError",
+			pods: []corev1.Pod{
+				withWaitingGenclust(jobPodFor("p", t0), "CreateContainerConfigError", "secret \"x\" not found"),
+			},
+			wantSet:       true,
+			wantReason:    "JobPodCreateConfigError",
+			wantInMessage: "secret",
+		},
+		{
+			name: "pod Waiting=PodInitializing => transient, set=false",
+			pods: []corev1.Pod{
+				withWaitingGenclust(jobPodFor("p", t0), "PodInitializing", ""),
+			},
+			wantSet: false,
+		},
+		{
+			name: "pod Waiting=ContainerCreating => transient, set=false",
+			pods: []corev1.Pod{
+				withWaitingGenclust(jobPodFor("p", t0), "ContainerCreating", ""),
+			},
+			wantSet: false,
+		},
+		{
+			name: "pod Phase=Running, no waiting => set=false",
+			pods: []corev1.Pod{
+				func() corev1.Pod {
+					p := jobPodFor("p", t0)
+					p.Status.Phase = corev1.PodRunning
+					return p
+				}(),
+			},
+			wantSet: false,
+		},
+		{
+			name: "pod Phase=Failed exitCode=1 => set=false (existing JobFailed branch handles post-BackoffLimit)",
+			pods: []corev1.Pod{
+				withTerminatedGenclust(jobPodFor("p", t0), 1),
+			},
+			wantSet: false,
+		},
+		{
+			name: "pod DeletionTimestamp set => ignored, set=false",
+			pods: []corev1.Pod{
+				func() corev1.Pod {
+					p := withWaitingGenclust(jobPodFor("p", t0), "ImagePullBackOff", "Back-off")
+					now := metav1.Now()
+					p.DeletionTimestamp = &now
+					return p
+				}(),
+			},
+			wantSet: false,
+		},
+		{
+			name: "2 pods, newest Running, oldest Failed => set=false (newest wins)",
+			pods: []corev1.Pod{
+				withTerminatedGenclust(jobPodFor("old", t0), 1),
+				func() corev1.Pod {
+					p := jobPodFor("new", t0.Add(2*time.Second))
+					p.Status.Phase = corev1.PodRunning
+					return p
+				}(),
+			},
+			wantSet: false,
+		},
+		{
+			name: "pod Running AND failedCreateMsg present (stale event) => set=false, Layer 3 wins",
+			pods: []corev1.Pod{
+				func() corev1.Pod {
+					p := jobPodFor("p", t0)
+					p.Status.Phase = corev1.PodRunning
+					return p
+				}(),
+			},
+			failedCreateMsg: "stale SCC denial",
+			wantSet:         false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := translateJobPodAdmission(tc.pods, tc.failedCreateMsg)
+			if res.set != tc.wantSet {
+				t.Fatalf("set=%v want=%v (full res=%+v)", res.set, tc.wantSet, res)
+			}
+			if !tc.wantSet {
+				return
+			}
+			if res.reason != tc.wantReason {
+				t.Errorf("reason=%q want=%q", res.reason, tc.wantReason)
+			}
+			if res.status != metav1.ConditionFalse {
+				t.Errorf("status=%v want=False", res.status)
+			}
+			if tc.wantInMessage != "" && !strings.Contains(res.message, tc.wantInMessage) {
+				t.Errorf("message=%q does not contain %q", res.message, tc.wantInMessage)
+			}
+		})
+	}
+}
+
+// mostRecentClusterConfigPod tie-break: identical CreationTimestamp resolves
+// deterministically by Name lexical order.
+func TestMostRecentClusterConfigPod_TieBreakByName(t *testing.T) {
+	t0 := time.Now()
+	pods := []corev1.Pod{
+		jobPodFor("b", t0),
+		jobPodFor("a", t0),
+	}
+	got := mostRecentClusterConfigPod(pods)
+	if got == nil || got.Name != "a" {
+		t.Fatalf("tie should resolve to lexical-first 'a', got %+v", got)
+	}
+}
+
+func TestMostRecentClusterConfigPod_Empty(t *testing.T) {
+	if got := mostRecentClusterConfigPod(nil); got != nil {
+		t.Fatalf("empty input must return nil, got %+v", got)
+	}
+}
+
+// ============================================================================
+// findClusterForJobPod (mapFunc Pod → cluster CR)
+// ============================================================================
+
+func TestFindClusterForJobPod(t *testing.T) {
+	r := &IdentityServerClusterReconciler{}
+	ctx := context.Background()
+
+	t.Run("nil object returns empty", func(t *testing.T) {
+		if got := r.findClusterForJobPod(ctx, nil); len(got) != 0 {
+			t.Errorf("expected empty, got %+v", got)
+		}
+	})
+
+	t.Run("wrong type returns empty", func(t *testing.T) {
+		if got := r.findClusterForJobPod(ctx, &batchv1.Job{}); len(got) != 0 {
+			t.Errorf("expected empty, got %+v", got)
+		}
+	})
+
+	t.Run("missing cluster label returns empty", func(t *testing.T) {
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+		if got := r.findClusterForJobPod(ctx, pod); len(got) != 0 {
+			t.Errorf("expected empty, got %+v", got)
+		}
+	})
+
+	t.Run("labeled pod returns request", func(t *testing.T) {
+		pod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "p",
+				Namespace: "ns",
+				Labels:    map[string]string{"curity.io/cluster": "alpha"},
+			},
+		}
+		got := r.findClusterForJobPod(ctx, pod)
+		if len(got) != 1 || got[0].Name != "alpha" || got[0].Namespace != "ns" {
+			t.Errorf("unexpected requests: %+v", got)
+		}
+	})
+}
+
+// ============================================================================
+// findClusterForJobFailedCreateEvent (mapFunc Event → cluster CR)
+// ============================================================================
+
+func TestFindClusterForJobFailedCreateEvent(t *testing.T) {
+	ctx := context.Background()
+	s := schemeWithBatch(t)
+
+	t.Run("non-event object returns empty", func(t *testing.T) {
+		r := &IdentityServerClusterReconciler{
+			Client: fake.NewClientBuilder().WithScheme(s).Build(),
+		}
+		if got := r.findClusterForJobFailedCreateEvent(ctx, &batchv1.Job{}); len(got) != 0 {
+			t.Errorf("expected empty, got %+v", got)
+		}
+	})
+
+	t.Run("job not in cache returns empty", func(t *testing.T) {
+		r := &IdentityServerClusterReconciler{
+			Client: fake.NewClientBuilder().WithScheme(s).Build(),
+		}
+		ev := &corev1.Event{
+			InvolvedObject: corev1.ObjectReference{
+				Kind: "Job", Name: "ghost", Namespace: "ns",
+			},
+		}
+		if got := r.findClusterForJobFailedCreateEvent(ctx, ev); len(got) != 0 {
+			t.Errorf("expected empty, got %+v", got)
+		}
+	})
+
+	t.Run("job without cluster label returns empty", func(t *testing.T) {
+		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "j", Namespace: "ns"}}
+		r := &IdentityServerClusterReconciler{
+			Client: fake.NewClientBuilder().WithScheme(s).WithObjects(job).Build(),
+		}
+		ev := &corev1.Event{
+			InvolvedObject: corev1.ObjectReference{Kind: "Job", Name: "j", Namespace: "ns"},
+		}
+		if got := r.findClusterForJobFailedCreateEvent(ctx, ev); len(got) != 0 {
+			t.Errorf("expected empty, got %+v", got)
+		}
+	})
+
+	t.Run("job with cluster label returns one request", func(t *testing.T) {
+		job := &batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "alpha-cluster-config-job",
+				Namespace: "ns",
+				Labels:    map[string]string{"curity.io/cluster": "alpha"},
+			},
+		}
+		r := &IdentityServerClusterReconciler{
+			Client: fake.NewClientBuilder().WithScheme(s).WithObjects(job).Build(),
+		}
+		ev := &corev1.Event{
+			InvolvedObject: corev1.ObjectReference{
+				Kind: "Job", Name: "alpha-cluster-config-job", Namespace: "ns",
+			},
+		}
+		got := r.findClusterForJobFailedCreateEvent(ctx, ev)
+		if len(got) != 1 || got[0].Name != "alpha" || got[0].Namespace != "ns" {
+			t.Errorf("unexpected requests: %+v", got)
+		}
+	})
+}
+
+// ============================================================================
+// latestJobFailedCreateMessage (Layer 2 cache-read helper)
+// ============================================================================
+
+func TestLatestJobFailedCreateMessage(t *testing.T) {
+	ctx := context.Background()
+	s := schemeWithBatch(t)
+	const ns = "ns"
+	jobUID := types.UID("job-uid-1")
+	otherUID := types.UID("job-uid-2")
+
+	mkEvent := func(name, msg string, uid types.UID, ts metav1.Time) *corev1.Event {
+		return &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: name, Namespace: ns},
+			InvolvedObject: corev1.ObjectReference{Kind: "Job", UID: uid, Namespace: ns},
+			Reason:         "FailedCreate",
+			Type:           corev1.EventTypeWarning,
+			Message:        msg,
+			LastTimestamp:  ts,
+		}
+	}
+
+	t0 := metav1.Now()
+	tLater := metav1.NewTime(t0.Add(10))
+
+	t.Run("empty cache returns empty string", func(t *testing.T) {
+		r := &IdentityServerClusterReconciler{
+			Client: fake.NewClientBuilder().WithScheme(s).Build(),
+		}
+		if got := r.latestJobFailedCreateMessage(ctx, jobUID, ns); got != "" {
+			t.Errorf("empty cache must return \"\", got %q", got)
+		}
+	})
+
+	t.Run("no UID match returns empty string", func(t *testing.T) {
+		objs := []client.Object{mkEvent("e1", "other-job msg", otherUID, t0)}
+		r := &IdentityServerClusterReconciler{
+			Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build(),
+		}
+		if got := r.latestJobFailedCreateMessage(ctx, jobUID, ns); got != "" {
+			t.Errorf("expected empty, got %q", got)
+		}
+	})
+
+	t.Run("exact UID match returns message", func(t *testing.T) {
+		objs := []client.Object{mkEvent("e1", "SCC denied", jobUID, t0)}
+		r := &IdentityServerClusterReconciler{
+			Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build(),
+		}
+		got := r.latestJobFailedCreateMessage(ctx, jobUID, ns)
+		if !strings.Contains(got, "SCC denied") {
+			t.Errorf("expected \"SCC denied\" in result, got %q", got)
+		}
+	})
+
+	t.Run("multiple matches, newest wins", func(t *testing.T) {
+		objs := []client.Object{
+			mkEvent("e-old", "old msg", jobUID, t0),
+			mkEvent("e-new", "new msg", jobUID, tLater),
+		}
+		r := &IdentityServerClusterReconciler{
+			Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build(),
+		}
+		got := r.latestJobFailedCreateMessage(ctx, jobUID, ns)
+		if !strings.Contains(got, "new msg") {
+			t.Errorf("expected newest \"new msg\", got %q", got)
+		}
+		if strings.Contains(got, "old msg") {
+			t.Errorf("expected NOT to contain \"old msg\", got %q", got)
+		}
+	})
+
+	t.Run("other UID events are ignored", func(t *testing.T) {
+		objs := []client.Object{
+			mkEvent("e-other", "other-job msg", otherUID, tLater),
+			mkEvent("e-target", "target msg", jobUID, t0),
+		}
+		r := &IdentityServerClusterReconciler{
+			Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build(),
+		}
+		got := r.latestJobFailedCreateMessage(ctx, jobUID, ns)
+		if !strings.Contains(got, "target msg") {
+			t.Errorf("expected target msg, got %q", got)
+		}
+		if strings.Contains(got, "other-job msg") {
+			t.Errorf("must NOT contain other-job msg, got %q", got)
+		}
+	})
 }

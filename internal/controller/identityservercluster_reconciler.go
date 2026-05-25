@@ -413,9 +413,12 @@ func (r *IdentityServerClusterReconciler) computeEncryptionKeyHash(ctx context.C
 }
 
 // computeClusterConfigHash hashes the spec inputs that should trigger a
-// genclust Job re-run when changed. The encryption key is intentionally NOT
+// genclust Job re-run when changed: image, imagePullSecret, admin node name,
+// and packages (when non-empty). The encryption key is intentionally NOT
 // included: a stale credentials-Secret cache on first reconcile would cause
 // every cluster to spuriously regen — see Branch A in ensureClusterConfig.
+// Packages are appended only when non-empty so clusters without packages keep
+// the same hash bytes on upgrade and don't see a one-shot regen window.
 // The "v1\x00" prefix versions the hash shape; bump on any input change.
 func computeClusterConfigHash(cluster *v1alpha1.IdentityServerCluster, adminNodeName string) string {
 	var b strings.Builder
@@ -427,6 +430,10 @@ func computeClusterConfigHash(cluster *v1alpha1.IdentityServerCluster, adminNode
 	b.WriteString(cluster.Spec.ImagePullSecret)
 	b.WriteString(sep)
 	b.WriteString(adminNodeName)
+	if pkgHash := computePackagesHash(cluster.Spec.Packages); pkgHash != "" {
+		b.WriteString(sep)
+		b.WriteString(pkgHash)
+	}
 	h := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(h[:])
 }

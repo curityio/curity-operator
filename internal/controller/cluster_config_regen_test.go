@@ -160,6 +160,33 @@ var _ = Describe("IdentityServerCluster cluster.xml regeneration", func() {
 		}, timeout, interval).ShouldNot(Equal(hashBefore))
 	})
 
+	// P7b — spec.packages change triggers regen so plugin-contributed config
+	// types are loaded when genclust generates cluster.xml.
+	It("regenerates cluster.xml when spec.packages changes", func() {
+		testCreateCluster(ns, "pkg-cluster")
+		testCreateNode(ns, "pkg-admin", v1alpha1.NodeTypeAdmin, "pkg-cluster")
+		testSimulateClusterConfigReady(ns, "pkg-cluster")
+
+		secretBefore := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "pkg-cluster-cluster-config", Namespace: ns}, secretBefore)).To(Succeed())
+		hashBefore := secretBefore.Annotations["curity.io/cluster-config-hash"]
+
+		cluster := &v1alpha1.IdentityServerCluster{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "pkg-cluster", Namespace: ns}, cluster)).To(Succeed())
+		cluster.Spec.Packages = []v1alpha1.PackageSpec{
+			{Source: v1alpha1.PackageSource{URL: "https://example.test/plugin.zip"}, MountPath: "/opt/idsvr/plugins/p1"},
+		}
+		Expect(k8sClient.Update(ctx, cluster)).To(Succeed())
+
+		Eventually(func() string {
+			s := &corev1.Secret{}
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: "pkg-cluster-cluster-config", Namespace: ns}, s); err != nil {
+				return ""
+			}
+			return s.Annotations["curity.io/cluster-config-hash"]
+		}, timeout, interval).ShouldNot(Equal(hashBefore))
+	})
+
 	// P8 — admin-credentials Secret rotation triggers reconcile within seconds.
 	It("triggers regen within seconds when an externally-provided admin-credentials Secret is rotated", func() {
 		credSecret := &corev1.Secret{

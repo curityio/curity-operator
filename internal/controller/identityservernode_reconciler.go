@@ -361,11 +361,11 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			"Service %q %s", svc.Name, svcResult)
 	}
 
-	// 5.7. Gate: defer Deployment creation until cluster config is ready.
-	// When an admin node exists, the cluster reconciler generates cluster.xml
-	// via a genclust Job. Deferring prevents a double rollout caused by hashing
-	// the placeholder first and the real data second.
-	// Runtime-only clusters (no admin) skip — no genclust Job runs.
+	// 5.7. Defer Deployment writes while cluster.xml regenerates: the Secret
+	// holds a placeholder during that window, and subPath mounts crashloop on
+	// it. First-time create still returns early (no Deployment to keep alive).
+	deferDeploymentUpdate := false
+	var existingDeployForDefer *appsv1.Deployment
 	if adminExists {
 		configReady := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
 		if configReady == nil || configReady.Status != metav1.ConditionTrue {
@@ -374,9 +374,6 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			err := r.Get(ctx, client.ObjectKey{Name: deployName, Namespace: node.Namespace}, &existingDeploy)
 			if err != nil && !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("checking existing deployment for config gate: %w", err)
-			}
-			if err == nil {
-				log.V(1).Info("config gate bypassed — Deployment already exists", "cluster", cluster.Name, "deployment", deployName)
 			}
 			if apierrors.IsNotFound(err) {
 				log.Info("waiting for ClusterConfigReady before creating Deployment", "cluster", cluster.Name)
@@ -394,213 +391,210 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 					"Deferring Deployment creation until cluster %q ClusterConfigReady=True", cluster.Name)
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
+			deferDeploymentUpdate = true
+			existingDeployForDefer = existingDeploy.DeepCopy()
+			log.V(1).Info("deferring Deployment update until ClusterConfigReady=True", "cluster", cluster.Name, "deployment", deployName)
+			r.Recorder.Eventf(&node, corev1.EventTypeNormal, "DeferringDeploymentUpdate",
+				"Deferring Deployment update until cluster %q ClusterConfigReady=True", cluster.Name)
 		}
 	}
 
-	// 6. Build and reconcile the Deployment
+	// 6. Build and reconcile the Deployment.
+	// as/packagesHash/priorPackagesReadyForGate are read by HPA/status below
+	// — hoisted out so they're set even when the defer branch skips the build.
 	as := resolveAutoscaling(&cluster, &node)
-	fetcherImage := r.PackageFetcherImage
-	if fetcherImage == "" {
-		fetcherImage = DefaultPackageFetcherImage
-	}
-	desiredDeploy := buildDeployment(&cluster, &node, applicableConfigs, fetcherImage)
-
-	// Inject cluster config hash annotation for rolling restart when Secret changes.
-	// Only inject when config is ready or no admin exists — avoids hashing
-	// placeholder data during config generation, which would cause a double rollout.
-	configReadyCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
-	clusterConfigIsReady := !adminExists || (configReadyCond != nil && configReadyCond.Status == metav1.ConditionTrue)
-	if clusterConfigIsReady {
-		configSecretName := cluster.Name + "-cluster-config"
-		var configSecret corev1.Secret
-		if err := r.Get(ctx, client.ObjectKey{Name: configSecretName, Namespace: node.Namespace}, &configSecret); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return ctrl.Result{}, fmt.Errorf("getting cluster-config secret %q: %w", configSecretName, err)
-			}
-		} else if data, ok := configSecret.Data["cluster.xml"]; ok && len(data) > 0 {
-			h := sha256.Sum256(data)
-			if desiredDeploy.Spec.Template.Annotations == nil {
-				desiredDeploy.Spec.Template.Annotations = make(map[string]string)
-			}
-			desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = hex.EncodeToString(h[:])
-		}
-	}
-
-	// Inject managed-configs-hash annotation for rolling restart on config changes.
-	if configHash != "" {
-		if desiredDeploy.Spec.Template.Annotations == nil {
-			desiredDeploy.Spec.Template.Annotations = make(map[string]string)
-		}
-		desiredDeploy.Spec.Template.Annotations[annotationManagedConfigsHash] = configHash
-	}
-
-	// Inject packages-hash annotation for rolling restart on packages spec
-	// changes. Hashes spec refs (Secret name/key, URL, mountPath, TLS shape)
-	// — NOT Secret values — so token rotation in place does not roll the
-	// deployment. See packages.go:computePackagesHash.
 	packagesHash := computePackagesHash(cluster.Spec.Packages)
-	if packagesHash != "" {
-		if desiredDeploy.Spec.Template.Annotations == nil {
-			desiredDeploy.Spec.Template.Annotations = make(map[string]string)
-		}
-		desiredDeploy.Spec.Template.Annotations[annotationPackagesHash] = packagesHash
-	}
-
-	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}}
-
-	// Capture the prev packages-hash with a dedicated Get before CreateOrUpdate
-	// rather than from inside the mutator closure. Both work in principle, but
-	// the dedicated Get is easier to reason about and decouples this from any
-	// future change to controllerutil internals.
-	var prevPackagesHash string
-	existingDeploy := &appsv1.Deployment{}
-	if err := r.Get(ctx, client.ObjectKey{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}, existingDeploy); err == nil {
-		prevPackagesHash = existingDeploy.Spec.Template.Annotations[annotationPackagesHash]
-	} else if !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("getting existing deployment for prev-hash capture: %w", err)
-	}
-
-	// Capture priorPackagesReady early so the pre-check gate can use it to
-	// decide whether to re-run as a recovery probe on a Secret event. The
-	// later capture at the status-recompute step (search for
-	// "Capture PackagesReady (which lives outside") will still take a fresh
-	// read for the translator/Ready-overlay path — both are needed.
-	//
-	// IMPORTANT: copy the Condition value rather than holding the pointer
-	// returned by apimeta.FindStatusCondition. That pointer aliases the
-	// element inside node.Status.Conditions, and the pre-check below calls
-	// setCondition which mutates that element in place to PackagesPending —
-	// which would silently flip our captured "prior" reason and break the
-	// recovery gate check at the bottom of the reconcile.
 	var priorPackagesReadyForGate *metav1.Condition
 	if c := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionPackagesReady); c != nil {
 		copied := *c
 		priorPackagesReadyForGate = &copied
 	}
 
-	// Package-secret pre-check (plan D1 + Secret-watch recovery). Two gates:
-	//
-	//  (1) Spec just changed — original gate; avoids stamping a broken spec
-	//      onto the Deployment.
-	//  (2) PackagesReady is currently in a recoverable failure — recovery
-	//      probe woken by a Secret event. Without this, a user fixing a
-	//      Secret has to wait for the 30 s requeue before recovery starts.
-	//
-	// We deliberately do NOT re-run pre-check in steady state on every
-	// Secret event: once a package is downloaded into the pod's emptyDir,
-	// the Secret is irrelevant to the running container. Flipping the
-	// condition on Secret tampering while pods serve correctly is alarmism.
-	if len(cluster.Spec.Packages) > 0 &&
-		(prevPackagesHash != packagesHash || isRecoverableSecretFailure(priorPackagesReadyForGate)) {
-		reason, message, retryErr := checkPackageSecrets(ctx, r.Client, cluster.Spec.Packages, node.Namespace)
-		if retryErr != nil {
-			// Non-IsNotFound API error — pre-check is inconclusive, do
-			// not flip the condition. controller-runtime backs off on
-			// the returned error (plan D13).
-			return ctrl.Result{}, fmt.Errorf("package pre-check: %w", retryErr)
+	var deploy *appsv1.Deployment
+	var result controllerutil.OperationResult
+	if deferDeploymentUpdate {
+		// Reuse the gate's Get to avoid a TOCTOU on re-fetch.
+		deploy = existingDeployForDefer
+	} else {
+		fetcherImage := r.PackageFetcherImage
+		if fetcherImage == "" {
+			fetcherImage = DefaultPackageFetcherImage
 		}
-		if reason != "" {
-			setCondition(&node.Status.Conditions, v1alpha1.ConditionPackagesReady,
-				metav1.ConditionFalse, reason, message, node.Generation)
-			applyReadyOverlay(&node.Status.Conditions, node.Generation)
-			if err := r.Status().Update(ctx, &node); err != nil {
-				if apierrors.IsConflict(err) {
-					return ctrl.Result{Requeue: true}, nil
+		desiredDeploy := buildDeployment(&cluster, &node, applicableConfigs, fetcherImage)
+
+		// Inject cluster config hash annotation for rolling restart when Secret changes.
+		// Only inject when config is ready or no admin exists — avoids hashing
+		// placeholder data during config generation, which would cause a double rollout.
+		configReadyCond := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+		clusterConfigIsReady := !adminExists || (configReadyCond != nil && configReadyCond.Status == metav1.ConditionTrue)
+		if clusterConfigIsReady {
+			configSecretName := cluster.Name + "-cluster-config"
+			var configSecret corev1.Secret
+			if err := r.Get(ctx, client.ObjectKey{Name: configSecretName, Namespace: node.Namespace}, &configSecret); err != nil {
+				if !apierrors.IsNotFound(err) {
+					return ctrl.Result{}, fmt.Errorf("getting cluster-config secret %q: %w", configSecretName, err)
 				}
-				return ctrl.Result{}, fmt.Errorf("failed to update node status after package pre-check: %w", err)
-			}
-			// Skip Deployment update — pushing a known-bad spec onto a
-			// (possibly healthy) existing Deployment would crashloop
-			// pods. The user fixes the spec or applies the missing
-			// Secret; the 30s requeue retries when neither event woke
-			// the reconciler in the meantime.
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
-		// Pre-check passed AND the packages spec just changed (or no
-		// Deployment exists yet). Preemptively set PackagesReady=False
-		// reason=PackagesPending so the Ready overlay flips False on
-		// this same reconcile — otherwise the still-healthy OLD pods
-		// would leak PackagesReady=True (from the prior steady state)
-		// through into the new rollout, producing a Ready=True
-		// false-positive window until the new pod's init container
-		// reports its first status (~8–15s on real clusters).
-		// The translator below filters pods by curity.io/packages-hash
-		// so it does not overwrite this Pending state with the OLD
-		// pods' success; it only flips Pending → True or a specific
-		// failure reason when a pod carrying the NEW hash reports
-		// definitive init status.
-		setCondition(&node.Status.Conditions, v1alpha1.ConditionPackagesReady,
-			metav1.ConditionFalse, v1alpha1.ReasonPackagesPending,
-			"package set rolling out; awaiting init-container state from pods carrying the new packages hash",
-			node.Generation)
-	}
-
-	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
-		currentReplicas := deploy.Spec.Replicas
-		existingConfigHash := deploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
-
-		deploy.Labels = mergeManagedLabels(deploy.Labels, desiredDeploy.Labels)
-		deploy.Spec = desiredDeploy.Spec
-
-		// Preserve cluster-config-hash if the desired Deployment doesn't set one.
-		// This avoids unnecessary rollouts during config regeneration (e.g.,
-		// encryption key rotation) where the clusterConfigIsReady gate above
-		// skips injection.
-		if _, hasDesired := desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]; !hasDesired && existingConfigHash != "" {
-			log.Info("preserving existing cluster-config-hash while config is regenerating",
-				"hash", existingConfigHash, "cluster", cluster.Name)
-			if deploy.Spec.Template.Annotations == nil {
-				deploy.Spec.Template.Annotations = make(map[string]string)
-			}
-			deploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = existingConfigHash
-		}
-
-		// Preserve HPA-managed replicas on update to avoid replica flapping.
-		if as != nil && as.Enabled &&
-			node.Spec.Type != v1alpha1.NodeTypeAdmin &&
-			currentReplicas != nil {
-			deploy.Spec.Replicas = currentReplicas
-		}
-		return controllerutil.SetControllerReference(&node, deploy, r.Scheme)
-	})
-	if err != nil {
-		if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, "Deployment", err); handled {
-			return res, statusErr
-		}
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile Deployment: %w", err)
-	}
-	if result != controllerutil.OperationResultNone {
-		log.Info("Deployment reconciled", "operation", result, "name", deploy.Name)
-		r.Recorder.Eventf(&node, corev1.EventTypeNormal, "DeploymentReconciled",
-			"Deployment %q %s", deploy.Name, result)
-
-		// Packages-specific events. Distinguish Configured (none -> some),
-		// Updated (some -> different some), Removed (some -> none).
-		// prevPackagesHash is captured by the dedicated r.Get above
-		// (before CreateOrUpdate), so on a brand-new Deployment the Get
-		// returns NotFound and prevPackagesHash stays "".
-		if prevPackagesHash != packagesHash {
-			switch {
-			case prevPackagesHash == "" && packagesHash != "":
-				log.Info("packages configured", "packageCount", len(cluster.Spec.Packages),
-					"packagesHash", packagesHash)
-				r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PackagesConfigured",
-					"Configured %d package(s) on Deployment %q", len(cluster.Spec.Packages), deploy.Name)
-			case prevPackagesHash != "" && packagesHash != "":
-				log.Info("packages updated", "oldPackagesHash", prevPackagesHash,
-					"packagesHash", packagesHash, "packageCount", len(cluster.Spec.Packages))
-				r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PackagesUpdated",
-					"Package set changed (hash %s -> %s); rolling restart triggered",
-					prevPackagesHash, packagesHash)
-			case prevPackagesHash != "" && packagesHash == "":
-				log.Info("packages removed", "oldPackagesHash", prevPackagesHash)
-				r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PackagesRemoved",
-					"Removed all packages from Deployment %q", deploy.Name)
+			} else if data, ok := configSecret.Data["cluster.xml"]; ok && len(data) > 0 {
+				h := sha256.Sum256(data)
+				if desiredDeploy.Spec.Template.Annotations == nil {
+					desiredDeploy.Spec.Template.Annotations = make(map[string]string)
+				}
+				desiredDeploy.Spec.Template.Annotations["curity.io/cluster-config-hash"] = hex.EncodeToString(h[:])
 			}
 		}
+
+		// Inject managed-configs-hash annotation for rolling restart on config changes.
+		if configHash != "" {
+			if desiredDeploy.Spec.Template.Annotations == nil {
+				desiredDeploy.Spec.Template.Annotations = make(map[string]string)
+			}
+			desiredDeploy.Spec.Template.Annotations[annotationManagedConfigsHash] = configHash
+		}
+
+		// Inject packages-hash annotation for rolling restart on packages spec
+		// changes. Hashes spec refs (Secret name/key, URL, mountPath, TLS shape)
+		// — NOT Secret values — so token rotation in place does not roll the
+		// deployment. See packages.go:computePackagesHash.
+		if packagesHash != "" {
+			if desiredDeploy.Spec.Template.Annotations == nil {
+				desiredDeploy.Spec.Template.Annotations = make(map[string]string)
+			}
+			desiredDeploy.Spec.Template.Annotations[annotationPackagesHash] = packagesHash
+		}
+
+		deploy = &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}}
+
+		// Capture the prev packages-hash with a dedicated Get before CreateOrUpdate
+		// rather than from inside the mutator closure. Both work in principle, but
+		// the dedicated Get is easier to reason about and decouples this from any
+		// future change to controllerutil internals.
+		var prevPackagesHash string
+		existingDeploy := &appsv1.Deployment{}
+		if err := r.Get(ctx, client.ObjectKey{Name: desiredDeploy.Name, Namespace: desiredDeploy.Namespace}, existingDeploy); err == nil {
+			prevPackagesHash = existingDeploy.Spec.Template.Annotations[annotationPackagesHash]
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("getting existing deployment for prev-hash capture: %w", err)
+		}
+
+		// priorPackagesReadyForGate is captured above the defer branch so it is
+		// available to the recovery check in step 9 even when this block is
+		// skipped. It snapshots the condition before the pre-check below mutates
+		// it in place — necessary because apimeta.FindStatusCondition returns a
+		// slice-element pointer and setCondition rewrites that element to
+		// PackagesPending, which would otherwise silently flip the captured
+		// "prior" reason and break the recovery gate.
+
+		// Package-secret pre-check (plan D1 + Secret-watch recovery). Two gates:
+		//
+		//  (1) Spec just changed — original gate; avoids stamping a broken spec
+		//      onto the Deployment.
+		//  (2) PackagesReady is currently in a recoverable failure — recovery
+		//      probe woken by a Secret event. Without this, a user fixing a
+		//      Secret has to wait for the 30 s requeue before recovery starts.
+		//
+		// We deliberately do NOT re-run pre-check in steady state on every
+		// Secret event: once a package is downloaded into the pod's emptyDir,
+		// the Secret is irrelevant to the running container. Flipping the
+		// condition on Secret tampering while pods serve correctly is alarmism.
+		if len(cluster.Spec.Packages) > 0 &&
+			(prevPackagesHash != packagesHash || isRecoverableSecretFailure(priorPackagesReadyForGate)) {
+			reason, message, retryErr := checkPackageSecrets(ctx, r.Client, cluster.Spec.Packages, node.Namespace)
+			if retryErr != nil {
+				// Non-IsNotFound API error — pre-check is inconclusive, do
+				// not flip the condition. controller-runtime backs off on
+				// the returned error (plan D13).
+				return ctrl.Result{}, fmt.Errorf("package pre-check: %w", retryErr)
+			}
+			if reason != "" {
+				setCondition(&node.Status.Conditions, v1alpha1.ConditionPackagesReady,
+					metav1.ConditionFalse, reason, message, node.Generation)
+				applyReadyOverlay(&node.Status.Conditions, node.Generation)
+				if err := r.Status().Update(ctx, &node); err != nil {
+					if apierrors.IsConflict(err) {
+						return ctrl.Result{Requeue: true}, nil
+					}
+					return ctrl.Result{}, fmt.Errorf("failed to update node status after package pre-check: %w", err)
+				}
+				// Skip Deployment update — pushing a known-bad spec onto a
+				// (possibly healthy) existing Deployment would crashloop
+				// pods. The user fixes the spec or applies the missing
+				// Secret; the 30s requeue retries when neither event woke
+				// the reconciler in the meantime.
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			// Pre-check passed AND the packages spec just changed (or no
+			// Deployment exists yet). Preemptively set PackagesReady=False
+			// reason=PackagesPending so the Ready overlay flips False on
+			// this same reconcile — otherwise the still-healthy OLD pods
+			// would leak PackagesReady=True (from the prior steady state)
+			// through into the new rollout, producing a Ready=True
+			// false-positive window until the new pod's init container
+			// reports its first status (~8–15s on real clusters).
+			// The translator below filters pods by curity.io/packages-hash
+			// so it does not overwrite this Pending state with the OLD
+			// pods' success; it only flips Pending → True or a specific
+			// failure reason when a pod carrying the NEW hash reports
+			// definitive init status.
+			setCondition(&node.Status.Conditions, v1alpha1.ConditionPackagesReady,
+				metav1.ConditionFalse, v1alpha1.ReasonPackagesPending,
+				"package set rolling out; awaiting init-container state from pods carrying the new packages hash",
+				node.Generation)
+		}
+
+		var err error
+		result, err = controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
+			currentReplicas := deploy.Spec.Replicas
+
+			deploy.Labels = mergeManagedLabels(deploy.Labels, desiredDeploy.Labels)
+			deploy.Spec = desiredDeploy.Spec
+
+			// Preserve HPA-managed replicas on update to avoid replica flapping.
+			if as != nil && as.Enabled &&
+				node.Spec.Type != v1alpha1.NodeTypeAdmin &&
+				currentReplicas != nil {
+				deploy.Spec.Replicas = currentReplicas
+			}
+			return controllerutil.SetControllerReference(&node, deploy, r.Scheme)
+		})
+		if err != nil {
+			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, "Deployment", err); handled {
+				return res, statusErr
+			}
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile Deployment: %w", err)
+		}
+		if result != controllerutil.OperationResultNone {
+			log.Info("Deployment reconciled", "operation", result, "name", deploy.Name)
+			r.Recorder.Eventf(&node, corev1.EventTypeNormal, "DeploymentReconciled",
+				"Deployment %q %s", deploy.Name, result)
+
+			// Packages-specific events. Distinguish Configured (none -> some),
+			// Updated (some -> different some), Removed (some -> none).
+			// prevPackagesHash is captured by the dedicated r.Get above
+			// (before CreateOrUpdate), so on a brand-new Deployment the Get
+			// returns NotFound and prevPackagesHash stays "".
+			if prevPackagesHash != packagesHash {
+				switch {
+				case prevPackagesHash == "" && packagesHash != "":
+					log.Info("packages configured", "packageCount", len(cluster.Spec.Packages),
+						"packagesHash", packagesHash)
+					r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PackagesConfigured",
+						"Configured %d package(s) on Deployment %q", len(cluster.Spec.Packages), deploy.Name)
+				case prevPackagesHash != "" && packagesHash != "":
+					log.Info("packages updated", "oldPackagesHash", prevPackagesHash,
+						"packagesHash", packagesHash, "packageCount", len(cluster.Spec.Packages))
+					r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PackagesUpdated",
+						"Package set changed (hash %s -> %s); rolling restart triggered",
+						prevPackagesHash, packagesHash)
+				case prevPackagesHash != "" && packagesHash == "":
+					log.Info("packages removed", "oldPackagesHash", prevPackagesHash)
+					r.Recorder.Eventf(&node, corev1.EventTypeNormal, "PackagesRemoved",
+						"Removed all packages from Deployment %q", deploy.Name)
+				}
+			}
+		}
 	}
 
-	// 7. Reconcile HorizontalPodAutoscaler
+	// 7. Reconcile HorizontalPodAutoscaler — uses `as` and `deploy` from above.
 	isAdmin := node.Spec.Type == v1alpha1.NodeTypeAdmin
 	autoscalingRequested := as != nil && as.Enabled
 

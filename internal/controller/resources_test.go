@@ -2508,6 +2508,49 @@ func TestComputeClusterConfigHash_DiffersPerInput(t *testing.T) {
 			shouldDiffer: true,
 		},
 		{
+			name: "Packages added (none -> one)",
+			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
+				c := base.DeepCopy()
+				c.Spec.Packages = []v1alpha1.PackageSpec{
+					{Source: v1alpha1.PackageSource{URL: "https://example.test/plugin.zip"}, MountPath: "/opt/idsvr/plugins/p1"},
+				}
+				return c, "admin-1"
+			},
+			shouldDiffer: true,
+		},
+		{
+			name: "Packages URL changes",
+			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
+				c := base.DeepCopy()
+				c.Spec.Packages = []v1alpha1.PackageSpec{
+					{Source: v1alpha1.PackageSource{URL: "https://example.test/plugin.zip"}, MountPath: "/opt/idsvr/plugins/p1"},
+				}
+				return c, "admin-1"
+			},
+			shouldDiffer: true,
+		},
+		{
+			name: "Packages reordered (order-sensitive)",
+			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
+				c := base.DeepCopy()
+				c.Spec.Packages = []v1alpha1.PackageSpec{
+					{Source: v1alpha1.PackageSource{URL: "https://b.test/p.zip"}, MountPath: "/opt/idsvr/plugins/b"},
+					{Source: v1alpha1.PackageSource{URL: "https://a.test/p.zip"}, MountPath: "/opt/idsvr/plugins/a"},
+				}
+				return c, "admin-1"
+			},
+			shouldDiffer: true,
+		},
+		{
+			name: "Packages nil vs empty slice (both yield empty hash, no diff)",
+			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
+				c := base.DeepCopy()
+				c.Spec.Packages = []v1alpha1.PackageSpec{}
+				return c, "admin-1"
+			},
+			shouldDiffer: false,
+		},
+		{
 			name: "Tolerations change (not in hash by design)",
 			mutate: func() (*v1alpha1.IdentityServerCluster, string) {
 				c := base.DeepCopy()
@@ -2547,17 +2590,17 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 		"Version":         true, // via buildImage(cluster)
 		"Image":           true, // via buildImage(cluster)
 		"ImagePullSecret": true,
+		// Packages flows into the hash via computePackagesHash (conditional
+		// append — nil/empty packages leave the hash unchanged). Each package
+		// edit forces a genclust Job re-run so plugin-contributed config types
+		// are loaded when cluster.xml is generated.
+		"Packages": true,
 	}
 	excludedFromHash := map[string]bool{
 		// AdminCredentials is excluded: handled by curity.io/encryption-key-hash
 		// with empty-guards that tolerate the credentials-Secret cache miss on
 		// first reconcile.
-		"AdminCredentials": true,
-		// Packages is excluded: drives curity.io/packages-hash (a separate
-		// pod-template-annotation rolling restart), not cluster.xml regen.
-		// cluster.xml is only about cluster topology (hosts, encryption,
-		// license) — plugin archives are runtime-only.
-		"Packages":                  true,
+		"AdminCredentials":          true,
 		"Logging":                   true,
 		"PodAnnotations":            true,
 		"PodLabels":                 true,

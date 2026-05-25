@@ -435,23 +435,23 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 			eventuallyGetResource(ns, ownedName("evolve-cluster", "evolve-admin"), &appsv1.Deployment{})
 		})
 
-		It("should preserve cluster-config-hash during config regeneration", func() {
+		It("should defer Deployment updates while cluster config is regenerating", func() {
 			testCreateCluster(ns, "hash-cluster")
 			testCreateNode(ns, "hash-runtime", v1alpha1.NodeTypeRuntime, "hash-cluster")
 			testCreateNode(ns, "hash-admin", v1alpha1.NodeTypeAdmin, "hash-cluster")
 			testSimulateClusterConfigReady(ns, "hash-cluster")
 
-			// Wait for Deployment and capture the hash annotation.
+			// Wait for the runtime Deployment to reach its initial steady state.
 			deploy := &appsv1.Deployment{}
-			var originalHash string
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("hash-cluster", "hash-runtime"), Namespace: ns}, deploy)).To(Succeed())
-				originalHash = deploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
-				g.Expect(originalHash).NotTo(BeEmpty())
+				g.Expect(deploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]).NotTo(BeEmpty())
 			}, timeout, interval).Should(Succeed())
+			originalGeneration := deploy.Generation
 
-			// Simulate config regeneration: reset secret to placeholder, as
-			// the cluster reconciler does during encryption key rotation.
+			// Simulate config regeneration: reset Secret to placeholder, as
+			// Branch A/C of the cluster reconciler does during key rotation
+			// or a multi-input spec change.
 			secretName := "hash-cluster-cluster-config"
 			Eventually(func() error {
 				var secret corev1.Secret
@@ -462,9 +462,9 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 				return k8sClient.Update(ctx, &secret)
 			}, timeout, interval).Should(Succeed())
 
-			// Wait for the cluster reconciler to detect the placeholder and
-			// set ClusterConfigReady != True. Without this, the ISN reconciler
-			// could race ahead, see stale True, and hash "placeholder".
+			// Wait for the cluster reconciler to flip ClusterConfigReady away
+			// from True. Without this, the node reconciler could race ahead
+			// and apply the Deployment update while the gate still reads True.
 			Eventually(func() bool {
 				cluster := &v1alpha1.IdentityServerCluster{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hash-cluster", Namespace: ns}, cluster); err != nil {
@@ -473,7 +473,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 				return !hasCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady, metav1.ConditionTrue)
 			}, timeout, interval).Should(BeTrue())
 
-			// Force a reconcile by touching the node spec.
+			// Patch the node spec while regen is in flight.
 			Eventually(func() error {
 				node := &v1alpha1.IdentityServerNode{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hash-runtime", Namespace: ns}, node); err != nil {
@@ -483,19 +483,25 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 				return k8sClient.Update(ctx, node)
 			}, timeout, interval).Should(Succeed())
 
-			// Confirm the ISN reconciler processed the update (replicas changed).
+			// Gate must defer the Deployment write — Generation stays at the
+			// pre-edit value and Spec.Replicas does not change to the new value
+			// while ClusterConfigReady != True. This prevents new pods from
+			// mounting the placeholder cluster.xml via subPath.
+			Consistently(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("hash-cluster", "hash-runtime"), Namespace: ns}, deploy)).To(Succeed())
+				g.Expect(deploy.Generation).To(Equal(originalGeneration))
+				if deploy.Spec.Replicas != nil {
+					g.Expect(*deploy.Spec.Replicas).NotTo(Equal(int32(2)))
+				}
+			}, 5*time.Second, interval).Should(Succeed())
+
+			// Restore the Secret and flip Cond=True. The deferred update must
+			// land in a single Generation bump, with the new replicas applied.
+			testSimulateClusterConfigReady(ns, "hash-cluster")
 			Eventually(func(g Gomega) int32 {
 				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("hash-cluster", "hash-runtime"), Namespace: ns}, deploy)).To(Succeed())
 				return *deploy.Spec.Replicas
 			}, timeout, interval).Should(Equal(int32(2)))
-
-			// The hash annotation should be preserved — not removed or changed.
-			// Without the preservation logic, deploy.Spec = desiredDeploy.Spec
-			// would strip the annotation and trigger an unnecessary rollout.
-			Consistently(func(g Gomega) string {
-				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("hash-cluster", "hash-runtime"), Namespace: ns}, deploy)).To(Succeed())
-				return deploy.Spec.Template.Annotations["curity.io/cluster-config-hash"]
-			}, 5*time.Second, interval).Should(Equal(originalHash))
 		})
 	})
 
@@ -5414,6 +5420,11 @@ var _ = Describe("Deployment scheduling", func() {
 
 		// HPA should be cleaned up even though node is now admin
 		eventuallyDeleted(ns, ownedName("hpa-stale-cluster", "hpa-stale"), &autoscalingv2.HorizontalPodAutoscaler{})
+
+		// Type-flip to admin makes adminExists=true and the cluster-config gate
+		// kicks in on the next reconcile. Unblock so the admin-replica coercion
+		// can land on the Deployment.
+		testSimulateClusterConfigReady(ns, "hpa-stale-cluster")
 
 		// Deployment replicas should be forced to 1
 		deploy := &appsv1.Deployment{}

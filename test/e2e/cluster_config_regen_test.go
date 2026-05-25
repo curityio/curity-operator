@@ -8,6 +8,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -146,6 +147,104 @@ var _ = Describe("cluster.xml regeneration", func() {
 			cluster := &v1alpha1.IdentityServerCluster{}
 			Expect(k().Get(ctx, client.ObjectKey{Name: clusterName, Namespace: ns}, cluster)).To(Succeed())
 			utils.MatchCRDResource(cluster, "regen-key/01-after-key-rotation")
+		})
+	})
+
+	Describe("spec.packages change triggers regen and defers Deployment until ready", Ordered, func() {
+		const (
+			ns          = "e2e-regen-pkg"
+			clusterName = "regen-pkg"
+			adminName   = "regen-pkg-admin"
+			runtimeName = "regen-pkg-runtime"
+		)
+		BeforeAll(func() { createNS(ns) })
+		AfterAll(func() { deleteNS(ns) })
+
+		It("regenerates cluster.xml when spec.packages changes and defers the node Deployment update until ClusterConfigReady=True", func() {
+			ctx := context.Background()
+
+			By("creating cluster + admin + runtime and waiting for the cluster-config Secret to populate")
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+				map[string]interface{}{"name": clusterName, "namespace": ns})
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+				map[string]interface{}{"name": adminName, "namespace": ns, "clusterName": clusterName})
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+				map[string]interface{}{"name": runtimeName, "namespace": ns, "clusterName": clusterName})
+			utils.SimulateClusterConfigReady(ns, clusterName, e2eTimeout, e2eInterval)
+
+			By("capturing the initial cluster-config-hash and runtime Deployment generation")
+			secretBefore := &corev1.Secret{}
+			Expect(k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}, secretBefore)).To(Succeed())
+			hashBefore := secretBefore.Annotations["curity.io/cluster-config-hash"]
+			Expect(hashBefore).NotTo(BeEmpty(), "cluster-config-hash must be present after populate")
+
+			deployKey := client.ObjectKey{Name: ownedName(clusterName, runtimeName), Namespace: ns}
+			deployBefore := &appsv1.Deployment{}
+			Eventually(func() error {
+				return k().Get(ctx, deployKey, deployBefore)
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+			generationBefore := deployBefore.Generation
+
+			By("adding a package to the cluster CR")
+			Eventually(func() error {
+				cluster := &v1alpha1.IdentityServerCluster{}
+				if err := k().Get(ctx, client.ObjectKey{Name: clusterName, Namespace: ns}, cluster); err != nil {
+					return err
+				}
+				cluster.Spec.Packages = []v1alpha1.PackageSpec{
+					{
+						Source:    v1alpha1.PackageSource{URL: "https://example.test/plugin.zip"},
+						MountPath: "/opt/idsvr/plugins/p1",
+					},
+				}
+				return k().Update(ctx, cluster)
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("observing Branch C fire — Secret data resets and hash changes")
+			Eventually(func(g Gomega) {
+				s := &corev1.Secret{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}, s)).To(Succeed())
+				g.Expect(s.Annotations["curity.io/cluster-config-hash"]).NotTo(Equal(hashBefore),
+					"cluster-config-hash must change after spec.packages edit")
+				g.Expect(string(s.Data["cluster.xml"])).To(Equal("placeholder"),
+					"Secret data must reset to placeholder during regen")
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("observing a fresh genclust Job created against the new spec")
+			Eventually(func() error {
+				return k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}, &batchv1.Job{})
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("verifying the runtime Deployment update is deferred while ClusterConfigReady is False")
+			Consistently(func(g Gomega) {
+				d := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, deployKey, d)).To(Succeed())
+				g.Expect(d.Generation).To(Equal(generationBefore),
+					"Deployment.Generation must stay flat while the gate defers updates")
+				for _, ic := range d.Spec.Template.Spec.InitContainers {
+					g.Expect(ic.Name).NotTo(Equal("package-fetch-0"),
+						"package init container must not appear until ClusterConfigReady=True")
+				}
+			}, 5*time.Second, e2eInterval).Should(Succeed())
+
+			By("restoring ClusterConfigReady=True (simulates genclust Job completion in Kind)")
+			utils.SimulateClusterConfigReady(ns, clusterName, e2eTimeout, e2eInterval)
+
+			By("the deferred Deployment update lands in a single Generation bump, with the package mounted")
+			Eventually(func(g Gomega) {
+				d := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, deployKey, d)).To(Succeed())
+				g.Expect(d.Generation).To(BeNumerically(">", generationBefore),
+					"Deployment.Generation must bump once the gate opens")
+				found := false
+				for _, ic := range d.Spec.Template.Spec.InitContainers {
+					if ic.Name == "package-fetch-0" {
+						found = true
+						break
+					}
+				}
+				g.Expect(found).To(BeTrue(), "package-fetch-0 init container must be present after gate opens")
+			}, e2eTimeout, e2eInterval).Should(Succeed())
 		})
 	})
 

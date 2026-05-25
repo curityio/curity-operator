@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
@@ -878,5 +879,170 @@ func TestPackageSecretCandidatePredicate_Generic(t *testing.T) {
 	p := packageSecretCandidatePredicate{}
 	if p.Generic(event.GenericEvent{Object: secretOpaque(nil)}) {
 		t.Error("generic event: want false")
+	}
+}
+
+// ============================================================================
+// jobFailedCreateEventPredicate (Event watch for genclust Job FailedCreate)
+// ============================================================================
+
+func makeFailedCreateTestEvent(eventType, reason, involvedKind string) *corev1.Event {
+	return &corev1.Event{
+		Type:           eventType,
+		Reason:         reason,
+		InvolvedObject: corev1.ObjectReference{Kind: involvedKind, Name: "n", Namespace: "ns"},
+	}
+}
+
+func TestJobFailedCreateEventPredicate(t *testing.T) {
+	p := jobFailedCreateEventPredicate{}
+
+	cases := []struct {
+		name       string
+		obj        client.Object
+		wantCreate bool
+		wantUpdate bool
+	}{
+		{
+			name:       "Warning FailedCreate on Job => pass",
+			obj:        makeFailedCreateTestEvent(corev1.EventTypeWarning, "FailedCreate", "Job"),
+			wantCreate: true,
+			wantUpdate: true,
+		},
+		{
+			name: "Normal FailedCreate on Job => drop",
+			obj:  makeFailedCreateTestEvent(corev1.EventTypeNormal, "FailedCreate", "Job"),
+		},
+		{
+			name: "Warning SuccessfulCreate on Job => drop",
+			obj:  makeFailedCreateTestEvent(corev1.EventTypeWarning, "SuccessfulCreate", "Job"),
+		},
+		{
+			name: "Warning FailedCreate on Pod (not Job) => drop",
+			obj:  makeFailedCreateTestEvent(corev1.EventTypeWarning, "FailedCreate", "Pod"),
+		},
+		{
+			name: "Warning FailedCreate on ReplicaSet => drop",
+			obj:  makeFailedCreateTestEvent(corev1.EventTypeWarning, "FailedCreate", "ReplicaSet"),
+		},
+		{
+			name: "wrong type (Pod) => drop",
+			obj:  &corev1.Pod{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := p.Create(event.CreateEvent{Object: tc.obj}); got != tc.wantCreate {
+				t.Errorf("Create=%v want=%v", got, tc.wantCreate)
+			}
+			if got := p.Update(event.UpdateEvent{ObjectOld: tc.obj, ObjectNew: tc.obj}); got != tc.wantUpdate {
+				t.Errorf("Update=%v want=%v", got, tc.wantUpdate)
+			}
+		})
+	}
+
+	// Delete and Generic are always false.
+	if p.Delete(event.DeleteEvent{Object: makeFailedCreateTestEvent(corev1.EventTypeWarning, "FailedCreate", "Job")}) {
+		t.Error("Delete must always be false")
+	}
+	if p.Generic(event.GenericEvent{Object: makeFailedCreateTestEvent(corev1.EventTypeWarning, "FailedCreate", "Job")}) {
+		t.Error("Generic must always be false")
+	}
+}
+
+// ============================================================================
+// clusterConfigPodChangedPredicate (Pod watch for genclust Job pods)
+// ============================================================================
+
+func clusterConfigPod(name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "ns",
+			Labels:    map[string]string{"curity.io/component": "cluster-config"},
+		},
+	}
+}
+
+func TestClusterConfigPodChangedPredicate_LabelGate(t *testing.T) {
+	p := clusterConfigPodChangedPredicate{}
+	unlabeled := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "ns"}}
+	if p.Update(event.UpdateEvent{ObjectOld: unlabeled, ObjectNew: unlabeled}) {
+		t.Error("unlabeled Pod Update must drop")
+	}
+	if p.Delete(event.DeleteEvent{Object: unlabeled}) {
+		t.Error("unlabeled Pod Delete must drop")
+	}
+}
+
+func TestClusterConfigPodChangedPredicate_CreateAlwaysDrops(t *testing.T) {
+	p := clusterConfigPodChangedPredicate{}
+	if p.Create(event.CreateEvent{Object: clusterConfigPod("p")}) {
+		t.Error("Create must always drop (no status yet)")
+	}
+}
+
+func TestClusterConfigPodChangedPredicate_DeletePassesWhenLabeled(t *testing.T) {
+	p := clusterConfigPodChangedPredicate{}
+	if !p.Delete(event.DeleteEvent{Object: clusterConfigPod("p")}) {
+		t.Error("Delete must pass for labeled pod")
+	}
+}
+
+func TestClusterConfigPodChangedPredicate_UpdatePhaseChange(t *testing.T) {
+	p := clusterConfigPodChangedPredicate{}
+	oldP := clusterConfigPod("p")
+	oldP.Status.Phase = corev1.PodPending
+	newP := clusterConfigPod("p")
+	newP.Status.Phase = corev1.PodRunning
+	if !p.Update(event.UpdateEvent{ObjectOld: oldP, ObjectNew: newP}) {
+		t.Error("phase change must pass")
+	}
+}
+
+func TestClusterConfigPodChangedPredicate_UpdateContainerStatusChange(t *testing.T) {
+	p := clusterConfigPodChangedPredicate{}
+	oldP := clusterConfigPod("p")
+	newP := clusterConfigPod("p")
+	newP.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "genclust",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+	}}
+	if !p.Update(event.UpdateEvent{ObjectOld: oldP, ObjectNew: newP}) {
+		t.Error("container waiting state change must pass")
+	}
+}
+
+func TestClusterConfigPodChangedPredicate_UpdateIdentical(t *testing.T) {
+	p := clusterConfigPodChangedPredicate{}
+	pod := clusterConfigPod("p")
+	pod.Status.Phase = corev1.PodRunning
+	if p.Update(event.UpdateEvent{ObjectOld: pod, ObjectNew: pod}) {
+		t.Error("identical Update must drop")
+	}
+}
+
+func TestClusterConfigPodChangedPredicate_UpdatePodScheduledTransition(t *testing.T) {
+	p := clusterConfigPodChangedPredicate{}
+	oldP := clusterConfigPod("p")
+	oldP.Status.Phase = corev1.PodPending
+	newP := clusterConfigPod("p")
+	newP.Status.Phase = corev1.PodPending
+	newP.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+	}}
+	if !p.Update(event.UpdateEvent{ObjectOld: oldP, ObjectNew: newP}) {
+		t.Error("PodScheduled condition change must pass")
+	}
+}
+
+func TestClusterConfigPodChangedPredicate_NilGuards(t *testing.T) {
+	p := clusterConfigPodChangedPredicate{}
+	if p.Update(event.UpdateEvent{ObjectOld: nil, ObjectNew: clusterConfigPod("p")}) {
+		t.Error("nil ObjectOld must drop")
+	}
+	if p.Update(event.UpdateEvent{ObjectOld: clusterConfigPod("p"), ObjectNew: nil}) {
+		t.Error("nil ObjectNew must drop")
 	}
 }

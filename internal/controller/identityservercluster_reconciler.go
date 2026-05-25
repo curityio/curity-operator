@@ -19,6 +19,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
@@ -48,9 +49,9 @@ type IdentityServerClusterReconciler struct {
 // +kubebuilder:rbac:groups=curity.io,resources=identityservernodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
 
 // Reconcile handles a single reconciliation loop for an IdentityServerCluster.
@@ -131,6 +132,13 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 
 	// 5. Ensure cluster config (cluster.xml via genclust Job)
 	if err := r.ensureClusterConfig(ctx, &cluster, childNodes); err != nil {
+		// Pre-flight dry-run Forbidden: SCC/PodSecurity/quota/webhook denied
+		// the pod template. Surface as JobPodAdmissionForbidden with 5-minute
+		// requeue — there is no Pod-Create event to wake us when the user
+		// fixes the underlying issue.
+		if res, handled, helperErr := r.handleAdmissionForbidden(ctx, &cluster, err); handled {
+			return res, helperErr
+		}
 		if res, handled, helperErr := r.handlePermanentWriteError(ctx, &cluster, err); handled {
 			return res, helperErr
 		}
@@ -316,6 +324,16 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 			handler.EnqueueRequestsFromMapFunc(r.findClusterForJob),
 		).
 		Watches(
+			&corev1.Event{},
+			handler.EnqueueRequestsFromMapFunc(r.findClusterForJobFailedCreateEvent),
+			builder.WithPredicates(jobFailedCreateEventPredicate{}),
+		).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.findClusterForJobPod),
+			builder.WithPredicates(clusterConfigPodChangedPredicate{}),
+		).
+		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findClusterForSecret),
 			builder.WithPredicates(adminCredsCandidatePredicate{}),
@@ -465,6 +483,32 @@ func buildClusterConfigSecret(cluster *v1alpha1.IdentityServerCluster, clusterXM
 			clusterConfigKey: data,
 		},
 	}
+}
+
+// dryRunPodAdmission runs the apiserver's full admission chain (SCC,
+// PodSecurity, ResourceQuota, validating webhooks) against the Job's pod
+// template without persisting anything. Returns the apiserver error verbatim
+// — IsForbidden on SCC/PSA/quota denial, IsInvalid on spec violations, or
+// transient errors that bubble.
+//
+// Uses a deterministic Name (not GenerateName) so the apiserver's Forbidden
+// message text is stable across reconciles — the pod name appears in the
+// error message and a randomized name would defeat the condition-stability
+// gate that prevents Event spam.
+func (r *IdentityServerClusterReconciler) dryRunPodAdmission(
+	ctx context.Context, cluster *v1alpha1.IdentityServerCluster, job *batchv1.Job,
+) error {
+	dryRunPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        job.Name + "-dryrun-preflight",
+			Namespace:   cluster.Namespace,
+			Labels:      job.Spec.Template.Labels,
+			Annotations: job.Spec.Template.Annotations,
+		},
+		Spec: *job.Spec.Template.Spec.DeepCopy(),
+	}
+	dryRunPod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	return r.Create(ctx, dryRunPod, client.DryRunAll)
 }
 
 // jobCompletionTime returns the time the Job completed, or nil if not yet complete.
@@ -873,7 +917,35 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 			}
 		}
 
-		// Job still running
+		// Job still running — classify pod admission/scheduling state before
+		// defaulting to JobRunning so users see SCC/quota/scheduling/imagepull
+		// failures within seconds rather than waiting for BackoffLimit.
+		pods, listErr := r.listClusterConfigPods(ctx, cluster.Name, cluster.Namespace)
+		if listErr != nil {
+			log.Error(listErr, "list cluster-config pods failed; falling back to JobRunning")
+		} else {
+			var failedCreateMsg string
+			if len(pods) == 0 {
+				failedCreateMsg = r.latestJobFailedCreateMessage(ctx, job.UID, cluster.Namespace)
+			}
+			res := translateJobPodAdmission(pods, failedCreateMsg)
+			if res.set {
+				changed := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+					Type:               v1alpha1.ConditionClusterConfigReady,
+					Status:             res.status,
+					Reason:             res.reason,
+					Message:            res.message,
+					ObservedGeneration: cluster.Generation,
+				})
+				if changed {
+					r.Recorder.Eventf(cluster, corev1.EventTypeWarning, res.reason,
+						"Cluster config Job pod problem: %s", res.message)
+				}
+				return nil
+			}
+		}
+
+		// Job still running (no admission/scheduling failure detected)
 		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
 			metav1.ConditionFalse, "JobRunning",
 			"genclust Job is running", cluster.Generation)
@@ -889,6 +961,12 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 		newJob := buildClusterConfigJob(cluster, adminNodeName, computeClusterConfigHash(cluster, adminNodeName))
 		if err := controllerutil.SetControllerReference(cluster, newJob, r.Scheme); err != nil {
 			return fmt.Errorf("failed to set owner ref on genclust Job: %w", err)
+		}
+		// Pre-flight dry-run against the apiserver's admission chain catches
+		// SCC/PodSecurity/ResourceQuota denial before any Job/Pod exists,
+		// turning a multi-minute BackoffLimit wait into a ~50 ms condition flip.
+		if err := r.dryRunPodAdmission(ctx, cluster, newJob); err != nil {
+			return fmt.Errorf("pre-flight pod admission check failed: %w", err)
 		}
 		if err := r.Create(ctx, newJob); err != nil {
 			if apierrors.IsAlreadyExists(err) {
@@ -1170,6 +1248,244 @@ func (r *IdentityServerClusterReconciler) findClustersForManagedConfig(ctx conte
 		}
 	}
 	return requests
+}
+
+// findClusterForJobPod maps a Pod event labeled curity.io/component=cluster-config
+// to a reconcile request for the owning cluster (curity.io/cluster label).
+// Returns nil on a missing label.
+func (r *IdentityServerClusterReconciler) findClusterForJobPod(
+	_ context.Context, obj client.Object,
+) []ctrl.Request {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+	clusterName, exists := pod.Labels["curity.io/cluster"]
+	if !exists {
+		return nil
+	}
+	return []ctrl.Request{
+		{NamespacedName: client.ObjectKey{Name: clusterName, Namespace: pod.Namespace}},
+	}
+}
+
+// translateJobPodAdmissionResult is the contract between the translator and
+// its caller. set=false means "no failure detected; caller should fall
+// through to JobRunning". set=true means "use these condition fields".
+type translateJobPodAdmissionResult struct {
+	status  metav1.ConditionStatus
+	reason  string
+	message string
+	set     bool
+}
+
+// translateJobPodAdmission classifies the most-recent cluster-config Pod's
+// status into a sharp ClusterConfigReady reason, or returns set=false to let
+// the caller default to JobRunning. When no Pod exists, falls back to the
+// Layer 2 signal (cached Warning FailedCreate Event Message).
+//
+// Precedence: Pod-exists (Layer 3) trumps Event-only (Layer 2). A stale
+// FailedCreate Event from a prior failed attempt is ignored when a healthy
+// Pod now exists.
+func translateJobPodAdmission(
+	pods []corev1.Pod, failedCreateMsg string,
+) translateJobPodAdmissionResult {
+	if len(pods) == 0 {
+		if failedCreateMsg != "" {
+			return translateJobPodAdmissionResult{
+				status:  metav1.ConditionFalse,
+				reason:  "JobPodAdmissionFailed",
+				message: fmt.Sprintf("genclust pod admission failed: %s", failedCreateMsg),
+				set:     true,
+			}
+		}
+		return translateJobPodAdmissionResult{set: false}
+	}
+
+	current := mostRecentClusterConfigPod(pods)
+	if current == nil || current.DeletionTimestamp != nil {
+		return translateJobPodAdmissionResult{set: false}
+	}
+
+	if res := classifyClusterConfigPodScheduling(current); res.set {
+		return res
+	}
+	if res := classifyGenclustContainerStatus(current); res.set {
+		return res
+	}
+	return translateJobPodAdmissionResult{set: false}
+}
+
+// mostRecentClusterConfigPod picks the newest pod by CreationTimestamp;
+// ties broken by Name lexical (deterministic, since metav1.Time has 1s
+// resolution and ties on simultaneously-created pods are not uncommon).
+func mostRecentClusterConfigPod(pods []corev1.Pod) *corev1.Pod {
+	if len(pods) == 0 {
+		return nil
+	}
+	winner := &pods[0]
+	for i := 1; i < len(pods); i++ {
+		p := &pods[i]
+		switch {
+		case p.CreationTimestamp.After(winner.CreationTimestamp.Time):
+			winner = p
+		case p.CreationTimestamp.Equal(&winner.CreationTimestamp) && p.Name < winner.Name:
+			winner = p
+		}
+	}
+	return winner
+}
+
+// classifyClusterConfigPodScheduling returns JobPodSchedulingFailed when the
+// pod is Pending with PodScheduled=False/Unschedulable.
+func classifyClusterConfigPodScheduling(pod *corev1.Pod) translateJobPodAdmissionResult {
+	if pod.Status.Phase != corev1.PodPending {
+		return translateJobPodAdmissionResult{set: false}
+	}
+	for i := range pod.Status.Conditions {
+		c := &pod.Status.Conditions[i]
+		if c.Type != corev1.PodScheduled {
+			continue
+		}
+		if c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
+			return translateJobPodAdmissionResult{
+				status:  metav1.ConditionFalse,
+				reason:  "JobPodSchedulingFailed",
+				message: fmt.Sprintf("genclust Pod cannot be scheduled: %s", truncateReplicaFailureMessage(c.Message)),
+				set:     true,
+			}
+		}
+	}
+	return translateJobPodAdmissionResult{set: false}
+}
+
+// classifyGenclustContainerStatus returns one of JobPodImagePullFailed or
+// JobPodCreateConfigError when the genclust container is in a definitive
+// failure-mode Waiting state. Transient Waiting reasons (PodInitializing,
+// ContainerCreating) return set=false.
+func classifyGenclustContainerStatus(pod *corev1.Pod) translateJobPodAdmissionResult {
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if cs.Name != "genclust" {
+			continue
+		}
+		if cs.State.Waiting == nil {
+			return translateJobPodAdmissionResult{set: false}
+		}
+		switch cs.State.Waiting.Reason {
+		case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
+			return translateJobPodAdmissionResult{
+				status:  metav1.ConditionFalse,
+				reason:  "JobPodImagePullFailed",
+				message: fmt.Sprintf("genclust image pull failed: %s", truncateReplicaFailureMessage(cs.State.Waiting.Message)),
+				set:     true,
+			}
+		case "CreateContainerConfigError":
+			return translateJobPodAdmissionResult{
+				status:  metav1.ConditionFalse,
+				reason:  "JobPodCreateConfigError",
+				message: fmt.Sprintf("genclust container config error: %s", truncateReplicaFailureMessage(cs.State.Waiting.Message)),
+				set:     true,
+			}
+		}
+		return translateJobPodAdmissionResult{set: false}
+	}
+	return translateJobPodAdmissionResult{set: false}
+}
+
+// listClusterConfigPods returns the pods carrying the cluster-config Job's
+// label set for the named cluster. Cache-backed; same selector as
+// readJobPodLogs (lines 980-987) so the two stay in lockstep.
+func (r *IdentityServerClusterReconciler) listClusterConfigPods(
+	ctx context.Context, clusterName, namespace string,
+) ([]corev1.Pod, error) {
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList,
+		client.InNamespace(namespace),
+		client.MatchingLabels{
+			"curity.io/cluster":   clusterName,
+			"curity.io/component": "cluster-config",
+		},
+	); err != nil {
+		return nil, err
+	}
+	return podList.Items, nil
+}
+
+// findClusterForJobFailedCreateEvent maps a Warning FailedCreate Event on a
+// Job to a reconcile request for the owning cluster. The predicate has
+// already filtered to Type=Warning, Reason=FailedCreate, InvolvedObject.Kind=Job
+// (and the server-side cache scope guarantees the same). Resolves the cluster
+// name from the Job's curity.io/cluster label (cache-backed Get). Returns nil
+// on any miss — the Event diagnostic is lost but no condition is set.
+func (r *IdentityServerClusterReconciler) findClusterForJobFailedCreateEvent(
+	ctx context.Context, obj client.Object,
+) []ctrl.Request {
+	ev, ok := obj.(*corev1.Event)
+	if !ok {
+		return nil
+	}
+	var job batchv1.Job
+	if err := r.Get(ctx, client.ObjectKey{
+		Name:      ev.InvolvedObject.Name,
+		Namespace: ev.InvolvedObject.Namespace,
+	}, &job); err != nil {
+		return nil
+	}
+	clusterName, exists := job.Labels["curity.io/cluster"]
+	if !exists {
+		return nil
+	}
+	return []ctrl.Request{
+		{NamespacedName: client.ObjectKey{Name: clusterName, Namespace: job.Namespace}},
+	}
+}
+
+// latestJobFailedCreateMessage returns the Message of the most-recent
+// Warning FailedCreate Event whose InvolvedObject.UID equals the given Job
+// UID. Reads from the controller-runtime cache populated by the scoped Event
+// informer registered in cmd/manager/main.go; returns "" on cache miss,
+// empty list, or any error.
+//
+// kube-controller-manager keeps Event.Message stable across the failure
+// Series (Series.Count increments while Message stays put), so this helper
+// produces identical output across reconciles when the underlying admission
+// denial is the same — satisfying the condition-stability requirement N4.
+func (r *IdentityServerClusterReconciler) latestJobFailedCreateMessage(
+	ctx context.Context, jobUID types.UID, namespace string,
+) string {
+	var events corev1.EventList
+	if err := r.List(ctx, &events, client.InNamespace(namespace)); err != nil {
+		return ""
+	}
+	var newest *corev1.Event
+	for i := range events.Items {
+		ev := &events.Items[i]
+		if ev.InvolvedObject.UID != jobUID {
+			continue
+		}
+		if newest == nil {
+			newest = ev
+			continue
+		}
+		// Prefer the newer Event by LastTimestamp; fall back to EventTime when
+		// the older v1 timestamp field is unset (modern emitters use EventTime).
+		newestStamp := newest.LastTimestamp
+		if newestStamp.IsZero() {
+			newestStamp = metav1.NewTime(newest.EventTime.Time)
+		}
+		evStamp := ev.LastTimestamp
+		if evStamp.IsZero() {
+			evStamp = metav1.NewTime(ev.EventTime.Time)
+		}
+		if evStamp.After(newestStamp.Time) {
+			newest = ev
+		}
+	}
+	if newest == nil {
+		return ""
+	}
+	return truncateReplicaFailureMessage(newest.Message)
 }
 
 // findClusterForJob maps a Job change to a reconcile request for the owning cluster.

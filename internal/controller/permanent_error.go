@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -124,4 +125,55 @@ func (r *IdentityServerClusterReconciler) handlePermanentWriteError(
 		"%s rejected by apiserver: %s", kind, apiMsg)
 
 	return ctrl.Result{}, true, nil
+}
+
+// handleAdmissionForbidden classifies an apiserver IsForbidden response from
+// the cluster-config dry-run pod Create as a pod-admission denial (SCC,
+// PodSecurity, ResourceQuota, validating webhook). Sets
+// ClusterConfigReady=False/JobPodAdmissionForbidden and emits one Warning
+// event on transition. Returns RequeueAfter=5m on both transition and no-op
+// paths so the operator re-checks admission state periodically — no
+// Pod-Create event exists to wake us when the user fixes the underlying
+// problem.
+func (r *IdentityServerClusterReconciler) handleAdmissionForbidden(
+	ctx context.Context,
+	cluster *v1alpha1.IdentityServerCluster,
+	writeErr error,
+) (ctrl.Result, bool, error) {
+	if !apierrors.IsForbidden(writeErr) {
+		return ctrl.Result{}, false, nil
+	}
+
+	var statusErr *apierrors.StatusError
+	if !errors.As(writeErr, &statusErr) || statusErr == nil {
+		return ctrl.Result{}, false, nil
+	}
+
+	apiMsg := truncateReplicaFailureMessage(statusErr.ErrStatus.Message)
+
+	changed := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionClusterConfigReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             "JobPodAdmissionForbidden",
+		Message:            fmt.Sprintf("genclust pod admission denied: %s", apiMsg),
+		ObservedGeneration: cluster.Generation,
+	})
+
+	if !changed {
+		return ctrl.Result{RequeueAfter: 5 * time.Minute}, true, nil
+	}
+
+	cluster.Status.ObservedGeneration = cluster.Generation
+
+	if err := r.Status().Update(ctx, cluster); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, true, nil
+		}
+		return ctrl.Result{}, true, fmt.Errorf("updating status after admission denied: %w", err)
+	}
+
+	r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "JobPodAdmissionForbidden",
+		"genclust pod admission denied: %s", apiMsg)
+
+	return ctrl.Result{RequeueAfter: 5 * time.Minute}, true, nil
 }

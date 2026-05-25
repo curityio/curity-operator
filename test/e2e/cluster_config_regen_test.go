@@ -178,7 +178,7 @@ var _ = Describe("cluster.xml regeneration", func() {
 			hashBefore := secretBefore.Annotations["curity.io/cluster-config-hash"]
 			Expect(hashBefore).NotTo(BeEmpty(), "cluster-config-hash must be present after populate")
 
-			deployKey := client.ObjectKey{Name: clusterName + "-" + runtimeName, Namespace: ns}
+			deployKey := client.ObjectKey{Name: ownedName(clusterName, runtimeName), Namespace: ns}
 			deployBefore := &appsv1.Deployment{}
 			Eventually(func() error {
 				return k().Get(ctx, deployKey, deployBefore)

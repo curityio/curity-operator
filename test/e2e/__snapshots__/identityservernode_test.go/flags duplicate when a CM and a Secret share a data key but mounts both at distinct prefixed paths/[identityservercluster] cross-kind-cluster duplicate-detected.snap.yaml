@@ -1,0 +1,56 @@
+
+[IdentityServerNode configuration Label-based config discovery Duplicate data keys across resources flags duplicate when a CM and a Secret share a data key but mounts both at distinct prefixed paths - 1]
+metadata:
+  name: cross-kind-cluster
+  namespace: e2e-cfg-dup-keys
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  finalizers:
+    - curity.io/cluster-protection
+  managedFields: <Any value>
+spec:
+  version: "11.0"
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: ClusterConfigReady
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  version: "11.0"
+  clusterConfigSecretName: cross-kind-cluster-cluster-config
+  managedResourceIssueCount: 2
+  managedResourceIssues:
+    - kind: ConfigMap
+      name: cross-kind-cm
+      reason: DuplicateConfigKey
+      message: "data key \"shared.xml\" (config type \"base\") exists in multiple resources: [ConfigMap/cross-kind-cm Secret/cross-kind-secret] — all will be mounted at distinct paths (prefixed by resource name), verify this is intentional"
+    - kind: Secret
+      name: cross-kind-secret
+      reason: DuplicateConfigKey
+      message: "data key \"shared.xml\" (config type \"base\") exists in multiple resources: [ConfigMap/cross-kind-cm Secret/cross-kind-secret] — all will be mounted at distinct paths (prefixed by resource name), verify this is intentional"
+
+---

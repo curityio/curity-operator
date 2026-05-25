@@ -1609,6 +1609,225 @@ var _ = Describe("IdentityServerNode", func() {
 				})
 			})
 
+			Describe("Duplicate data keys across resources", Ordered, func() {
+				const ns = "e2e-cfg-dup-keys"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				countIssuesFor := func(g Gomega, clusterName, resourceName, reason string) int {
+					cluster := &v1alpha1.IdentityServerCluster{}
+					g.Expect(k().Get(context.Background(),
+						client.ObjectKey{Name: clusterName, Namespace: ns}, cluster)).To(Succeed())
+					n := 0
+					for _, issue := range cluster.Status.ManagedResourceIssues {
+						if issue.Name == resourceName && issue.Reason == reason {
+							n++
+						}
+					}
+					return n
+				}
+				countWarningEvents := func(g Gomega, resourceName, reason string) int {
+					var events corev1.EventList
+					g.Expect(k().List(context.Background(), &events, client.InNamespace(ns))).To(Succeed())
+					n := 0
+					for _, e := range events.Items {
+						if e.InvolvedObject.Name == resourceName &&
+							e.Reason == reason &&
+							e.Type == corev1.EventTypeWarning {
+							n++
+						}
+					}
+					return n
+				}
+
+				It("mounts both CMs at distinct prefixed paths and flags DuplicateConfigKey", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "dup-key-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "dup-key-admin", "namespace": ns, "clusterName": "dup-key-cluster"})
+					utils.SimulateClusterConfigReady(ns, "dup-key-cluster", e2eTimeout, e2eInterval)
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("dup-key-cluster", "dup-key-admin"), Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					// Two base-typed CMs share base-config.xml. Without the
+					// kind+name prefix in mountFilename, both VolumeMounts would
+					// collide on the same MountPath. Cluster scope keeps the
+					// blast radius bounded to this It.
+					cmA := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "dup-key-a", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/cluster": "dup-key-cluster"},
+						},
+						Data: map[string]string{"base-config.xml": "<a/>"},
+					}
+					cmB := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "dup-key-b", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/cluster": "dup-key-cluster"},
+						},
+						Data: map[string]string{"base-config.xml": "<b/>"},
+					}
+					Expect(k().Create(ctx, cmA)).To(Succeed())
+					Expect(k().Create(ctx, cmB)).To(Succeed())
+
+					By("expecting both CMs mounted at distinct prefixed paths")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("dup-key-cluster", "dup-key-admin"), Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-dup-key-a",
+							"/opt/idsvr/etc/init/cm_dup-key-a_base-config.xml")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-dup-key-b",
+							"/opt/idsvr/etc/init/cm_dup-key-b_base-config.xml")).To(BeTrue())
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("expecting DuplicateConfigKey surfaced for both CMs in cluster status")
+					Eventually(func(g Gomega) {
+						g.Expect(countIssuesFor(g, "dup-key-cluster", "dup-key-a", "DuplicateConfigKey")).
+							To(Equal(1))
+						g.Expect(countIssuesFor(g, "dup-key-cluster", "dup-key-b", "DuplicateConfigKey")).
+							To(Equal(1))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("expecting a Warning event on each duplicate CM")
+					Eventually(func(g Gomega) {
+						g.Expect(countWarningEvents(g, "dup-key-a", "DuplicateConfigKey")).
+							To(BeNumerically(">=", 1))
+						g.Expect(countWarningEvents(g, "dup-key-b", "DuplicateConfigKey")).
+							To(BeNumerically(">=", 1))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					cluster := &v1alpha1.IdentityServerCluster{}
+					Expect(k().Get(ctx, client.ObjectKey{Name: "dup-key-cluster", Namespace: ns}, cluster)).To(Succeed())
+					utils.MatchCRDResource(cluster, "dup-key-cluster duplicate-detected")
+				})
+
+				It("flags duplicate when a CM and a Secret share a data key but mounts both at distinct prefixed paths", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "cross-kind-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "cross-kind-admin", "namespace": ns, "clusterName": "cross-kind-cluster"})
+					utils.SimulateClusterConfigReady(ns, "cross-kind-cluster", e2eTimeout, e2eInterval)
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("cross-kind-cluster", "cross-kind-admin"), Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					// detectDuplicateKeys groups by (configType, filename) and
+					// deliberately ignores kind — a CM and a Secret sharing a
+					// data key is still surfaced as DuplicateConfigKey even
+					// though the cm_/secret_ prefixes keep mount paths distinct.
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "cross-kind-cm", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/cluster": "cross-kind-cluster"},
+						},
+						Data: map[string]string{"shared.xml": "<cm/>"},
+					}
+					sec := &corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "cross-kind-secret", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/cluster": "cross-kind-cluster"},
+						},
+						Data: map[string][]byte{"shared.xml": []byte("<secret/>")},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+					Expect(k().Create(ctx, sec)).To(Succeed())
+
+					By("expecting both kinds mounted at distinct prefixed paths")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("cross-kind-cluster", "cross-kind-admin"), Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-cross-kind-cm",
+							"/opt/idsvr/etc/init/cm_cross-kind-cm_shared.xml")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-secret-cross-kind-secret",
+							"/opt/idsvr/etc/init/secret_cross-kind-secret_shared.xml")).To(BeTrue())
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("expecting DuplicateConfigKey on both regardless of kind")
+					Eventually(func(g Gomega) {
+						g.Expect(countIssuesFor(g, "cross-kind-cluster", "cross-kind-cm", "DuplicateConfigKey")).
+							To(Equal(1))
+						g.Expect(countIssuesFor(g, "cross-kind-cluster", "cross-kind-secret", "DuplicateConfigKey")).
+							To(Equal(1))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					cluster := &v1alpha1.IdentityServerCluster{}
+					Expect(k().Get(ctx, client.ObjectKey{Name: "cross-kind-cluster", Namespace: ns}, cluster)).To(Succeed())
+					utils.MatchCRDResource(cluster, "cross-kind-cluster duplicate-detected")
+				})
+
+				It("clears DuplicateConfigKey once the conflicting key is renamed", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "recover-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "recover-admin", "namespace": ns, "clusterName": "recover-cluster"})
+					utils.SimulateClusterConfigReady(ns, "recover-cluster", e2eTimeout, e2eInterval)
+
+					deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("recover-cluster", "recover-admin"), Namespace: ns}}
+					utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+					cmA := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "recover-a", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/cluster": "recover-cluster"},
+						},
+						Data: map[string]string{"app.xml": "<a/>"},
+					}
+					cmB := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "recover-b", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/cluster": "recover-cluster"},
+						},
+						Data: map[string]string{"app.xml": "<b/>"},
+					}
+					Expect(k().Create(ctx, cmA)).To(Succeed())
+					Expect(k().Create(ctx, cmB)).To(Succeed())
+
+					By("waiting for the initial duplicate to be surfaced")
+					Eventually(func(g Gomega) {
+						g.Expect(countIssuesFor(g, "recover-cluster", "recover-a", "DuplicateConfigKey")).To(Equal(1))
+						g.Expect(countIssuesFor(g, "recover-cluster", "recover-b", "DuplicateConfigKey")).To(Equal(1))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					cluster := &v1alpha1.IdentityServerCluster{}
+					Expect(k().Get(ctx, client.ObjectKey{Name: "recover-cluster", Namespace: ns}, cluster)).To(Succeed())
+					utils.MatchCRDResource(cluster, "recover-cluster duplicate-detected")
+
+					By("renaming the key on recover-b so the collision goes away")
+					Expect(k().Get(ctx, client.ObjectKey{Name: "recover-b", Namespace: ns}, cmB)).To(Succeed())
+					cmB.Data = map[string]string{"other.xml": "<b/>"}
+					Expect(k().Update(ctx, cmB)).To(Succeed())
+
+					By("expecting DuplicateConfigKey to clear on both")
+					Eventually(func(g Gomega) {
+						g.Expect(countIssuesFor(g, "recover-cluster", "recover-a", "DuplicateConfigKey")).To(Equal(0))
+						g.Expect(countIssuesFor(g, "recover-cluster", "recover-b", "DuplicateConfigKey")).To(Equal(0))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("expecting both CMs still mounted at their (now non-colliding) prefixed paths")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("recover-cluster", "recover-admin"), Namespace: ns}, deploy)).To(Succeed())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-recover-a",
+							"/opt/idsvr/etc/init/cm_recover-a_app.xml")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(deploy, "cfg-cm-recover-b",
+							"/opt/idsvr/etc/init/cm_recover-b_other.xml")).To(BeTrue())
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					Expect(k().Get(ctx, client.ObjectKey{Name: "recover-cluster", Namespace: ns}, cluster)).To(Succeed())
+					utils.MatchCRDResource(cluster, "recover-cluster duplicate-cleared")
+				})
+			})
+
 			Describe("Rolling restart on config change", Ordered, func() {
 				const ns = "e2e-cfg-rolling"
 				BeforeAll(func() { createNS(ns) })

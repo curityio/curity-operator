@@ -1,0 +1,56 @@
+
+[IdentityServerNode configuration Label-based config discovery Duplicate data keys across resources clears DuplicateConfigKey once the conflicting key is renamed - 1]
+metadata:
+  name: recover-cluster
+  namespace: e2e-cfg-dup-keys
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  finalizers:
+    - curity.io/cluster-protection
+  managedFields: <Any value>
+spec:
+  version: "11.0"
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: ClusterConfigReady
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  version: "11.0"
+  clusterConfigSecretName: recover-cluster-cluster-config
+  managedResourceIssueCount: 2
+  managedResourceIssues:
+    - kind: ConfigMap
+      name: recover-a
+      reason: DuplicateConfigKey
+      message: "data key \"app.xml\" (config type \"base\") exists in multiple resources: [ConfigMap/recover-a ConfigMap/recover-b] — all will be mounted at distinct paths (prefixed by resource name), verify this is intentional"
+    - kind: ConfigMap
+      name: recover-b
+      reason: DuplicateConfigKey
+      message: "data key \"app.xml\" (config type \"base\") exists in multiple resources: [ConfigMap/recover-a ConfigMap/recover-b] — all will be mounted at distinct paths (prefixed by resource name), verify this is intentional"
+
+---

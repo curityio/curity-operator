@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
@@ -310,7 +311,12 @@ func defaultAdminCredentials(clusterName string) *v1alpha1.CredentialsSource {
 // SetupWithManager registers the controller with the manager.
 func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.IdentityServerCluster{}).
+		For(&v1alpha1.IdentityServerCluster{},
+			builder.WithPredicates(predicate.Or(
+				predicate.GenerationChangedPredicate{},
+				predicate.LabelChangedPredicate{},
+				predicate.AnnotationChangedPredicate{},
+			))).
 		Watches(
 			&v1alpha1.IdentityServerNode{},
 			// Union old+new clusterRef on Update events so the abandoned

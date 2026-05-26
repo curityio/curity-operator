@@ -95,11 +95,17 @@ var _ = Describe("IdentityServerCluster invalid-spec classifier", Ordered, func(
 			g.Expect(deg.Message).NotTo(ContainSubstring("failed to create admin credentials secret"))
 		}, 30*time.Second, time.Second).Should(Succeed())
 
-		By("helper-set Degraded is the ONLY condition; operational conditions stay absent on bad-spec bail")
+		By("helper sets Ready=False/InvalidSpec (PR-1 end-to-end Ready convergence); other operational conditions stay absent on bad-spec bail")
 		cluster := &v1alpha1.IdentityServerCluster{}
 		Expect(k().Get(ctx, client.ObjectKey{Name: clusterName, Namespace: ns}, cluster)).To(Succeed())
+
+		ready := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionReady)
+		Expect(ready).NotTo(BeNil(), "Ready condition must be set on bad-spec bail (PR-1)")
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(v1alpha1.ReasonInvalidSpec))
+		Expect(ready.Message).To(ContainSubstring("see Degraded condition"))
+
 		for _, condType := range []string{
-			v1alpha1.ConditionReady,
 			v1alpha1.ConditionAvailable,
 			v1alpha1.ConditionProgressing,
 			v1alpha1.ConditionClusterConfigReady,
@@ -291,10 +297,12 @@ var _ = Describe("IdentityServerCluster invalid-spec — multi-CR isolation", Or
 	})
 })
 
-// Helper-bail preserves operational conditions injected by another writer
-// (or by a prior reconcile that completed successfully). This is the
-// structural test for the "leave operational conditions untouched" decision.
-var _ = Describe("IdentityServerCluster invalid-spec — operational conditions preserved through helper bail", Ordered, func() {
+// PR-1 convergence: helper overwrites Ready (end-to-end semantics) but does NOT
+// touch Available / Progressing / ClusterConfigReady. This test pins both
+// halves of that contract: an externally-injected Ready=True/ManualForTest
+// gets overwritten by the helper to Ready=False/InvalidSpec, while
+// Available=True/ManualForTest is preserved.
+var _ = Describe("IdentityServerCluster invalid-spec — Ready overwritten, other operational conditions preserved through helper bail", Ordered, func() {
 	const (
 		ns          = "e2e-invalid-spec-preserve"
 		clusterName = "preserve-bad-cluster"
@@ -303,7 +311,7 @@ var _ = Describe("IdentityServerCluster invalid-spec — operational conditions 
 	BeforeAll(func() { createNS(ns) })
 	AfterAll(func() { deleteNS(ns) })
 
-	It("does not strip Ready/Available conditions that were set externally while the spec stays bad", func() {
+	It("overwrites externally-injected Ready (end-to-end semantics) but preserves Available through helper bail", func() {
 		ctx := context.Background()
 
 		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-with-creds.yaml", ns,
@@ -365,16 +373,20 @@ var _ = Describe("IdentityServerCluster invalid-spec — operational conditions 
 			}, 30*time.Second, time.Second).Should(Succeed())
 		}
 
-		// Consistently: Ready/Available must remain True/ManualForTest.
-		// If the helper accidentally wrote operational conditions, this fails.
+		// PR-1: Ready gets overwritten by the helper (end-to-end semantics —
+		// the spec the user just applied is not being honored, so Ready=False
+		// is the truthful signal even if old pods would still serve). Available
+		// stays at the injected ManualForTest value — the helper deliberately
+		// does not synthesize Available from a spec rejection.
 		Consistently(func(g Gomega) {
 			cluster := &v1alpha1.IdentityServerCluster{}
 			g.Expect(k().Get(ctx, client.ObjectKey{Name: clusterName, Namespace: ns}, cluster)).To(Succeed())
 
 			ready := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionReady)
-			g.Expect(ready).NotTo(BeNil(), "Ready stripped — helper touched a condition it shouldn't")
-			g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-			g.Expect(ready.Reason).To(Equal("ManualForTest"))
+			g.Expect(ready).NotTo(BeNil(), "Ready missing — helper should have set it to False/InvalidSpec")
+			g.Expect(ready.Status).To(Equal(metav1.ConditionFalse),
+				"Ready should be overwritten to False/InvalidSpec by PR-1 helper, not preserved as ManualForTest")
+			g.Expect(ready.Reason).To(Equal(v1alpha1.ReasonInvalidSpec))
 
 			avail := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionAvailable)
 			g.Expect(avail).NotTo(BeNil(), "Available stripped — helper touched a condition it shouldn't")

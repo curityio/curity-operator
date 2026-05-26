@@ -90,7 +90,7 @@ func TestHandlePermanentWriteError_IsInvalid_FlipsConditions(t *testing.T) {
 	node := freshTestNode()
 	r, rec := newNodeReconcilerForHelperTest(t, node, nil)
 
-	res, handled, err := r.handlePermanentWriteError(ctx, node, "Deployment", invalidErr("invalid label syntax"))
+	res, handled, err := r.handlePermanentWriteError(ctx, node, invalidErr("invalid label syntax"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestHandlePermanentWriteError_IsConflict_NotHandled(t *testing.T) {
 
 	conflictErr := apierrors.NewConflict(schema.GroupResource{Group: "apps", Resource: "deployments"}, "rt-1", errors.New("the object has been modified"))
 
-	_, handled, err := r.handlePermanentWriteError(ctx, node, "Deployment", conflictErr)
+	_, handled, err := r.handlePermanentWriteError(ctx, node, conflictErr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestHandlePermanentWriteError_IsNotFound_NotHandled(t *testing.T) {
 
 	nfErr := apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "deployments"}, "rt-1")
 
-	_, handled, err := r.handlePermanentWriteError(ctx, node, "Deployment", nfErr)
+	_, handled, err := r.handlePermanentWriteError(ctx, node, nfErr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestHandlePermanentWriteError_GenericError_NotHandled(t *testing.T) {
 	node := freshTestNode()
 	r, _ := newNodeReconcilerForHelperTest(t, node, nil)
 
-	_, handled, err := r.handlePermanentWriteError(ctx, node, "Deployment", errors.New("network blip"))
+	_, handled, err := r.handlePermanentWriteError(ctx, node, errors.New("network blip"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestHandlePermanentWriteError_TruncatesLongMessage(t *testing.T) {
 
 	longMsg := strings.Repeat("x", replicaFailureMessageMaxLen+500)
 
-	_, handled, err := r.handlePermanentWriteError(ctx, node, "Deployment", invalidErr(longMsg))
+	_, handled, err := r.handlePermanentWriteError(ctx, node, invalidErr(longMsg))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestHandlePermanentWriteError_NoChange_SkipsWrite(t *testing.T) {
 	// Status updater would error if invoked — proves the helper does not call it.
 	r, rec := newNodeReconcilerForHelperTest(t, node, errors.New("status update must not be called"))
 
-	_, handled, err := r.handlePermanentWriteError(ctx, node, "Deployment", preErr)
+	_, handled, err := r.handlePermanentWriteError(ctx, node, preErr)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestHandlePermanentWriteError_StatusConflict_RequeueTrue(t *testing.T) {
 
 	r, rec := newNodeReconcilerForHelperTest(t, node, statusConflictErr)
 
-	res, handled, err := r.handlePermanentWriteError(ctx, node, "Deployment", invalidErr("anything"))
+	res, handled, err := r.handlePermanentWriteError(ctx, node, invalidErr("anything"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestHandlePermanentWriteError_StatusNonConflictError_Bubbles(t *testing.T) 
 	apiDownErr := errors.New("connection refused")
 	r, _ := newNodeReconcilerForHelperTest(t, node, apiDownErr)
 
-	_, handled, err := r.handlePermanentWriteError(ctx, node, "Deployment", invalidErr("anything"))
+	_, handled, err := r.handlePermanentWriteError(ctx, node, invalidErr("anything"))
 	if !handled {
 		t.Fatal("expected handled=true even on bubbled error")
 	}
@@ -302,6 +302,182 @@ func tail(s string, n int) string {
 		return s
 	}
 	return s[len(s)-n:]
+}
+
+// ============================================================================
+// extractInvalid direct tests (PR-1: shared extraction helper)
+// ============================================================================
+
+// fakeAPIStatus implements the apierrors.APIStatus interface but is NOT a
+// *apierrors.StatusError. apierrors.IsInvalid returns true on this type
+// (it uses errors.As against the interface, not the concrete type), but
+// extractInvalid's errors.As against *apierrors.StatusError fails.
+// Documents the defensive ok=false branch in extractInvalid.
+type fakeAPIStatus struct {
+	status metav1.Status
+}
+
+func (f *fakeAPIStatus) Error() string         { return f.status.Message }
+func (f *fakeAPIStatus) Status() metav1.Status { return f.status }
+
+func TestExtractInvalid_StandardInvalid(t *testing.T) {
+	err := invalidErr("bad label syntax")
+	kind, msg, ok := extractInvalid(err)
+	if !ok {
+		t.Fatal("expected ok=true on standard NewInvalid")
+	}
+	if kind != "Deployment" {
+		t.Errorf("kind = %q, want Deployment", kind)
+	}
+	if msg == "" {
+		t.Error("msg unexpectedly empty")
+	}
+}
+
+func TestExtractInvalid_Nil(t *testing.T) {
+	kind, msg, ok := extractInvalid(nil)
+	if ok || kind != "" || msg != "" {
+		t.Errorf("expected (\"\", \"\", false) for nil; got (%q, %q, %v)", kind, msg, ok)
+	}
+}
+
+func TestExtractInvalid_GenericError(t *testing.T) {
+	_, _, ok := extractInvalid(errors.New("network blip"))
+	if ok {
+		t.Error("expected ok=false for generic error")
+	}
+}
+
+func TestExtractInvalid_WrongAPIErrorClass(t *testing.T) {
+	cases := []error{
+		apierrors.NewNotFound(schema.GroupResource{Resource: "deployments"}, "x"),
+		apierrors.NewForbidden(schema.GroupResource{Resource: "deployments"}, "x", errors.New("rbac")),
+		apierrors.NewConflict(schema.GroupResource{Resource: "deployments"}, "x", errors.New("modified")),
+		apierrors.NewBadRequest("malformed"),
+	}
+	for _, e := range cases {
+		if _, _, ok := extractInvalid(e); ok {
+			t.Errorf("expected ok=false for %T", e)
+		}
+	}
+}
+
+func TestExtractInvalid_FmtErrorfWrap(t *testing.T) {
+	raw := invalidErr("inner error")
+	wrapped := fmt.Errorf("operator wrap: %w", raw)
+	kind, msg, ok := extractInvalid(wrapped)
+	if !ok {
+		t.Fatal("expected errors.As to unwrap %w into *StatusError")
+	}
+	if kind != "Deployment" {
+		t.Errorf("kind = %q, want Deployment", kind)
+	}
+	// The wrap text must NOT leak into the message — extractInvalid pulls
+	// from statusErr.ErrStatus.Message directly, not from writeErr.Error().
+	if strings.Contains(msg, "operator wrap:") {
+		t.Errorf("operator-wrap text leaked into apiMsg: %q", msg)
+	}
+}
+
+func TestExtractInvalid_CustomAPIStatusWrap_DefensiveBranch(t *testing.T) {
+	// Construct an APIStatus implementer that is NOT *apierrors.StatusError.
+	// Exercises the defensive errors.As-failure branch in extractInvalid.
+	// apierrors.IsInvalid returns true (it uses APIStatus interface via
+	// errors.As), but extractInvalid's errors.As against *StatusError fails.
+	custom := &fakeAPIStatus{
+		status: metav1.Status{
+			Reason:  metav1.StatusReasonInvalid,
+			Message: "custom message",
+		},
+	}
+	if !apierrors.IsInvalid(custom) {
+		t.Fatal("test setup: fakeAPIStatus should pass IsInvalid via APIStatus interface")
+	}
+	_, _, ok := extractInvalid(custom)
+	if ok {
+		t.Error("expected ok=false when errors.As(*StatusError) fails — defensive branch")
+	}
+}
+
+func TestExtractInvalid_EmptyDetailsKind_FallbackToResource(t *testing.T) {
+	// Build a NewInvalid with empty Group/Kind to verify the fallback.
+	gk := schema.GroupKind{}
+	err := apierrors.NewInvalid(gk, "x", field.ErrorList{
+		field.Invalid(field.NewPath("metadata", "name"), "x", "invalid"),
+	})
+	kind, _, ok := extractInvalid(err)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	// With empty GroupKind, Details.Kind is also empty; extractInvalid
+	// falls back to the literal "Resource" so condition messages remain
+	// readable instead of saying " rejected by apiserver:".
+	if kind != "Resource" {
+		t.Errorf("expected fallback kind=\"Resource\" when Details.Kind is empty; got %q", kind)
+	}
+}
+
+// ============================================================================
+// Cross-path precedence (PR-1: helper Ready wins over applyReadyOverlay Ready)
+// ============================================================================
+
+// When a node already has PackagesReady=False/PackageFetchFailed set (e.g. by
+// the pod-watch translator from a prior reconcile) AND Ready=False with the
+// PackagesNotReady reason from applyReadyOverlay, a subsequent IsInvalid on
+// a child write must update Ready to False/InvalidSpec without disturbing
+// PackagesReady. Documents U-7's verified non-fight: the helper bails
+// before reaching the second applyReadyOverlay call site, so InvalidSpec is
+// the last writer for Ready in any reconcile that hits both.
+func TestHandlePermanentWriteError_PrecedenceOverPackagesNotReady(t *testing.T) {
+	ctx := context.Background()
+	node := freshTestNode()
+
+	// Pre-set state: prior reconcile flagged PackagesReady=False, the overlay
+	// then forced Ready=False/PackagesNotReady. This is the steady-state
+	// shape on pkg-smoke today (per project_packages_status_visibility_followup).
+	apimeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionPackagesReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1alpha1.ReasonPackageFetchFailed,
+		Message:            "init container exited 6",
+		ObservedGeneration: 7,
+	})
+	apimeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1alpha1.ReasonPackagesNotReady,
+		Message:            "package fetch not ready; see PackagesReady condition",
+		ObservedGeneration: 7,
+	})
+
+	r, _ := newNodeReconcilerForHelperTest(t, node, nil)
+
+	// Now a child write returns IsInvalid (e.g. user simultaneously set bad
+	// podLabels — same reconcile sees both signals).
+	_, handled, err := r.handlePermanentWriteError(ctx, node, invalidErr("bad label syntax"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+
+	ready := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionReady)
+	if ready == nil || ready.Reason != v1alpha1.ReasonInvalidSpec {
+		t.Errorf("Ready reason should be InvalidSpec (helper wins); got %+v", ready)
+	}
+
+	// PackagesReady must remain untouched — the helper has no business
+	// rewriting a condition it doesn't own. Future debugging relies on this.
+	pkgs := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionPackagesReady)
+	if pkgs == nil || pkgs.Reason != v1alpha1.ReasonPackageFetchFailed {
+		t.Errorf("PackagesReady should stay untouched by helper; got %+v", pkgs)
+	}
+
+	deg := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionDegraded)
+	if deg == nil || deg.Reason != v1alpha1.ReasonInvalidSpec {
+		t.Errorf("Degraded should be InvalidSpec; got %+v", deg)
+	}
 }
 
 // ============================================================================
@@ -360,7 +536,7 @@ func invalidErrForKind(kind, name, message string) error {
 }
 
 // T-1.
-func TestClusterHandlePermanentWriteError_IsInvalid_FlipsDegraded(t *testing.T) {
+func TestClusterHandlePermanentWriteError_IsInvalid_FlipsDegradedAndReady(t *testing.T) {
 	ctx := context.Background()
 	cluster := freshTestCluster()
 	r, rec := newClusterReconcilerForHelperTest(t, cluster, nil)
@@ -391,8 +567,21 @@ func TestClusterHandlePermanentWriteError_IsInvalid_FlipsDegraded(t *testing.T) 
 		t.Errorf("Degraded ObservedGeneration = %d, want 5", deg.ObservedGeneration)
 	}
 
-	// Assert no operational conditions written.
-	for _, condType := range []string{v1alpha1.ConditionReady, v1alpha1.ConditionAvailable, v1alpha1.ConditionProgressing, v1alpha1.ConditionClusterConfigReady} {
+	// End-to-end Ready: cluster reports Ready=False when the spec it just
+	// received cannot be honored. Matches the packages applyReadyOverlay
+	// design intent — Ready means "desired spec is being honored", not
+	// "some old pods are still serving."
+	ready := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != v1alpha1.ReasonInvalidSpec {
+		t.Errorf("Ready condition wrong: %+v", ready)
+	}
+	if ready != nil && !strings.Contains(ready.Message, "see Degraded condition") {
+		t.Errorf("Ready message should delegate to Degraded; got: %q", ready.Message)
+	}
+
+	// Other operational conditions stay observed (helper does not synthesize
+	// Available / Progressing / ClusterConfigReady from a spec rejection).
+	for _, condType := range []string{v1alpha1.ConditionAvailable, v1alpha1.ConditionProgressing, v1alpha1.ConditionClusterConfigReady} {
 		if c := apimeta.FindStatusCondition(cluster.Status.Conditions, condType); c != nil {
 			t.Errorf("helper must not write %s, got: %+v", condType, c)
 		}
@@ -535,6 +724,15 @@ func TestClusterHandlePermanentWriteError_NoChange_SkipsWrite(t *testing.T) {
 		Status:             metav1.ConditionTrue,
 		Reason:             v1alpha1.ReasonInvalidSpec,
 		Message:            "Secret rejected by apiserver: " + preApiMsg,
+		ObservedGeneration: 5,
+	})
+	// PR-1: helper also writes Ready=False/InvalidSpec; pre-populate so the
+	// changed-bool gate sees nothing to update.
+	apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1alpha1.ReasonInvalidSpec,
+		Message:            "Secret is invalid; see Degraded condition",
 		ObservedGeneration: 5,
 	})
 	cluster.Status.ObservedGeneration = 5

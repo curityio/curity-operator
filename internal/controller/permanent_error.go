@@ -15,45 +15,63 @@ import (
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
 
-// handlePermanentWriteError classifies an apiserver write error as permanent
-// (apierrors.IsInvalid) versus transient. On permanent: sets Degraded+Ready,
-// emits one Warning event, returns handled=true so the caller skips its
-// existing wrap-and-bubble path. On anything else: handled=false and the
-// caller falls through unchanged.
+// extractInvalid returns the apiserver's Kind and Message from an IsInvalid
+// write error, or (_, _, false) for anything else — including IsInvalid
+// errors wrapped in a custom non-StatusError type (defensive against future
+// refactors that might wrap apierrors differently).
 //
-// Calls apimeta.SetStatusCondition directly (not the local setCondition
-// wrapper) so the helper can capture whether conditions actually changed and
-// skip the Status().Update + Event when they didn't. The For() watch lacks
-// GenerationChangedPredicate, so a status write fires reconcile; without this
-// gate the helper would self-trigger on every reconcile until apiserver
-// no-op elision saved us (and only at the cost of inflating the Event count).
+// Kind falls back to the literal "Resource" when Details is missing — keeps
+// condition messages readable even on apierror shapes that omit it.
+func extractInvalid(writeErr error) (kind, apiMsg string, ok bool) {
+	if !apierrors.IsInvalid(writeErr) {
+		return "", "", false
+	}
+	var statusErr *apierrors.StatusError
+	if !errors.As(writeErr, &statusErr) || statusErr == nil {
+		return "", "", false
+	}
+	kind = "Resource"
+	if statusErr.ErrStatus.Details != nil && statusErr.ErrStatus.Details.Kind != "" {
+		kind = statusErr.ErrStatus.Details.Kind
+	}
+	return kind, truncateReplicaFailureMessage(statusErr.ErrStatus.Message), true
+}
+
+// handlePermanentWriteError classifies an apiserver IsInvalid write error
+// as a permanent spec error and surfaces it on the node CR. Sets both
+// Degraded=True/InvalidSpec and Ready=False/InvalidSpec — end-to-end Ready
+// semantics: a spec the apiserver rejects is not being honored, even if
+// older pods are still serving.
+//
+// Calls apimeta.SetStatusCondition directly so the changed-bool gate can
+// skip Status().Update + Event when the conditions are already correct. The
+// For() watch's GenerationChangedPredicate provides the Layer-1 self-trigger
+// defense; this gate is Layer 2. If a future refactor pipes this through
+// setCondition, restore the direct call so the gate stays effective.
 func (r *IdentityServerNodeReconciler) handlePermanentWriteError(
 	ctx context.Context,
 	node *v1alpha1.IdentityServerNode,
-	resourceKind string,
 	writeErr error,
 ) (ctrl.Result, bool, error) {
-	if !apierrors.IsInvalid(writeErr) {
+	kind, apiMsg, ok := extractInvalid(writeErr)
+	if !ok {
 		return ctrl.Result{}, false, nil
 	}
-
-	msg := truncateReplicaFailureMessage(writeErr.Error())
 
 	degChanged := apimeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionDegraded,
 		Status:             metav1.ConditionTrue,
 		Reason:             v1alpha1.ReasonInvalidSpec,
-		Message:            fmt.Sprintf("%s rejected by apiserver: %s", resourceKind, msg),
+		Message:            fmt.Sprintf("%s rejected by apiserver: %s", kind, apiMsg),
 		ObservedGeneration: node.Generation,
 	})
 	readyChanged := apimeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             v1alpha1.ReasonInvalidSpec,
-		Message:            fmt.Sprintf("%s is invalid; see Degraded condition", resourceKind),
+		Message:            fmt.Sprintf("%s is invalid; see Degraded condition", kind),
 		ObservedGeneration: node.Generation,
 	})
-
 	if !degChanged && !readyChanged {
 		return ctrl.Result{}, true, nil
 	}
@@ -64,41 +82,33 @@ func (r *IdentityServerNodeReconciler) handlePermanentWriteError(
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, true, nil
 		}
-		return ctrl.Result{}, true, fmt.Errorf("updating status after invalid %s: %w", resourceKind, err)
+		return ctrl.Result{}, true, fmt.Errorf("updating status after invalid %s: %w", kind, err)
 	}
 
 	r.Recorder.Eventf(node, corev1.EventTypeWarning, v1alpha1.ReasonInvalidSpec,
-		"%s rejected by apiserver: %s", resourceKind, msg)
+		"%s rejected by apiserver: %s", kind, apiMsg)
 
 	return ctrl.Result{}, true, nil
 }
 
-// handlePermanentWriteError classifies an apiserver IsInvalid write error
-// as a permanent spec error: sets Degraded=True/InvalidSpec, emits one event,
-// returns handled=true. Operational conditions are deliberately left alone
-// (they observe pod state, not spec validity).
+// handlePermanentWriteError surfaces an apiserver IsInvalid write error on
+// the cluster CR. Same shape as the node-side helper post-convergence:
+// Degraded=True/InvalidSpec and Ready=False/InvalidSpec, one Warning event,
+// changed-bool gated.
+//
+// Ready=False/InvalidSpec is a new (PR-1) behavior on the cluster side. It
+// closes the stale-True window where a bad-spec edit on a previously-Ready
+// cluster left Ready=True until something else cleared it. End-to-end Ready
+// semantics: the new spec isn't being honored, surface that.
 func (r *IdentityServerClusterReconciler) handlePermanentWriteError(
 	ctx context.Context,
 	cluster *v1alpha1.IdentityServerCluster,
 	writeErr error,
 ) (ctrl.Result, bool, error) {
-	if !apierrors.IsInvalid(writeErr) {
+	kind, apiMsg, ok := extractInvalid(writeErr)
+	if !ok {
 		return ctrl.Result{}, false, nil
 	}
-
-	// Extract apiserver text directly to skip the fmt.Errorf wrap that
-	// sub-helpers (ensureAdminCredentialsSecret, ensureClusterConfig) apply
-	// — otherwise the condition message ends up doubly-prefixed.
-	var statusErr *apierrors.StatusError
-	if !errors.As(writeErr, &statusErr) || statusErr == nil {
-		return ctrl.Result{}, false, nil
-	}
-
-	kind := "Resource"
-	if statusErr.ErrStatus.Details != nil && statusErr.ErrStatus.Details.Kind != "" {
-		kind = statusErr.ErrStatus.Details.Kind
-	}
-	apiMsg := truncateReplicaFailureMessage(statusErr.ErrStatus.Message)
 
 	degChanged := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionDegraded,
@@ -107,8 +117,14 @@ func (r *IdentityServerClusterReconciler) handlePermanentWriteError(
 		Message:            fmt.Sprintf("%s rejected by apiserver: %s", kind, apiMsg),
 		ObservedGeneration: cluster.Generation,
 	})
-
-	if !degChanged {
+	readyChanged := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1alpha1.ReasonInvalidSpec,
+		Message:            fmt.Sprintf("%s is invalid; see Degraded condition", kind),
+		ObservedGeneration: cluster.Generation,
+	})
+	if !degChanged && !readyChanged {
 		return ctrl.Result{}, true, nil
 	}
 

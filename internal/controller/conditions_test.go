@@ -438,6 +438,151 @@ func TestComputeClusterConditions_PackagesReadyMirroring_FirstFailDeterministic(
 	}
 }
 
+// =========================================================================
+// Degraded aggregation tests (PR-1: forward node Reason+Message to cluster)
+// =========================================================================
+
+// degradedNodeWithReason builds a node Status with Degraded=True carrying a
+// specific Reason and Message. Used by the aggregation tests below to
+// verify that the cluster-level Degraded forwards both fields.
+func degradedNodeWithReason(name, reason, message string) v1alpha1.IdentityServerNode {
+	return v1alpha1.IdentityServerNode{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeRuntime},
+		Status: v1alpha1.IdentityServerNodeStatus{
+			Conditions: []metav1.Condition{
+				{Type: v1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: reason},
+				{Type: v1alpha1.ConditionAvailable, Status: metav1.ConditionTrue},
+				{Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue, Reason: reason, Message: message},
+			},
+		},
+	}
+}
+
+// Single-node cluster, that node has Degraded=True/InvalidSpec — cluster
+// forwards reason verbatim and uses the node's Message without a node-name
+// prefix (only one node, no need to disambiguate).
+func TestAggregateNodeDegraded_SingleNodeForwardsReasonAndMessage(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		degradedNodeWithReason("only", v1alpha1.ReasonInvalidSpec, "Deployment rejected by apiserver: spec.template.labels: Invalid value"),
+	}
+	conditions := computeClusterConditions(nodes, 1)
+	deg := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionDegraded)
+	if deg == nil {
+		t.Fatal("Degraded condition not set")
+	}
+	if deg.Status != metav1.ConditionTrue {
+		t.Errorf("Degraded status = %s, want True", deg.Status)
+	}
+	if deg.Reason != v1alpha1.ReasonInvalidSpec {
+		t.Errorf("Degraded reason = %q, want InvalidSpec (forwarded from node)", deg.Reason)
+	}
+	if deg.Message != "Deployment rejected by apiserver: spec.template.labels: Invalid value" {
+		t.Errorf("Degraded message = %q, want verbatim node message (no node-name prefix in single-node case)", deg.Message)
+	}
+}
+
+// Multi-node cluster, exactly one node failing — message gets prefixed with
+// the failing node's name so operators can find it in oc get isn.
+func TestAggregateNodeDegraded_MultiNodeSingleFailIncludesNodeName(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		nodeNamed("admin", readyConditions()),
+		degradedNodeWithReason("rt-bad", v1alpha1.ReasonInvalidSpec, "Deployment is invalid; see Degraded condition"),
+		nodeNamed("rt-good", readyConditions()),
+	}
+	conditions := computeClusterConditions(nodes, 1)
+	deg := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionDegraded)
+	if deg == nil {
+		t.Fatal("Degraded not set")
+	}
+	if deg.Reason != v1alpha1.ReasonInvalidSpec {
+		t.Errorf("Degraded reason = %q, want InvalidSpec (from rt-bad)", deg.Reason)
+	}
+	want := "rt-bad: Deployment is invalid; see Degraded condition"
+	if deg.Message != want {
+		t.Errorf("Degraded message = %q, want %q", deg.Message, want)
+	}
+}
+
+// Multi-node cluster, multiple nodes failing — message uses the
+// F/N-nodes-degraded summary and embeds the first-failing-by-name node.
+func TestAggregateNodeDegraded_MultiNodeMultiFailUsesCountAndFirst(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		degradedNodeWithReason("alpha", v1alpha1.ReasonInvalidSpec, "Service is invalid"),
+		nodeNamed("good", readyConditions()),
+		degradedNodeWithReason("beta", "HPANotOwned", "HPA owned by another controller"),
+	}
+	conditions := computeClusterConditions(nodes, 1)
+	deg := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionDegraded)
+	if deg == nil {
+		t.Fatal("Degraded not set")
+	}
+	// alpha sorts before beta, so alpha is the first failing.
+	if deg.Reason != v1alpha1.ReasonInvalidSpec {
+		t.Errorf("Degraded reason = %q, want InvalidSpec (from alpha — first failing by name)", deg.Reason)
+	}
+	want := "2/3 nodes are degraded (first: alpha: Service is invalid)"
+	if deg.Message != want {
+		t.Errorf("Degraded message = %q, want %q", deg.Message, want)
+	}
+}
+
+// Deterministic first-failing selection by node name regardless of input
+// order. Same guarantee as aggregatePackagesReady — controller-runtime
+// does not guarantee list order so the sort must be the tie-breaker.
+func TestAggregateNodeDegraded_DeterministicByNodeName(t *testing.T) {
+	for _, order := range [][]v1alpha1.IdentityServerNode{
+		{
+			degradedNodeWithReason("a", "ReasonA", "a-msg"),
+			degradedNodeWithReason("b", "ReasonB", "b-msg"),
+		},
+		{
+			degradedNodeWithReason("b", "ReasonB", "b-msg"),
+			degradedNodeWithReason("a", "ReasonA", "a-msg"),
+		},
+	} {
+		conditions := computeClusterConditions(order, 1)
+		deg := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionDegraded)
+		if deg == nil {
+			t.Fatal("Degraded not set")
+		}
+		if deg.Reason != "ReasonA" {
+			t.Errorf("input order %v: expected ReasonA (from 'a'); got %q",
+				[]string{order[0].Name, order[1].Name}, deg.Reason)
+		}
+	}
+}
+
+// MultipleAdminNodes is a cluster-level invariant the helper owns directly;
+// keep it ahead of node-forwarded degradation so the admin-count violation
+// isn't shadowed by a downstream per-node Deployment problem.
+func TestAggregateNodeDegraded_MultipleAdminWinsOverNodeForward(t *testing.T) {
+	nodes := []v1alpha1.IdentityServerNode{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "admin-a"},
+			Spec:       v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeAdmin},
+			Status:     v1alpha1.IdentityServerNodeStatus{Conditions: readyConditions()},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "admin-b"},
+			Spec:       v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeAdmin},
+			Status: v1alpha1.IdentityServerNodeStatus{Conditions: []metav1.Condition{
+				{Type: v1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonInvalidSpec},
+				{Type: v1alpha1.ConditionAvailable, Status: metav1.ConditionTrue},
+				{Type: v1alpha1.ConditionDegraded, Status: metav1.ConditionTrue, Reason: v1alpha1.ReasonInvalidSpec, Message: "Deployment is invalid"},
+			}},
+		},
+	}
+	conditions := computeClusterConditions(nodes, 1)
+	deg := apimeta.FindStatusCondition(conditions, v1alpha1.ConditionDegraded)
+	if deg == nil {
+		t.Fatal("Degraded not set")
+	}
+	if deg.Reason != "MultipleAdminNodes" {
+		t.Errorf("Degraded reason = %q, want MultipleAdminNodes (cluster invariant wins over node forward)", deg.Reason)
+	}
+}
+
 // --- helpers ---
 
 func readyConditions() []metav1.Condition {

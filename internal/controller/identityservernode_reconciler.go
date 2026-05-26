@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
@@ -350,7 +351,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return controllerutil.SetControllerReference(&node, svc, r.Scheme)
 	})
 	if err != nil {
-		if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, "Service", err); handled {
+		if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, err); handled {
 			return res, statusErr
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile Service: %w", err)
@@ -557,7 +558,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return controllerutil.SetControllerReference(&node, deploy, r.Scheme)
 		})
 		if err != nil {
-			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, "Deployment", err); handled {
+			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, err); handled {
 				return res, statusErr
 			}
 			return ctrl.Result{}, fmt.Errorf("failed to reconcile Deployment: %w", err)
@@ -655,7 +656,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return controllerutil.SetControllerReference(&node, hpa, r.Scheme)
 		})
 		if err != nil {
-			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, "HPA", err); handled {
+			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, err); handled {
 				return res, statusErr
 			}
 			return ctrl.Result{}, fmt.Errorf("failed to reconcile HPA: %w", err)
@@ -764,7 +765,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return controllerutil.SetControllerReference(&node, existingPDB, r.Scheme)
 		})
 		if err != nil {
-			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, "PDB", err); handled {
+			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, err); handled {
 				return res, statusErr
 			}
 			return ctrl.Result{}, fmt.Errorf("failed to reconcile PDB: %w", err)
@@ -994,7 +995,12 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 // SetupWithManager registers the controller with the manager.
 func (r *IdentityServerNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.IdentityServerNode{}).
+		For(&v1alpha1.IdentityServerNode{},
+			builder.WithPredicates(predicate.Or(
+				predicate.GenerationChangedPredicate{},
+				predicate.LabelChangedPredicate{},
+				predicate.AnnotationChangedPredicate{},
+			))).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).

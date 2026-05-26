@@ -118,7 +118,6 @@ func computeClusterConditions(nodes []v1alpha1.IdentityServerNode, generation in
 
 	allReady := true
 	allAvailable := true
-	anyDegraded := false
 	adminCount := 0
 
 	for i := range nodes {
@@ -135,11 +134,6 @@ func computeClusterConditions(nodes []v1alpha1.IdentityServerNode, generation in
 		availCond := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionAvailable)
 		if availCond == nil || availCond.Status != metav1.ConditionTrue {
 			allAvailable = false
-		}
-
-		degradedCond := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionDegraded)
-		if degradedCond != nil && degradedCond.Status == metav1.ConditionTrue {
-			anyDegraded = true
 		}
 	}
 
@@ -165,12 +159,17 @@ func computeClusterConditions(nodes []v1alpha1.IdentityServerNode, generation in
 		setCondition(&conditions, v1alpha1.ConditionProgressing, metav1.ConditionFalse, "Stable", "All nodes are ready", generation)
 	}
 
-	// Degraded
+	// Degraded. MultipleAdminNodes is a cluster-level invariant the helper
+	// owns directly — keep it ahead of node-forwarded degradation so the
+	// "two admin nodes exist" signal isn't shadowed by a downstream
+	// per-node Deployment problem the user can't address until the
+	// admin-count violation is fixed first.
 	if adminCount > 1 {
 		setCondition(&conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue, "MultipleAdminNodes",
 			"More than one admin node exists for this cluster", generation)
-	} else if anyDegraded {
-		setCondition(&conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue, "NodeDegraded", "One or more nodes are degraded", generation)
+	} else if degradedCond, set := aggregateNodeDegraded(nodes); set {
+		setCondition(&conditions, v1alpha1.ConditionDegraded,
+			degradedCond.Status, degradedCond.Reason, degradedCond.Message, generation)
 	} else {
 		setCondition(&conditions, v1alpha1.ConditionDegraded, metav1.ConditionFalse, "NotDegraded", "No partial-availability degradation detected", generation)
 	}
@@ -191,6 +190,50 @@ func computeClusterConditions(nodes []v1alpha1.IdentityServerNode, generation in
 	}
 
 	return conditions
+}
+
+// aggregateNodeDegraded computes the cluster-level Degraded condition by
+// forwarding the first-failing child node's Reason and Message. Returns
+// set=false when no child has Degraded=True — caller falls back to the
+// NotDegraded shape.
+//
+// Forwarding the node's Reason gives users an actionable signal at the
+// cluster level (e.g. Degraded=True/InvalidSpec instead of
+// /NodeDegraded), matching the aggregatePackagesReady pattern. Sorting
+// by node name keeps "first failing" deterministic across reconciles.
+func aggregateNodeDegraded(nodes []v1alpha1.IdentityServerNode) (cond metav1.Condition, set bool) {
+	type nodeCond struct {
+		name string
+		cond *metav1.Condition
+	}
+	var failing []nodeCond
+	for i := range nodes {
+		c := apimeta.FindStatusCondition(nodes[i].Status.Conditions, v1alpha1.ConditionDegraded)
+		if c != nil && c.Status == metav1.ConditionTrue {
+			failing = append(failing, nodeCond{name: nodes[i].Name, cond: c})
+		}
+	}
+	if len(failing) == 0 {
+		return metav1.Condition{}, false
+	}
+	sort.Slice(failing, func(i, j int) bool { return failing[i].name < failing[j].name })
+
+	first := failing[0]
+	msg := first.cond.Message
+	if len(nodes) > 1 {
+		if len(failing) == 1 {
+			msg = fmt.Sprintf("%s: %s", first.name, first.cond.Message)
+		} else {
+			msg = fmt.Sprintf("%d/%d nodes are degraded (first: %s: %s)",
+				len(failing), len(nodes), first.name, first.cond.Message)
+		}
+	}
+	return metav1.Condition{
+		Type:    v1alpha1.ConditionDegraded,
+		Status:  metav1.ConditionTrue,
+		Reason:  first.cond.Reason,
+		Message: msg,
+	}, true
 }
 
 // aggregatePackagesReady computes the cluster-level PackagesReady condition

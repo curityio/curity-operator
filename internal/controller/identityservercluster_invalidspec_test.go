@@ -26,7 +26,7 @@ var _ = Describe("IdentityServerCluster invalid-spec classifier", func() {
 		})).To(Succeed())
 	})
 
-	It("flips Degraded=True/InvalidSpec when adminCredentials Secret name fails apiserver DNS-1123", func() {
+	It("flips Degraded=True/InvalidSpec and Ready=False/InvalidSpec when adminCredentials Secret name fails apiserver DNS-1123", func() {
 		cluster := &v1alpha1.IdentityServerCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "bad-cluster", Namespace: ns},
 			Spec: v1alpha1.IdentityServerClusterSpec{
@@ -61,11 +61,20 @@ var _ = Describe("IdentityServerCluster invalid-spec classifier", func() {
 			g.Expect(deg.Message).NotTo(ContainSubstring("failed to create admin credentials secret"))
 		}, timeout, interval).Should(Succeed())
 
-		// Helper-set Degraded must be the ONLY condition (operational ones never observed).
+		// End-to-end Ready: cluster reports Ready=False with the same delegating
+		// message shape as the node-side helper. Pre-PR-1 the helper left Ready
+		// unset (stale-True window); PR-1 closed that gap.
 		var fresh v1alpha1.IdentityServerCluster
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "bad-cluster", Namespace: ns}, &fresh)).To(Succeed())
+		ready := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionReady)
+		Expect(ready).NotTo(BeNil(), "Ready condition must be set on bad-spec bail (PR-1 convergence)")
+		Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+		Expect(ready.Reason).To(Equal(v1alpha1.ReasonInvalidSpec))
+		Expect(ready.Message).To(ContainSubstring("see Degraded condition"))
+
+		// Other operational conditions stay unsynthesized — the helper only
+		// observes spec validity, not Available/Progressing/ClusterConfigReady.
 		for _, condType := range []string{
-			v1alpha1.ConditionReady,
 			v1alpha1.ConditionAvailable,
 			v1alpha1.ConditionProgressing,
 			v1alpha1.ConditionClusterConfigReady,
@@ -117,6 +126,9 @@ var _ = Describe("IdentityServerCluster invalid-spec classifier", func() {
 		}, timeout, interval).Should(Succeed())
 
 		// Degraded transitions OFF InvalidSpec (computeClusterConditions rebuilds it from child state).
+		// Ready likewise transitions off InvalidSpec — auto-recovery confirms U-3:
+		// computeClusterConditions unconditionally writes Ready in conditions.go,
+		// overwriting the helper's stale Ready=False/InvalidSpec.
 		Eventually(func(g Gomega) {
 			var fresh v1alpha1.IdentityServerCluster
 			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "recover-cluster", Namespace: ns}, &fresh)).To(Succeed())
@@ -124,6 +136,10 @@ var _ = Describe("IdentityServerCluster invalid-spec classifier", func() {
 			g.Expect(deg).NotTo(BeNil())
 			g.Expect(deg.Reason).NotTo(Equal(v1alpha1.ReasonInvalidSpec),
 				"Degraded should have transitioned off InvalidSpec after the fix; got reason=%q", deg.Reason)
+			ready := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionReady)
+			g.Expect(ready).NotTo(BeNil())
+			g.Expect(ready.Reason).NotTo(Equal(v1alpha1.ReasonInvalidSpec),
+				"Ready should have transitioned off InvalidSpec after the fix; got reason=%q", ready.Reason)
 		}, timeout, interval).Should(Succeed())
 	})
 })

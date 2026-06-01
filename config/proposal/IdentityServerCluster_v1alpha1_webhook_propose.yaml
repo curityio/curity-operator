@@ -1,0 +1,119 @@
+# Proposal: per-source webhook trigger + multi-path mounts for
+# IdentityServerCluster.spec.packages.
+#
+# Two additions to each `packages[]` entry:
+#
+#   trigger        (optional)  — one webhook listener per source. When set,
+#                                 signed inbound events from GitHub or Slack
+#                                 cause the operator to re-fetch `source` and
+#                                 re-apply mounts.
+#
+#   mountPaths[]   (required)  — replaces the single top-level `mountPath`.
+#                                 Each entry maps a path inside the downloaded
+#                                 archive (`source`) to a container path
+#                                 (`destination`), so one download fans out
+#                                 to many mount points.
+#
+# No new CRD. Operator-side responsibilities (out of scope of this YAML):
+#   - The operator chart installs a webhook receiver Service. Each package
+#     with a `trigger` is reachable at
+#       POST /webhooks/<namespace>/<clusterName>/<packageName>
+#     and the URL is surfaced on IdentityServerCluster status.
+#   - GitHub: any event from the repo passing X-Hub-Signature-256 re-fetches.
+#   - Slack:  any signed slash-command invocation re-fetches.
+#   - Re-fetches are deduplicated by archive content hash, so events that
+#     don't change content are no-ops.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: webhook-signing
+  namespace: curity
+type: Opaque
+stringData:
+  # provider=github → repo webhook "Secret" field (HMAC-SHA256, X-Hub-Signature-256).
+  # provider=slack  → app "Signing Secret" (Basic Information page).
+  secret: REPLACE_ME
+---
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: cluster-1
+  namespace: curity
+spec:
+  version: "11.0"
+
+  packages:
+    - # Logical name. Required when `trigger` is set — used by the operator
+      # to derive the inbound webhook path. Must be unique within the cluster.
+      # +kubebuilder:validation:Optional
+      # +kubebuilder:validation:MinLength=1
+      # +kubebuilder:validation:MaxLength=63
+      # +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+      name: plugins-main
+
+      # Same source schema as today (url, tls, auth) — unchanged.
+      source:
+        url: https://github.com/curityio/plugins/archive/refs/heads/main.zip
+        auth:
+          bearerToken:
+            secretRef:
+              name: github-pat
+              key: token
+
+      # Optional webhook trigger. One trigger per source.
+      # +kubebuilder:validation:Optional
+      # +kubebuilder:validation:XValidation:rule="!has(self.trigger) || has(self.name)",message="packages[].name is required when trigger is set"
+      trigger:
+        # Webhook provider — pins the signature scheme.
+        # +kubebuilder:validation:Required
+        # +kubebuilder:validation:Enum=github;slack
+        provider: github
+
+        # Secret holding the provider's signing key.
+        # +kubebuilder:validation:Required
+        signingSecretRef:
+          # +kubebuilder:validation:Required
+          # +kubebuilder:validation:MinLength=1
+          # +kubebuilder:validation:MaxLength=253
+          # +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
+          name: webhook-signing
+          # +kubebuilder:validation:Required
+          # +kubebuilder:validation:MinLength=1
+          key: secret
+
+        # Debounce window. When an event arrives, the operator schedules a
+        # reconcile for `debounceSeconds` in the future; every subsequent
+        # event within the window resets that timer. The reconcile fires
+        # exactly once when the timer expires with no new events — so a
+        # burst of N commits pushed back-to-back rolls the cluster once,
+        # not N times.
+        # +kubebuilder:validation:Optional
+        # +kubebuilder:default=30
+        # +kubebuilder:validation:Minimum=5
+        # +kubebuilder:validation:Maximum=600
+        debounceSeconds: 30
+
+      # One or more mappings from a path inside the downloaded archive to a
+      # container mount path. Replaces the prior single top-level `mountPath`.
+      # +kubebuilder:validation:Required
+      # +kubebuilder:validation:MinItems=1
+      # +kubebuilder:validation:MaxItems=32
+      # +kubebuilder:validation:XValidation:rule="self.all(m1, self.exists_one(m2, m2.destination == m1.destination))",message="each mountPaths[].destination must be unique within this package"
+      mountPaths:
+          # Path inside the archive to copy from. Relative to the archive
+          # root; no leading `/`, no `..` segments. Use `.` for the whole
+          # archive.
+          # +kubebuilder:validation:Required
+          # +kubebuilder:validation:MinLength=1
+          # +kubebuilder:validation:MaxLength=1024
+          # +kubebuilder:validation:Pattern=`^([.]|[^/][^\s]*)$`
+          # +kubebuilder:validation:XValidation:rule="!self.contains('..')",message="source must not contain '..'"
+        - source: dist/plugins
+          # Absolute container path where `source` is unpacked.
+          # +kubebuilder:validation:Required
+          # +kubebuilder:validation:Pattern=`^/`
+          # +kubebuilder:validation:MaxLength=1024
+          destination: /etc/plugins
+        - source: dist/post-commit-scripts
+          destination: /opt/idsvr/usr/share/post-commit-scripts

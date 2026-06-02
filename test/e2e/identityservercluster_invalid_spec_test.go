@@ -373,7 +373,7 @@ var _ = Describe("IdentityServerCluster invalid-spec — Ready overwritten, othe
 			}, 30*time.Second, time.Second).Should(Succeed())
 		}
 
-		// PR-1: Ready gets overwritten by the helper (end-to-end semantics —
+		// Ready gets overwritten by the helper (end-to-end semantics —
 		// the spec the user just applied is not being honored, so Ready=False
 		// is the truthful signal even if old pods would still serve). Available
 		// stays at the injected ManualForTest value — the helper deliberately

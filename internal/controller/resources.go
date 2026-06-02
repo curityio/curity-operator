@@ -84,7 +84,8 @@ func OwnedResourceName(clusterName, nodeName string) string {
 func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode, configs []DiscoveredManagedResource, fetcherImage string) *appsv1.Deployment {
 	labels := buildLabels(cluster, node)
 	podAnnotations := mergeMaps(cluster.Spec.PodAnnotations, node.Spec.PodAnnotations)
-	podLabels := mergeMaps(labels, mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels))
+	// Operator labels overlay last: collisions on operator-owned keys lose.
+	podLabels := mergeMaps(mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels), labels)
 
 	replicas := resolveReplicas(cluster, node)
 	resources := resolveResources(cluster, node)
@@ -468,8 +469,8 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 }
 
 // buildLabels returns the standard Kubernetes labels for the resource.
-// app.kubernetes.io/instance is {clusterName}-{nodeName} to keep selectors
-// disjoint across clusters sharing a node name in the same namespace.
+// `curity.io/owned-by` is the operator's private selector key (see
+// buildSelectorLabels); the `app.kubernetes.io/*` keys are informational.
 func buildLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/name":       "curity-identity-server",
@@ -479,14 +480,32 @@ func buildLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identit
 		"app.kubernetes.io/version":    cluster.Spec.Version,
 		"curity.io/cluster":            cluster.Name,
 		"curity.io/role":               node.Spec.Role,
+		"curity.io/owned-by":           OwnedResourceName(cluster.Name, node.Name),
 	}
 }
 
-// buildSelectorLabels returns the minimal labels used for pod selection.
+// userPodLabelsOverridden returns the sorted user-podLabels keys that the
+// operator-overlay-last merge will silently drop. Drives the
+// PodLabelsIgnored event; also covers the +2 app.kubernetes.io/{name,
+// instance} keys the CRD CEL doesn't block.
+func userPodLabelsOverridden(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []string {
+	operatorKeys := buildLabels(cluster, node)
+	userKeys := mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels)
+	var overridden []string
+	for k := range userKeys {
+		if _, isOperator := operatorKeys[k]; isOperator {
+			overridden = append(overridden, k)
+		}
+	}
+	sort.Strings(overridden)
+	return overridden
+}
+
+// buildSelectorLabels returns the single private key used for pod
+// selection. Unreachable from user podLabels (CRD CEL + merge order).
 func buildSelectorLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":     "curity-identity-server",
-		"app.kubernetes.io/instance": OwnedResourceName(cluster.Name, node.Name),
+		"curity.io/owned-by": OwnedResourceName(cluster.Name, node.Name),
 	}
 }
 

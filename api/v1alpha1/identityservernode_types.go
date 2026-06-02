@@ -45,8 +45,10 @@ type IdentityServerNodeSpec struct {
 	// Merged with cluster-level annotations; node values win on conflict.
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
 
-	// PodLabels are labels applied to pods.
-	// Merged with cluster-level labels; node values win on conflict.
+	// PodLabels are labels applied to pods. Merged with cluster-level
+	// labels; node values win on conflict. Operator-owned keys are
+	// rejected at admission (see CEL message for the list).
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k in ['curity.io/owned-by', 'curity.io/cluster', 'curity.io/role']))",message="podLabels cannot include operator-owned curity.io/* keys: owned-by, cluster, role"
 	PodLabels map[string]string `json:"podLabels,omitempty"`
 
 	// Resources defines CPU and memory requests/limits for pods.

@@ -421,6 +421,19 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if fetcherImage == "" {
 			fetcherImage = DefaultPackageFetcherImage
 		}
+
+		// Warn once per spec edit when user podLabels collide with
+		// operator-owned keys; runtime drops the user values silently.
+		if overridden := userPodLabelsOverridden(&cluster, &node); len(overridden) > 0 {
+			log.Info("ignoring operator-owned keys in user podLabels",
+				"node", node.Name, "keys", overridden)
+			if node.Status.ObservedGeneration < node.Generation {
+				r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PodLabelsIgnored",
+					"podLabels keys %v are operator-owned; pods use operator values",
+					overridden)
+			}
+		}
+
 		desiredDeploy := buildDeployment(&cluster, &node, applicableConfigs, fetcherImage)
 
 		// Inject cluster config hash annotation for rolling restart when Secret changes.
@@ -1199,7 +1212,7 @@ func (r *IdentityServerNodeReconciler) findNodesForPod(ctx context.Context, obj 
 		return nil
 	}
 
-	instance := pod.Labels["app.kubernetes.io/instance"]
+	instance := pod.Labels["curity.io/owned-by"]
 	clusterName := pod.Labels["curity.io/cluster"]
 	if instance == "" || clusterName == "" {
 		return nil
@@ -1287,7 +1300,7 @@ func (r *IdentityServerNodeReconciler) listOwnedPods(ctx context.Context, cluste
 		client.InNamespace(namespace),
 		client.MatchingLabels{
 			"app.kubernetes.io/managed-by": "curity-operator",
-			"app.kubernetes.io/instance":   OwnedResourceName(clusterName, nodeName),
+			"curity.io/owned-by":           OwnedResourceName(clusterName, nodeName),
 		},
 	); err != nil {
 		return nil, fmt.Errorf("listing pods for node %q in cluster %q: %w", nodeName, clusterName, err)

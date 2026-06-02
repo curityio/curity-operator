@@ -44,7 +44,7 @@ type translatePackagesReadyResult struct {
 // mount errors, image-pull errors).
 //
 // Inputs are filtered before this function runs (caller selects pods by
-// app.kubernetes.io/instance label = OwnedResourceName(cluster, node)).
+// curity.io/owned-by label = OwnedResourceName(cluster, node)).
 //
 // expectedHash is the cluster's current packagesHash (the value the operator
 // would stamp on a freshly-rendered Deployment template). Only pods whose

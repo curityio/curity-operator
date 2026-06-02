@@ -13,6 +13,7 @@ metadata:
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"
     curity.io/cluster: hpa-cust-cluster
+    curity.io/owned-by: hpa-cust-cluster-hpa-custom-9364f7f1
     curity.io/role: runtime-role
   ownerReferences: <Any value>
   managedFields: <Any value>

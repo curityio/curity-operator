@@ -14,6 +14,7 @@ metadata:
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"
     curity.io/cluster: cfg-multi-cluster
+    curity.io/owned-by: cfg-multi-cluster-cfg-multi-admin-456874cb
     curity.io/role: admin-role
   ownerReferences: <Any value>
   managedFields: <Any value>

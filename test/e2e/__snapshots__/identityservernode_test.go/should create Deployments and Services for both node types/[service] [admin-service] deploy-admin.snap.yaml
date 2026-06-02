@@ -13,6 +13,7 @@ metadata:
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"
     curity.io/cluster: deploy-cluster
+    curity.io/owned-by: deploy-cluster-deploy-admin-b80035c7
     curity.io/role: admin-role
   ownerReferences: <Any value>
   managedFields: <Any value>

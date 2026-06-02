@@ -14,6 +14,7 @@ metadata:
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"
     curity.io/cluster: default-creds
+    curity.io/owned-by: default-creds-default-admin-d4fcb9d8
     curity.io/role: admin-ui-role
   ownerReferences: <Any value>
   managedFields: <Any value>

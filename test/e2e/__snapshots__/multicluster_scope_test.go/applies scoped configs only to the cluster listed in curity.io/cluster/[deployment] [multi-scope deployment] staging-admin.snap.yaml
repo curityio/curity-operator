@@ -14,6 +14,7 @@ metadata:
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"
     curity.io/cluster: staging
+    curity.io/owned-by: staging-stg-admin-693767fe
     curity.io/role: admin-role
   ownerReferences: <Any value>
   managedFields: <Any value>

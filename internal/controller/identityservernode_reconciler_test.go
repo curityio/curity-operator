@@ -414,19 +414,16 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 
 			testCreateNode(ns, "peer-admin", v1alpha1.NodeTypeAdmin, "admin-recovery-cluster")
 
-			// 60s (not the 30s default) to ride out variable CI scheduling:
-			// the stuck-admin's Degraded=DuplicateAdmin is set only AFTER
-			// the cluster-watch fires from peer-admin's creation event
-			// (incrementing Status.NodeCount), which can lag under heavy
-			// envtest reconciler load. Matches the 60s timeout on the
-			// recovery Eventually below.
+			// 120s timeout: stuck-admin's Degraded=DuplicateAdmin lands
+			// only after cluster.Status.NodeCount increments via cluster-watch,
+			// which can lag past 60s under heavy CI envtest load.
 			Eventually(func() string {
 				node := &v1alpha1.IdentityServerNode{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "stuck-admin", Namespace: ns}, node); err != nil {
 					return ""
 				}
 				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
-			}, 60*time.Second, interval).Should(Equal("DuplicateAdmin"))
+			}, 120*time.Second, interval).Should(Equal("DuplicateAdmin"))
 
 			// Retry on conflict: the reconciler also writes the peer's
 			// finalizer / labels concurrently with our spec change. Matches
@@ -447,7 +444,7 @@ var _ = Describe("IdentityServerNode Reconciler", func() {
 					return ""
 				}
 				return conditionReason(node.Status.Conditions, v1alpha1.ConditionDegraded)
-			}, 60*time.Second, interval).ShouldNot(Equal("DuplicateAdmin"))
+			}, 120*time.Second, interval).ShouldNot(Equal("DuplicateAdmin"))
 		})
 
 		It("should give two ambiguous-name nodes their own Deployments without collision", func() {

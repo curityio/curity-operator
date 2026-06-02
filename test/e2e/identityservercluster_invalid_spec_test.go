@@ -70,6 +70,24 @@ var _ = Describe("IdentityServerCluster invalid-spec classifier", Ordered, func(
 	BeforeAll(func() { createNS(ns) })
 	AfterAll(func() { deleteNS(ns) })
 
+	// Dump operator logs at failure time — the workflow-level "Collect
+	// operator logs" step runs after pod teardown and captures nothing.
+	JustAfterEach(func() {
+		if !CurrentSpecReport().Failed() {
+			return
+		}
+		out, err := utils.Run("kubectl", "logs",
+			"-n", "curity-operator",
+			"deployment/curity-operator-controller-manager",
+			"--tail=2000",
+		)
+		if err != nil {
+			AddReportEntry("operator-logs-error", err.Error())
+			return
+		}
+		AddReportEntry("operator-logs-tail", out)
+	})
+
 	It("surfaces Degraded=True/InvalidSpec on a CR with apiserver-invalid Secret name", func() {
 		ctx := context.Background()
 

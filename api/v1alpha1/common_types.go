@@ -31,6 +31,13 @@ const (
 	// ConditionPackagesReady reports whether the init-container package
 	// downloads succeeded (set only when spec.packages is non-empty).
 	ConditionPackagesReady = "PackagesReady"
+	// ConditionManagedConfigsValid surfaces dropped managed configs as a
+	// condition: False when a managed ConfigMap/Secret is excluded from
+	// mounting (e.g. a typo'd config-type or invalid logging config), so the
+	// failure shows on dashboards that render only .status.conditions instead
+	// of staying all-green. Advisory-only issues that still mount
+	// (DuplicateConfigKey) stay in managedResourceIssues but do not flip this.
+	ConditionManagedConfigsValid = "ManagedConfigsValid"
 )
 
 // Reason values used across multiple condition types. Each constant names

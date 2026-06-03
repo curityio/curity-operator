@@ -184,6 +184,13 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 	if configReadyCond != nil {
 		apimeta.SetStatusCondition(&cluster.Status.Conditions, *configReadyCond)
 	}
+	// ManagedConfigsValid is derived from cluster-level managedResourceIssues
+	// (not child nodes), so it's applied here rather than in computeClusterConditions.
+	// Omitted when there are no issues (the rebuild above drops any prior False).
+	if mc, set := aggregateManagedConfigsValid(cluster.Status.ManagedResourceIssues); set {
+		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionManagedConfigsValid,
+			mc.Status, mc.Reason, mc.Message, cluster.Generation)
+	}
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.NodeCount = int32(len(childNodes))
 	cluster.Status.ReadyNodes = readyCount

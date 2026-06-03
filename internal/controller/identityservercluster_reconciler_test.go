@@ -10,6 +10,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -1086,6 +1087,42 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				return true
 			}, "2s", "200ms").Should(BeTrue(),
 				"DuplicateConfigKey events must land on the offending CMs, not on the cluster")
+		})
+
+		It("flips ManagedConfigsValid=False on a mount-affecting issue and recovers", func() {
+			testCreateCluster(ns, "mcv-cluster")
+			testCreateManagedConfigMap(ns, "mcv-bad", map[string]string{"x.xml": "<x/>"},
+				map[string]string{"curity.io/config-type": "baseddd"})
+
+			cluster := &v1alpha1.IdentityServerCluster{}
+			mcvStatus := func() metav1.ConditionStatus {
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "mcv-cluster", Namespace: ns}, cluster); err != nil {
+					return ""
+				}
+				if c := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionManagedConfigsValid); c != nil {
+					return c.Status
+				}
+				return ""
+			}
+
+			By("surfacing the skipped config as ManagedConfigsValid=False/UnknownConfigType")
+			Eventually(mcvStatus, timeout, interval).Should(Equal(metav1.ConditionFalse))
+			Expect(apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionManagedConfigsValid).Reason).
+				To(Equal("UnknownConfigType"))
+
+			By("not overloading Degraded with the config issue (guards bbb8379)")
+			deg := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionDegraded)
+			Expect(deg).ToNot(BeNil())
+			Expect(deg.Status).To(Equal(metav1.ConditionFalse))
+
+			By("clearing the condition once the config-type is fixed (omitted when no issues)")
+			cm := &corev1.ConfigMap{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "mcv-bad", Namespace: ns}, cm)).To(Succeed())
+			cm.Annotations["curity.io/config-type"] = "base"
+			Expect(k8sClient.Update(ctx, cm)).To(Succeed())
+
+			// Empty managedResourceIssues → condition omitted; mcvStatus returns "".
+			Eventually(mcvStatus, timeout, interval).Should(BeEmpty())
 		})
 	})
 

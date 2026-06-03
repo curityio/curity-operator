@@ -291,3 +291,39 @@ func aggregatePackagesReady(nodes []v1alpha1.IdentityServerNode) (cond metav1.Co
 		Message: msg,
 	}, true
 }
+
+// aggregateManagedConfigsValid summarizes status.managedResourceIssues into the
+// ManagedConfigsValid condition. Only issues that DROP a config (it never gets
+// mounted) flip the condition — UnknownConfigType, LoggingConfigInvalid,
+// DuplicateLoggingConfig. DuplicateConfigKey is advisory (both resources still
+// mount at distinct prefixed paths), so it stays a Warning/managedResourceIssue
+// but must not mark an intentional-duplicate cluster invalid.
+//
+// Returns set=false when no dropping issue remains — the condition is omitted
+// (mirrors aggregatePackagesReady), and the reconciler's conditions rebuild
+// drops any prior False on recovery. Issues arrive pre-sorted (Kind, Name,
+// Reason) from ensureManagedConfigDiscovery, so the first survivor is the
+// deterministic first; its Reason is forwarded.
+func aggregateManagedConfigsValid(issues []v1alpha1.ManagedResourceIssue) (cond metav1.Condition, set bool) {
+	dropped := make([]v1alpha1.ManagedResourceIssue, 0, len(issues))
+	for i := range issues {
+		if issues[i].Reason != EventReasonDuplicateConfigKey {
+			dropped = append(dropped, issues[i])
+		}
+	}
+	if len(dropped) == 0 {
+		return metav1.Condition{}, false
+	}
+	first := dropped[0]
+	msg := fmt.Sprintf("%s/%s: %s", first.Kind, first.Name, first.Message)
+	if len(dropped) > 1 {
+		msg = fmt.Sprintf("%d managed config issues (first: %s/%s: %s)",
+			len(dropped), first.Kind, first.Name, first.Message)
+	}
+	return metav1.Condition{
+		Type:    v1alpha1.ConditionManagedConfigsValid,
+		Status:  metav1.ConditionFalse,
+		Reason:  first.Reason,
+		Message: msg,
+	}, true
+}

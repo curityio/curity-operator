@@ -619,3 +619,100 @@ func assertCondition(t *testing.T, conditions []metav1.Condition, condType strin
 		t.Errorf("condition %s: expected %s, got %s (reason: %s)", condType, expectedStatus, cond.Status, cond.Reason)
 	}
 }
+
+// No managed-config issues → condition omitted (set=false), mirroring
+// aggregatePackagesReady's omit-when-absent behavior.
+func TestAggregateManagedConfigsValid_EmptyOmits(t *testing.T) {
+	if _, set := aggregateManagedConfigsValid(nil); set {
+		t.Error("set = true for empty issues, want false (condition omitted)")
+	}
+}
+
+// Single issue → False, forwards the issue's own Reason, message names the
+// resource without a count prefix (only one issue, no need to disambiguate).
+func TestAggregateManagedConfigsValid_SingleForwardsReasonAndMessage(t *testing.T) {
+	cond, set := aggregateManagedConfigsValid([]v1alpha1.ManagedResourceIssue{
+		{Kind: "ConfigMap", Name: "user-base-extras-1", Reason: "UnknownConfigType",
+			Message: `Skipped ConfigMap/user-base-extras-1: unknown config type: "baseddd"`},
+	})
+	if !set {
+		t.Fatal("set = false, want true")
+	}
+	if cond.Type != v1alpha1.ConditionManagedConfigsValid {
+		t.Errorf("Type = %q, want ManagedConfigsValid", cond.Type)
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Status = %s, want False", cond.Status)
+	}
+	if cond.Reason != "UnknownConfigType" {
+		t.Errorf("Reason = %q, want UnknownConfigType (forwarded)", cond.Reason)
+	}
+	want := `ConfigMap/user-base-extras-1: Skipped ConfigMap/user-base-extras-1: unknown config type: "baseddd"`
+	if cond.Message != want {
+		t.Errorf("Message = %q, want %q", cond.Message, want)
+	}
+}
+
+// Multiple dropping issues → False, count-and-first summary, reason from first.
+func TestAggregateManagedConfigsValid_MultiUsesCountAndFirst(t *testing.T) {
+	cond, set := aggregateManagedConfigsValid([]v1alpha1.ManagedResourceIssue{
+		{Kind: "ConfigMap", Name: "alpha", Reason: "UnknownConfigType", Message: "bad type"},
+		{Kind: "Secret", Name: "beta", Reason: "LoggingConfigInvalid", Message: "bad logging"},
+	})
+	if !set {
+		t.Fatal("set = false, want true")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("Status = %s, want False", cond.Status)
+	}
+	if cond.Reason != "UnknownConfigType" {
+		t.Errorf("Reason = %q, want UnknownConfigType (from first issue)", cond.Reason)
+	}
+	want := "2 managed config issues (first: ConfigMap/alpha: bad type)"
+	if cond.Message != want {
+		t.Errorf("Message = %q, want %q", cond.Message, want)
+	}
+}
+
+// DuplicateConfigKey is advisory (both resources still mount) — it must NOT
+// flip the condition. Alone → omitted; mixed with a dropping issue → only the
+// dropping issue counts.
+func TestAggregateManagedConfigsValid_DuplicateConfigKeyAdvisory(t *testing.T) {
+	if _, set := aggregateManagedConfigsValid([]v1alpha1.ManagedResourceIssue{
+		{Kind: "ConfigMap", Name: "dupa", Reason: EventReasonDuplicateConfigKey, Message: "shared key"},
+		{Kind: "ConfigMap", Name: "dupb", Reason: EventReasonDuplicateConfigKey, Message: "shared key"},
+	}); set {
+		t.Error("set = true for DuplicateConfigKey-only, want false (advisory, omitted)")
+	}
+
+	cond, set := aggregateManagedConfigsValid([]v1alpha1.ManagedResourceIssue{
+		{Kind: "ConfigMap", Name: "bad", Reason: "UnknownConfigType", Message: "bad type"},
+		{Kind: "ConfigMap", Name: "dup", Reason: EventReasonDuplicateConfigKey, Message: "shared key"},
+	})
+	if !set {
+		t.Fatal("set = false, want true (one dropping issue present)")
+	}
+	if cond.Reason != "UnknownConfigType" {
+		t.Errorf("Reason = %q, want UnknownConfigType (dup filtered out)", cond.Reason)
+	}
+	want := "ConfigMap/bad: bad type"
+	if cond.Message != want {
+		t.Errorf("Message = %q, want %q (single — dup not counted)", cond.Message, want)
+	}
+}
+
+// The helper uses issues[0] as the first; ensureManagedConfigDiscovery sorts the
+// slice (Kind, Name, Reason) before assigning it to status, so this documents
+// the reuse-the-caller-sort contract rather than re-sorting internally.
+func TestAggregateManagedConfigsValid_FirstIsIssuesZero(t *testing.T) {
+	cond, set := aggregateManagedConfigsValid([]v1alpha1.ManagedResourceIssue{
+		{Kind: "ConfigMap", Name: "first", Reason: "ReasonA", Message: "a"},
+		{Kind: "ConfigMap", Name: "second", Reason: "ReasonB", Message: "b"},
+	})
+	if !set {
+		t.Fatal("set = false, want true")
+	}
+	if cond.Reason != "ReasonA" {
+		t.Errorf("Reason = %q, want ReasonA (issues[0])", cond.Reason)
+	}
+}

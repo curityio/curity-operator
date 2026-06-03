@@ -63,9 +63,9 @@ spec:
       # +kubebuilder:validation:XValidation:rule="(self.provider == 'slack') == has(self.signingSecretRef)",message="syncWebhook.signingSecretRef must be set iff provider is 'slack' (github keys are operator-generated)"
       syncWebhook:
         # +kubebuilder:validation:Required
-        # +kubebuilder:validation:Enum=github;slack
-        provider: github
-        # signingSecretRef: required for slack, forbidden for github.
+        # +kubebuilder:validation:Enum=git;slack
+        provider: git
+        # signingSecretRef: required for slack, forbidden for git.
 
       # Each entry: archive path → container path. Destinations unique per package.
       # +kubebuilder:validation:Required
@@ -113,6 +113,6 @@ spec:
 #                      Paste into GitHub "Payload URL" / Slack "Request URL".
 #                      Host = chart's `operator.webhookBaseUrl`; path =
 #                      /webhooks/<ns>/<cluster>/<name>.
-#   .signingSecretRef  secretKeyRef. Set for provider=github (operator-
+#   .signingSecretRef  secretKeyRef. Set for provider=git (operator-
 #                      generated key). Read the value and paste it into
 #                      GitHub's webhook "Secret" field.

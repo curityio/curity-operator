@@ -43,7 +43,7 @@ spec:
   # +kubebuilder:validation:XValidation:rule="self.all(p1, !has(p1.name) || self.exists_one(p2, has(p2.name) && p2.name == p1.name))",message="each packages[].name must be unique within the cluster"
   packages:
 
-    # GitHub — minimum viable config. Operator generates the signing Secret.
+    # Git — minimum viable config. Operator generates the signing Secret.
     - # Logical name; used to derive the webhook URL path.
       # +kubebuilder:validation:Optional
       # +kubebuilder:validation:MinLength=1
@@ -52,7 +52,7 @@ spec:
       name: plugins-main
 
       source:
-        url: https://github.com/curityio/plugins/archive/refs/heads/main.zip
+        url: https://github.com/curityio/myrepo
         auth:
           bearerToken:
             secretRef:
@@ -91,7 +91,7 @@ spec:
     # Slack — user supplies the signing Secret.
     - name: scripts-on-demand
       source:
-        url: https://artifacts.internal.example.com/scripts.zip
+        url: https://github.com/curityio/myrepo
         auth:
           basicAuth:
             secretRef:

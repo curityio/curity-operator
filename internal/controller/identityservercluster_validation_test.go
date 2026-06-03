@@ -1486,4 +1486,5 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		Expect(err).To(HaveOccurred(), "autoscaling without enabled should be rejected by Required")
 		Expect(err.Error()).To(ContainSubstring("spec.autoscaling.enabled"))
 	})
+
 })

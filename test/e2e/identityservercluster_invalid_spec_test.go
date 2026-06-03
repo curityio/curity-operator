@@ -70,6 +70,24 @@ var _ = Describe("IdentityServerCluster invalid-spec classifier", Ordered, func(
 	BeforeAll(func() { createNS(ns) })
 	AfterAll(func() { deleteNS(ns) })
 
+	// Dump operator logs at failure time — the workflow-level "Collect
+	// operator logs" step runs after pod teardown and captures nothing.
+	JustAfterEach(func() {
+		if !CurrentSpecReport().Failed() {
+			return
+		}
+		out, err := utils.Run("kubectl", "logs",
+			"-n", "curity-operator",
+			"deployment/curity-operator-controller-manager",
+			"--tail=2000",
+		)
+		if err != nil {
+			AddReportEntry("operator-logs-error", err.Error())
+			return
+		}
+		AddReportEntry("operator-logs-tail", out)
+	})
+
 	It("surfaces Degraded=True/InvalidSpec on a CR with apiserver-invalid Secret name", func() {
 		ctx := context.Background()
 
@@ -373,7 +391,7 @@ var _ = Describe("IdentityServerCluster invalid-spec — Ready overwritten, othe
 			}, 30*time.Second, time.Second).Should(Succeed())
 		}
 
-		// PR-1: Ready gets overwritten by the helper (end-to-end semantics —
+		// Ready gets overwritten by the helper (end-to-end semantics —
 		// the spec the user just applied is not being honored, so Ready=False
 		// is the truthful signal even if old pods would still serve). Available
 		// stays at the injected ManualForTest value — the helper deliberately

@@ -14,6 +14,7 @@ metadata:
     app.kubernetes.io/name: curity-identity-server
     app.kubernetes.io/version: "11.0"
     curity.io/cluster: cfg-na-cluster
+    curity.io/owned-by: cfg-na-cluster-cfg-na-runtime-36dfce0b
     curity.io/role: runtime-role
   ownerReferences: <Any value>
   managedFields: <Any value>

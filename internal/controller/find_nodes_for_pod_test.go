@@ -15,10 +15,8 @@ import (
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
 
-// curityPodForNode builds a Pod carrying the labels buildLabels stamps on the
-// pod template plus a controller-ref pointing at a synthetic ReplicaSet. The
-// `app.kubernetes.io/instance` value is computed via OwnedResourceName so it
-// matches what findNodesForPod compares against.
+// curityPodForNode builds a Pod with the labels + controller-ref that
+// findNodesForPod inspects.
 func curityPodForNode(podName, namespace, clusterName, nodeName string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -28,6 +26,7 @@ func curityPodForNode(podName, namespace, clusterName, nodeName string) *corev1.
 				"app.kubernetes.io/managed-by": "curity-operator",
 				"app.kubernetes.io/instance":   OwnedResourceName(clusterName, nodeName),
 				"curity.io/cluster":            clusterName,
+				"curity.io/owned-by":           OwnedResourceName(clusterName, nodeName),
 			},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: "apps/v1",
@@ -117,16 +116,16 @@ func TestFindNodesForPod_OwnerRefNotControlling(t *testing.T) {
 	}
 }
 
-// Pod missing app.kubernetes.io/instance label is dropped.
-func TestFindNodesForPod_MissingInstanceLabel(t *testing.T) {
+// Pod missing curity.io/owned-by label is dropped.
+func TestFindNodesForPod_MissingOwnedByLabel(t *testing.T) {
 	pod := curityPodForNode("curity-pod-abc", "ns", "tour", "rt-1")
-	delete(pod.Labels, "app.kubernetes.io/instance")
+	delete(pod.Labels, "curity.io/owned-by")
 	node := labeledNode("rt-1", "ns", "tour")
 	r := reconcilerWithObjects(t, node)
 
 	reqs := r.findNodesForPod(context.Background(), pod)
 	if reqs != nil {
-		t.Errorf("missing instance label must drop; got %+v", reqs)
+		t.Errorf("missing curity.io/owned-by must drop; got %+v", reqs)
 	}
 }
 

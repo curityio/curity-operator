@@ -3266,8 +3266,7 @@ spec:
 		})
 
 		// E2 — Lifecycle: foreign HPA → node Degraded=HPANotOwned + cluster
-		// Degraded forwards the same reason (Style-B aggregation, matches
-		// PackagesReady's per-node forwarding); delete foreign → Degraded clears.
+		// Degraded forwards the same reason; delete foreign → Degraded clears.
 		Describe("HPA name collision degrades the node", Label("smoke"), Ordered, func() {
 			const ns = "e2e-hpa-collision"
 			BeforeAll(func() { createNS(ns) })
@@ -3324,7 +3323,7 @@ spec:
 					return ""
 				}, e2eTimeout, e2eInterval).Should(Equal("HPANotOwned"))
 
-				By("verifying parent cluster forwards the node's Degraded reason (Style-B aggregation)")
+				By("verifying parent cluster forwards the node's Degraded reason")
 				Eventually(func() string {
 					var fresh v1alpha1.IdentityServerCluster
 					if err := k().Get(ctx, client.ObjectKey{Name: "hpa-coll-cluster", Namespace: ns}, &fresh); err != nil {
@@ -3489,7 +3488,7 @@ spec:
 				Expect(pdb.Spec.MinAvailable.IntValue()).To(Equal(2))
 				Expect(pdb.Spec.MaxUnavailable).To(BeNil())
 				Expect(pdb.Spec.Selector).NotTo(BeNil())
-				Expect(pdb.Spec.Selector.MatchLabels).To(HaveKeyWithValue("app.kubernetes.io/instance", ownedName("pdb-cluster", "pdb-runtime")))
+				Expect(pdb.Spec.Selector.MatchLabels).To(HaveKeyWithValue("curity.io/owned-by", ownedName("pdb-cluster", "pdb-runtime")))
 
 				By("verifying PDB owner reference")
 				Expect(pdb.OwnerReferences).To(HaveLen(1))

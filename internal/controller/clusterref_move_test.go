@@ -495,9 +495,10 @@ var _ = Describe("ClusterRef change cleanup", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: ownedName("imm-b", "imm-node"), Namespace: ns}, newPDB)).To(Succeed())
 			Expect(newPDB.UID).NotTo(Equal(oldPDBUID), "PDB must be recreated, not updated, to honor immutable selector")
 
-			// And the new resources' selectors must reference the new ownedResourceName.
-			Expect(newDeploy.Spec.Selector.MatchLabels["app.kubernetes.io/instance"]).To(Equal(ownedName("imm-b", "imm-node")))
-			Expect(newPDB.Spec.Selector.MatchLabels["app.kubernetes.io/instance"]).To(Equal(ownedName("imm-b", "imm-node")))
+			// New selectors reference the new ownedResourceName via the
+			// private key (informational app.kubernetes.io/* keys stay user-overridable).
+			Expect(newDeploy.Spec.Selector.MatchLabels["curity.io/owned-by"]).To(Equal(ownedName("imm-b", "imm-node")))
+			Expect(newPDB.Spec.Selector.MatchLabels["curity.io/owned-by"]).To(Equal(ownedName("imm-b", "imm-node")))
 		})
 	})
 

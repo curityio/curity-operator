@@ -199,6 +199,155 @@ func TestBuildDeployment_LabelMerging(t *testing.T) {
 	}
 }
 
+// Selector must be exactly the private key — no app.kubernetes.io/*.
+func TestBuildSelectorLabels_SinglePrivateKey(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	selector := buildSelectorLabels(cluster, node)
+
+	if len(selector) != 1 {
+		t.Errorf("selector must be exactly one key; got %d: %v", len(selector), selector)
+	}
+	want := OwnedResourceName(cluster.Name, node.Name)
+	if got := selector["curity.io/owned-by"]; got != want {
+		t.Errorf("selector[curity.io/owned-by] = %q; want %q", got, want)
+	}
+	for _, banned := range []string{"app.kubernetes.io/name", "app.kubernetes.io/instance"} {
+		if _, present := selector[banned]; present {
+			t.Errorf("selector must not include %q; got %v", banned, selector)
+		}
+	}
+}
+
+// Pod template carries both the informational instance key and the
+// private selector key.
+func TestBuildLabels_IncludesBothInformationalAndPrivateKeys(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	labels := buildLabels(cluster, node)
+	want := OwnedResourceName(cluster.Name, node.Name)
+
+	if got := labels["app.kubernetes.io/instance"]; got != want {
+		t.Errorf("app.kubernetes.io/instance = %q; want %q", got, want)
+	}
+	if got := labels["curity.io/owned-by"]; got != want {
+		t.Errorf("curity.io/owned-by = %q; want %q", got, want)
+	}
+}
+
+// Operator wins on collisions; user-only keys survive the merge.
+func TestBuildDeployment_OperatorLabelsOverlayUserPodLabelsLast(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.PodLabels = map[string]string{
+		"app.kubernetes.io/instance": "hijacked-by-user",
+		"curity.io/owned-by":         "hijacked-by-user",
+		"app.kubernetes.io/version":  "user-pinned-version",
+		"team":                       "platform",
+		"environment":                "staging",
+	}
+
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+	templateLabels := deploy.Spec.Template.Labels
+	want := OwnedResourceName(cluster.Name, node.Name)
+
+	if got := templateLabels["app.kubernetes.io/instance"]; got != want {
+		t.Errorf("operator must win on app.kubernetes.io/instance; got %q want %q", got, want)
+	}
+	if got := templateLabels["curity.io/owned-by"]; got != want {
+		t.Errorf("operator must win on curity.io/owned-by; got %q want %q", got, want)
+	}
+	if got := templateLabels["app.kubernetes.io/version"]; got != cluster.Spec.Version {
+		t.Errorf("operator must win on app.kubernetes.io/version; got %q want %q", got, cluster.Spec.Version)
+	}
+	if got := templateLabels["team"]; got != "platform" {
+		t.Errorf("user-only key 'team' lost; got %q want platform", got)
+	}
+	if got := templateLabels["environment"]; got != "staging" {
+		t.Errorf("user-only key 'environment' lost; got %q want staging", got)
+	}
+}
+
+// Catches a refactor that wires Spec.Selector from buildLabels instead
+// of buildSelectorLabels.
+func TestBuildDeployment_SelectorMatchLabelsExactly(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.PodLabels = map[string]string{"app.kubernetes.io/instance": "hijacked"}
+
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+	selector := deploy.Spec.Selector
+	if selector == nil {
+		t.Fatal("Deployment.Spec.Selector must not be nil")
+	}
+	if got := len(selector.MatchLabels); got != 1 {
+		t.Errorf("Deployment.Spec.Selector.MatchLabels: %d keys, want 1: %v", got, selector.MatchLabels)
+	}
+	want := OwnedResourceName(cluster.Name, node.Name)
+	if got := selector.MatchLabels["curity.io/owned-by"]; got != want {
+		t.Errorf("Deployment selector[curity.io/owned-by] = %q; want %q", got, want)
+	}
+	for _, banned := range []string{"app.kubernetes.io/instance", "app.kubernetes.io/name"} {
+		if _, present := selector.MatchLabels[banned]; present {
+			t.Errorf("Deployment selector must not include %q; got %v", banned, selector.MatchLabels)
+		}
+	}
+}
+
+func TestBuildPDB_SelectorMatchLabelsExactly(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MinAvailable: ptr.To(intstr.FromInt(1))}
+
+	pdb := buildPDB(cluster, node)
+	if pdb == nil {
+		t.Fatal("buildPDB must return non-nil when MinAvailable is set")
+	}
+	if got := len(pdb.Spec.Selector.MatchLabels); got != 1 {
+		t.Errorf("PDB selector: %d keys, want 1: %v", got, pdb.Spec.Selector.MatchLabels)
+	}
+	want := OwnedResourceName(cluster.Name, node.Name)
+	if got := pdb.Spec.Selector.MatchLabels["curity.io/owned-by"]; got != want {
+		t.Errorf("PDB selector[curity.io/owned-by] = %q; want %q", got, want)
+	}
+}
+
+func TestUserPodLabelsOverridden(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	if got := userPodLabelsOverridden(cluster, node); len(got) != 0 {
+		t.Errorf("no user labels: want empty; got %v", got)
+	}
+
+	node.Spec.PodLabels = map[string]string{"team": "platform"}
+	if got := userPodLabelsOverridden(cluster, node); len(got) != 0 {
+		t.Errorf("non-colliding user labels: want empty; got %v", got)
+	}
+
+	// 2 cluster-level collisions + 1 node-level — all 3 reported sorted.
+	cluster.Spec.PodLabels = map[string]string{
+		"app.kubernetes.io/instance": "user-instance",
+		"curity.io/owned-by":         "user-owned-by",
+	}
+	node.Spec.PodLabels = map[string]string{
+		"curity.io/role": "user-role",
+		"team":           "platform",
+	}
+	got := userPodLabelsOverridden(cluster, node)
+	want := []string{"app.kubernetes.io/instance", "curity.io/owned-by", "curity.io/role"}
+	if len(got) != len(want) {
+		t.Fatalf("overridden count: got %d %v, want %d %v", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("overridden[%d]: got %q want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestBuildDeployment_AnnotationMerging(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.PodAnnotations = map[string]string{"prometheus.io/scrape": "true", "team": "platform"}
@@ -2199,6 +2348,7 @@ func TestBuildHPA_Labels(t *testing.T) {
 		"app.kubernetes.io/version":    "11.0",
 		"curity.io/cluster":            "cluster-1",
 		"curity.io/role":               "test-role",
+		"curity.io/owned-by":           OwnedResourceName("cluster-1", "node-1"),
 	}
 	for k, v := range expectedLabels {
 		if hpa.Labels[k] != v {

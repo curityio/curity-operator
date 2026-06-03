@@ -474,6 +474,7 @@ var _ = Describe("PackagesReady condition (envtest)", func() {
 					"app.kubernetes.io/managed-by": "curity-operator",
 					"app.kubernetes.io/instance":   ownedName(clusterName, nodeName),
 					"curity.io/cluster":            clusterName,
+					"curity.io/owned-by":           ownedName(clusterName, nodeName),
 				},
 				Annotations:     map[string]string{"curity.io/packages-hash": stampedHash},
 				OwnerReferences: []metav1.OwnerReference{owningRS},

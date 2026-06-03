@@ -726,7 +726,7 @@ func TestClusterHandlePermanentWriteError_NoChange_SkipsWrite(t *testing.T) {
 		Message:            "Secret rejected by apiserver: " + preApiMsg,
 		ObservedGeneration: 5,
 	})
-	// PR-1: helper also writes Ready=False/InvalidSpec; pre-populate so the
+	// Helper also writes Ready=False/InvalidSpec; pre-populate so the
 	// changed-bool gate sees nothing to update.
 	apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionReady,

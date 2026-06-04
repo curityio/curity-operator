@@ -21,7 +21,6 @@ spec:
     secure: false
   identityServerClusterRef:
     name: ui-cluster
-  replicas: 1
   service:
     type: ClusterIP
     port: 6789

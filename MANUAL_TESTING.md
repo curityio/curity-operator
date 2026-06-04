@@ -176,7 +176,7 @@ spec:
   role: admin
   identityServerClusterRef:
     name: my-cluster
-  replicas: 1
+  # admin is single-active: replicas must not be set (always 1)
   ui:
     enabled: true
     secure: false
@@ -189,7 +189,7 @@ spec:
 kubectl apply -f admin.yaml
 ```
 
-Only one admin node per cluster is allowed; replicas is forced to 1.
+Only one admin node per cluster is allowed; replicas must not be set on an admin node (rejected at admission) — the admin is always 1.
 
 ### 3d. Runtime IdentityServerNode
 

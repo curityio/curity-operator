@@ -52,8 +52,11 @@ func hasReconcilerErrorFor(clusterName string) bool {
 		return false
 	}
 	for _, line := range strings.Split(out, "\n") {
+		// Match the exact cluster name in the JSON, not a bare substring:
+		// "bad-cluster" would otherwise match unrelated clusters like
+		// "log-bad-cluster" from other specs and report a false retry-storm.
 		if strings.Contains(line, `"msg":"Reconciler error"`) &&
-			strings.Contains(line, clusterName) &&
+			strings.Contains(line, `"IdentityServerCluster":{"name":"`+clusterName+`"`) &&
 			strings.Contains(line, `"controllerKind":"IdentityServerCluster"`) {
 			return true
 		}

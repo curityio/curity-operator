@@ -464,7 +464,6 @@ var _ = Describe("IdentityServerNode", func() {
 					Spec: v1alpha1.IdentityServerNodeSpec{
 						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role-2",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "dup-cluster"},
-						Replicas:                 ptr.To(int32(1)),
 						Service:                  defaultTestService(),
 					},
 				}
@@ -831,10 +830,10 @@ var _ = Describe("IdentityServerNode", func() {
 				}
 				err := k().Create(ctx, node)
 				Expect(err).To(HaveOccurred(), "admin node with replicas=5 must be rejected by CEL")
-				Expect(err.Error()).To(ContainSubstring("replicas must be 1 for admin-type nodes"))
+				Expect(err.Error()).To(ContainSubstring("replicas cannot be set on admin-type nodes"))
 			})
 
-			It("should accept admin node with replicas = 1 (boundary)", func() {
+			It("should reject admin node with replicas = 1 via CEL", func() {
 				ctx := context.Background()
 				node := &v1alpha1.IdentityServerNode{
 					ObjectMeta: metav1.ObjectMeta{Name: "admin-1", Namespace: ns},
@@ -845,7 +844,9 @@ var _ = Describe("IdentityServerNode", func() {
 						Service:                  defaultTestService(),
 					},
 				}
-				Expect(k().Create(ctx, node)).To(Succeed())
+				err := k().Create(ctx, node)
+				Expect(err).To(HaveOccurred(), "admin must not set replicas at all — not even 1")
+				Expect(err.Error()).To(ContainSubstring("replicas cannot be set on admin-type nodes"))
 			})
 		})
 
@@ -2451,7 +2452,6 @@ var _ = Describe("IdentityServerNode", func() {
 					Spec: v1alpha1.IdentityServerNodeSpec{
 						Type: v1alpha1.NodeTypeAdmin, Role: "my-admin-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "args-cluster"},
-						Replicas:                 ptr.To(int32(1)),
 						Service:                  defaultTestService(),
 					},
 				}
@@ -2853,7 +2853,6 @@ spec:
 					Spec: v1alpha1.IdentityServerNodeSpec{
 						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-adm-cluster"},
-						Replicas:                 ptr.To(int32(1)),
 						Service:                  defaultTestService(),
 						Autoscaling: &v1alpha1.AutoscalingSpec{
 							Enabled:                        true,
@@ -3610,7 +3609,6 @@ spec:
 					Spec: v1alpha1.IdentityServerNodeSpec{
 						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-adm-cluster"},
-						Replicas:                 ptr.To(int32(1)),
 						Service:                  defaultTestService(),
 						PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
 					},

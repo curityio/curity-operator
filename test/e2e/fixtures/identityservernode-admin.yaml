@@ -8,7 +8,6 @@ spec:
   role: admin-role
   identityServerClusterRef:
     name: {{ .clusterName }}
-  replicas: 1
   ui:
     enabled: true
     secure: true

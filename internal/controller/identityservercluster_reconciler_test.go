@@ -144,7 +144,6 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Type:                     v1alpha1.NodeTypeAdmin,
 					Role:                     "admin",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-default-env"},
-					Replicas:                 ptr.To(int32(1)),
 					Service:                  defaultTestService(),
 					UI:                       &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)},
 				},
@@ -175,7 +174,6 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Type:                     v1alpha1.NodeTypeAdmin,
 					Role:                     "cc-admin-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cc-cluster"},
-					Replicas:                 ptr.To(int32(1)),
 					Service:                  defaultTestService(),
 				},
 			}

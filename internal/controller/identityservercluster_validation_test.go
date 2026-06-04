@@ -804,10 +804,10 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		}
 		err := k8sClient.Create(ctx, node)
 		Expect(err).To(HaveOccurred(), "admin with replicas>1 must be rejected by CEL — Curity admin is single-active")
-		Expect(err.Error()).To(ContainSubstring("replicas must be 1 for admin-type nodes"))
+		Expect(err.Error()).To(ContainSubstring("replicas cannot be set on admin-type nodes"))
 	})
 
-	It("should accept admin node with replicas = 1 (boundary)", func() {
+	It("should reject admin node with replicas = 1 via CEL", func() {
 		testCreateCluster(ns, "val-cluster-adm1")
 		node := &v1alpha1.IdentityServerNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "node-admin-rep1", Namespace: ns},
@@ -819,10 +819,12 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				Service:                  defaultTestService(),
 			},
 		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed(), "admin with replicas=1 is the only valid admin value")
+		err := k8sClient.Create(ctx, node)
+		Expect(err).To(HaveOccurred(), "admin must not set replicas at all — not even 1")
+		Expect(err.Error()).To(ContainSubstring("replicas cannot be set on admin-type nodes"))
 	})
 
-	It("should accept admin node with replicas omitted (default=1 fills in)", func() {
+	It("should accept admin node with replicas omitted", func() {
 		testCreateCluster(ns, "val-cluster-admdef")
 		node := &v1alpha1.IdentityServerNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "node-admin-repdef", Namespace: ns},
@@ -833,7 +835,7 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				Service:                  defaultTestService(),
 			},
 		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed(), "default=1 fills in, CEL is satisfied")
+		Expect(k8sClient.Create(ctx, node)).To(Succeed(), "omitting replicas is the only valid admin form; reconciler coerces to 1")
 	})
 
 	It("should reject admin node with autoscaling enabled via CEL", func() {
@@ -844,7 +846,6 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				Type:                     v1alpha1.NodeTypeAdmin,
 				Role:                     "admin-as-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-admas"},
-				Replicas:                 ptr.To(int32(1)),
 				Service:                  defaultTestService(),
 				Autoscaling: &v1alpha1.AutoscalingSpec{
 					Enabled: true, MinReplicas: 1, MaxReplicas: 5, TargetCPUUtilizationPercentage: 80,
@@ -864,7 +865,6 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				Type:                     v1alpha1.NodeTypeAdmin,
 				Role:                     "admin-asf-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-admasf"},
-				Replicas:                 ptr.To(int32(1)),
 				Service:                  defaultTestService(),
 				Autoscaling: &v1alpha1.AutoscalingSpec{
 					Enabled: false, MinReplicas: 1, MaxReplicas: 1, TargetCPUUtilizationPercentage: 80,
@@ -1381,7 +1381,6 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				Type:                     v1alpha1.NodeTypeAdmin,
 				Role:                     "ui-http-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-uihttp"},
-				Replicas:                 ptr.To(int32(1)),
 				Service:                  defaultTestService(),
 				UI:                       &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(false)},
 			},

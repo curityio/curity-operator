@@ -48,9 +48,12 @@ func testCreateNode(ns, name string, nodeType v1alpha1.NodeType, clusterName str
 			Type:                     nodeType,
 			Role:                     name + "-role",
 			IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
-			Replicas:                 ptr.To(int32(1)),
 			Service:                  defaultTestService(),
 		},
+	}
+	// Admin nodes reject replicas at admission; runtime defaults to 1 anyway.
+	if nodeType != v1alpha1.NodeTypeAdmin {
+		node.Spec.Replicas = ptr.To(int32(1))
 	}
 	Expect(k8sClient.Create(ctx, node)).To(Succeed())
 }
@@ -120,9 +123,8 @@ func newUnstructuredNode(ns, name, role, clusterRef string) *unstructured.Unstru
 				"namespace": ns,
 			},
 			"spec": map[string]interface{}{
-				"type":     "runtime",
-				"role":     role,
-				"replicas": int64(1),
+				"type": "runtime",
+				"role": role,
 				"identityServerClusterRef": map[string]interface{}{
 					"name": clusterRef,
 				},

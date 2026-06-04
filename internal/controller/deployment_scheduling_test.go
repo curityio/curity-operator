@@ -300,6 +300,7 @@ var _ = Describe("Deployment scheduling", func() {
 			}
 			node.Spec.Type = v1alpha1.NodeTypeAdmin
 			node.Spec.Autoscaling.Enabled = false
+			node.Spec.Replicas = nil // admin must not set replicas
 			return k8sClient.Update(ctx, node)
 		}, 30*time.Second, 250*time.Millisecond).Should(Succeed())
 

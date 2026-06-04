@@ -97,7 +97,7 @@ spec:
   role: admin
   identityServerClusterRef:
     name: my-cluster
-  replicas: 1
+  # admin is single-active: replicas must not be set (always 1)
   ui:
     enabled: true
     secure: false
@@ -187,7 +187,7 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `type` | enum: `admin`/`runtime`, required | Node type; only one admin per cluster |
 | `role` | string, required | Unique node identifier within the cluster |
 | `identityServerClusterRef` | object, required | `{name: "<cluster>"}` reference |
-| `replicas` | int32, default: 1 | Deployment replicas; forced to 1 for admin |
+| `replicas` | int32 (runtime only) | Runtime Deployment replicas; omitted defaults to 1. Must not be set on admin nodes — rejected at admission; the admin is always 1 |
 | `ui` | object | Admin UI config (see [Accessing the Admin UI](#accessing-the-admin-ui)) |
 | `service` | object | Service `type` (ClusterIP/LoadBalancer/NodePort) and `port` |
 | `environmentVariables` | list | Standard Kubernetes env vars |

@@ -121,7 +121,3 @@ func makeClusterConfigPod(ns, clusterName, podName string) *corev1.Pod {
 		},
 	}
 }
-
-func ptrTo[T any](v T) *T {
-	return &v
-}

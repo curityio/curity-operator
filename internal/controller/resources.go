@@ -316,9 +316,13 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		{Name: "LOGGING_LEVEL", Value: resolveLoggingLevel(cluster, node)},
 	}
 
+	isAdmin := node.Spec.Type == v1alpha1.NodeTypeAdmin
+	// skipInstall is admin-only; guard the type for in-process paths that bypass CEL.
+	skipInstall := isAdmin && node.Spec.SkipInstall != nil && *node.Spec.SkipInstall
+
 	// Admin UI HTTP mode. nil Secure falls through to the secure-HTTPS default
 	// (a guard for in-process construction paths that bypass admission).
-	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
+	if isAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
 		httpMode := "false"
 		if node.Spec.UI.Secure != nil && !*node.Spec.UI.Secure {
 			httpMode = "true"
@@ -326,10 +330,14 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		envVars = append(envVars, corev1.EnvVar{Name: "ADMIN_UI_HTTP_MODE", Value: httpMode})
 	}
 
-	// Admin credentials as env vars from secret
+	// Admin credentials as env vars. The admin password is the installer
+	// trigger, so it goes only on the admin node.
 	if cluster.Spec.AdminCredentials != nil {
 		secretName := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
 		for _, item := range cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Items {
+			if item.Key == "ADMIN_PASSWORD" && !isAdmin {
+				continue
+			}
 			envVars = append(envVars, corev1.EnvVar{
 				Name: item.Path,
 				ValueFrom: &corev1.EnvVarSource{
@@ -342,10 +350,14 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		}
 	}
 
+	if skipInstall {
+		envVars = append(envVars, corev1.EnvVar{Name: "SKIP_INSTALL", Value: "1"})
+	}
+
 	// Auto-inject PASSWORD for Curity's unattended installer when admin UI is enabled.
 	// The installer checks for PASSWORD (not ADMIN_PASSWORD) to trigger first-run setup
 	// which configures the admin-service XML and starts the UI on port 6749.
-	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
+	if isAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
 		if cluster.Spec.AdminCredentials != nil {
 			hasPassword := false
 			for _, item := range cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Items {

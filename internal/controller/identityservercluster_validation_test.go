@@ -838,6 +838,55 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		Expect(k8sClient.Create(ctx, node)).To(Succeed(), "explicit autoscaling.enabled=false is fine on admin")
 	})
 
+	It("should reject runtime node with skipInstall set via CEL", func() {
+		testCreateCluster(ns, "val-cluster-rtski")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-rt-skip", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "rt-skip-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-rtski"},
+				Service:                  defaultTestService(),
+				SkipInstall:              ptr.To(true),
+			},
+		}
+		err := k8sClient.Create(ctx, node)
+		Expect(err).To(HaveOccurred(), "skipInstall is admin-only; runtime never installs")
+		Expect(err.Error()).To(ContainSubstring("skipInstall can only be set on admin-type nodes"))
+	})
+
+	It("should reject runtime node with skipInstall=false via CEL (strict: presence rejected, even false)", func() {
+		testCreateCluster(ns, "val-cluster-rtskif")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-rt-skipf", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "rt-skipf-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-rtskif"},
+				Service:                  defaultTestService(),
+				SkipInstall:              ptr.To(false),
+			},
+		}
+		err := k8sClient.Create(ctx, node)
+		Expect(err).To(HaveOccurred(), "strict rule rejects any skipInstall on runtime, including false")
+		Expect(err.Error()).To(ContainSubstring("skipInstall can only be set on admin-type nodes"))
+	})
+
+	It("should accept admin node with skipInstall=true", func() {
+		testCreateCluster(ns, "val-cluster-admski")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-adm-skip", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeAdmin,
+				Role:                     "adm-skip-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-admski"},
+				Service:                  defaultTestService(),
+				SkipInstall:              ptr.To(true),
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed(), "skipInstall is valid on admin")
+	})
+
 	// --- Autoscaling validations ---
 
 	It("should reject node with minReplicas > maxReplicas", func() {

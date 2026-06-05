@@ -64,8 +64,8 @@ spec:
 ```
 
 When `adminCredentials` is omitted, the operator automatically creates a Secret
-named `<cluster>-admin-creds` with generated values for `ADMIN_PASSWORD`,
-`CONFIG_ENCRYPTION_KEY`, and `KEYSTORE_PASSWORD`.
+named `<cluster>-admin-creds` with generated values for `ADMIN_PASSWORD` and
+`CONFIG_ENCRYPTION_KEY`.
 
 To use a pre-existing Secret instead, specify `adminCredentials` explicitly:
 
@@ -80,8 +80,6 @@ spec:
             path: ADMIN_PASSWORD
           - key: CONFIG_ENCRYPTION_KEY
             path: CONFIG_ENCRYPTION_KEY
-          - key: KEYSTORE_PASSWORD
-            path: KEYSTORE_PASSWORD
 ```
 
 2. Create an admin node with the UI enabled:
@@ -166,7 +164,7 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `version` | string, required | Curity Identity Server version |
 | `image` | string | Override container image (for private mirrors) |
 | `imagePullSecret` | string | Secret name for pulling images |
-| `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`, `KEYSTORE_PASSWORD`; auto-generated if omitted |
+| `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`; auto-generated if omitted |
 | `logging` | object | Log level, stdout tailing, sidecar config |
 | `resources` | object | Default CPU/memory requests/limits |
 | `probes` | object | Default liveness/readiness probe config |

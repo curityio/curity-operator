@@ -968,7 +968,6 @@ func TestBuildDeployment_AdminCredentialsMultipleItems(t *testing.T) {
 				Items: []v1alpha1.KeyToPath{
 					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-					{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 				},
 			},
 		},
@@ -980,7 +979,6 @@ func TestBuildDeployment_AdminCredentialsMultipleItems(t *testing.T) {
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
 	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "admin-secret", "CONFIG_ENCRYPTION_KEY")
-	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "admin-secret", "KEYSTORE_PASSWORD")
 }
 
 func TestBuildDeployment_AdminCredentialsNoSpecialMapping(t *testing.T) {
@@ -1143,13 +1141,12 @@ func TestDefaultAdminCredentials_SecretName(t *testing.T) {
 func TestDefaultAdminCredentials_Items(t *testing.T) {
 	creds := defaultAdminCredentials("test")
 	items := creds.ValueFrom.SecretKeyRef.Items
-	if len(items) != 3 {
-		t.Fatalf("expected 3 items, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
 	}
 	expected := []v1alpha1.KeyToPath{
 		{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 		{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-		{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 	}
 	for i, item := range items {
 		if item.Key != expected[i].Key || item.Path != expected[i].Path {
@@ -1170,7 +1167,7 @@ func TestBuildDeployment_DefaultedCredentials_InjectsEnvVars(t *testing.T) {
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
 	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "cluster-1-admin-creds", "CONFIG_ENCRYPTION_KEY")
-	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "cluster-1-admin-creds", "KEYSTORE_PASSWORD")
+	assertNoEnvVar(t, envVars, "KEYSTORE_PASSWORD")
 }
 
 func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
@@ -1184,7 +1181,7 @@ func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
 	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "cluster-1-admin-creds", "CONFIG_ENCRYPTION_KEY")
-	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "cluster-1-admin-creds", "KEYSTORE_PASSWORD")
+	assertNoEnvVar(t, envVars, "KEYSTORE_PASSWORD")
 }
 
 // --- Cluster Config Builder Tests ---
@@ -1571,6 +1568,16 @@ func assertEnvVarFromSecret(t *testing.T, envVars []corev1.EnvVar, envName, secr
 		}
 	}
 	t.Errorf("expected env var %s to exist", envName)
+}
+
+func assertNoEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) {
+	t.Helper()
+	for _, e := range envVars {
+		if e.Name == name {
+			t.Errorf("expected env var %s to be absent", name)
+			return
+		}
+	}
 }
 
 // --- Scheduling tests ---

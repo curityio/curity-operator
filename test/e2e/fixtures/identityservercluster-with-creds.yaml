@@ -14,5 +14,3 @@ spec:
             path: PASSWORD
           - key: CONFIG_ENCRYPTION_KEY
             path: CONFIG_ENCRYPTION_KEY
-          - key: KEYSTORE_PASSWORD
-            path: KEYSTORE_PASSWORD

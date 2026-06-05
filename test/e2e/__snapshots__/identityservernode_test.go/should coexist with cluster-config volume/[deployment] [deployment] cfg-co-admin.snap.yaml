@@ -80,11 +80,6 @@ spec:
                 secretKeyRef:
                   name: cfg-co-cluster-admin-creds
                   key: CONFIG_ENCRYPTION_KEY
-            - name: KEYSTORE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: cfg-co-cluster-admin-creds
-                  key: KEYSTORE_PASSWORD
           volumeMounts:
             - name: cluster-config
               readOnly: true

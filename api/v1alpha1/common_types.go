@@ -158,9 +158,8 @@ type KeyToPath struct {
 }
 
 // SecretKeyRefSource references the admin-credentials Secret. Items must
-// contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY,
-// and KEYSTORE_PASSWORD — these specific keys are what the operator projects
-// into Curity pods.
+// contain exactly one entry each for ADMIN_PASSWORD and CONFIG_ENCRYPTION_KEY —
+// these specific keys are what the operator projects into Curity pods.
 type SecretKeyRefSource struct {
 	// Name must be a valid DNS-1123 subdomain Secret name.
 	// +kubebuilder:validation:Required
@@ -169,9 +168,9 @@ type SecretKeyRefSource struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
-	// +kubebuilder:validation:MinItems=3
-	// +kubebuilder:validation:MaxItems=3
-	// +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY') && self.exists_one(i, i.key == 'KEYSTORE_PASSWORD')",message="items must contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD"
+	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=2
+	// +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY')",message="items must contain exactly one entry each for ADMIN_PASSWORD and CONFIG_ENCRYPTION_KEY"
 	Items []KeyToPath `json:"items"`
 }
 

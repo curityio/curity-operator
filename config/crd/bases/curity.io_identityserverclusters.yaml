@@ -66,9 +66,9 @@ spec:
             properties:
               adminCredentials:
                 description: |-
-                  AdminCredentials references a Secret containing ADMIN_PASSWORD,
-                  CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD. The operator creates
-                  the secret with random values if it does not exist.
+                  AdminCredentials references a Secret containing ADMIN_PASSWORD and
+                  CONFIG_ENCRYPTION_KEY. The operator creates the secret with random
+                  values if it does not exist.
                 properties:
                   valueFrom:
                     description: CredentialsValueFrom specifies the secret containing
@@ -77,9 +77,8 @@ spec:
                       secretKeyRef:
                         description: |-
                           SecretKeyRefSource references the admin-credentials Secret. Items must
-                          contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY,
-                          and KEYSTORE_PASSWORD — these specific keys are what the operator projects
-                          into Curity pods.
+                          contain exactly one entry each for ADMIN_PASSWORD and CONFIG_ENCRYPTION_KEY —
+                          these specific keys are what the operator projects into Curity pods.
                         properties:
                           items:
                             items:
@@ -100,15 +99,14 @@ spec:
                               - key
                               - path
                               type: object
-                            maxItems: 3
-                            minItems: 3
+                            maxItems: 2
+                            minItems: 2
                             type: array
                             x-kubernetes-validations:
                             - message: items must contain exactly one entry each for
-                                ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD
+                                ADMIN_PASSWORD and CONFIG_ENCRYPTION_KEY
                               rule: self.exists_one(i, i.key == 'ADMIN_PASSWORD')
                                 && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY')
-                                && self.exists_one(i, i.key == 'KEYSTORE_PASSWORD')
                           name:
                             description: Name must be a valid DNS-1123 subdomain Secret
                               name.
@@ -1884,8 +1882,14 @@ spec:
                   type: string
                 description: |-
                   PodLabels are labels applied to all pods managed by nodes referencing
-                  this cluster. Node-level labels merge on top.
+                  this cluster. Node-level labels merge on top. Operator-owned keys are
+                  rejected at admission (see CEL message for the list).
                 type: object
+                x-kubernetes-validations:
+                - message: 'podLabels cannot include operator-owned curity.io/* keys:
+                    owned-by, cluster, role'
+                  rule: self.all(k, !(k in ['curity.io/owned-by', 'curity.io/cluster',
+                    'curity.io/role']))
               probes:
                 description: |-
                   Probes configures default liveness and readiness probes for pods.

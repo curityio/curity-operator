@@ -164,7 +164,7 @@ spec:
 # ------------------------------------------------------------
 
   # Default logging options for nodes unless overridden per IdentityServerNode.
-  # When `stdout` is true, the operator adds sidecar containers that tail files under `var/log` for each name in `logs` and stream them to the pod’s stdout.
+  # When `logs` is non-empty, the operator adds sidecar containers that tail files under `var/log` for each named stream to the pod’s stdout. An empty or omitted `logs` disables the sidecars.
   # The `resources` field under `logging` applies only to those sidecars, not the main Identity Server container.
   # +kubebuilder:validation:Optional
   logging:
@@ -176,10 +176,7 @@ spec:
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:MaxLength=512
     image: busybox:latest
-    # When true, deploy sidecars that tail additional log files listed in `logs` from `var/log` to stdout.
-    # +kubebuilder:validation:Optional
-    stdout: false
-    # Names of extra log streams to tail when `stdout` is true (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts).
+    # Names of log streams to tail from `var/log` to stdout (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts). A non-empty list deploys one sidecar per stream; empty disables them.
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:MaxItems=32
     # +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts

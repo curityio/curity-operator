@@ -566,7 +566,7 @@ func TestBuildDeployment_LoggingLevelOff(t *testing.T) {
 func TestBuildDeployment_LoggingOffSuppressesSidecars(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF", Stdout: true, Logs: []string{"audit"}}
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF", Logs: []string{"audit"}}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
@@ -580,14 +580,14 @@ func TestBuildDeployment_LoggingOffSuppressesSidecars(t *testing.T) {
 	}
 }
 
-func TestBuildDeployment_LoggingOffClusterNodeStdoutOverride(t *testing.T) {
-	// Regression: cluster sets OFF, node overrides only Stdout/Logs (not Level).
+func TestBuildDeployment_LoggingOffClusterNodeLogsOverride(t *testing.T) {
+	// Regression: cluster sets OFF, node overrides only Logs (not Level).
 	// resolveLogging returns node spec (Level:""), resolveLoggingLevel returns "OFF".
 	// Sidecars and log-volume must still be suppressed.
 	cluster := newTestCluster()
 	cluster.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF"}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{"audit"}}
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Logs: []string{"audit"}}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
@@ -602,10 +602,10 @@ func TestBuildDeployment_LoggingOffClusterNodeStdoutOverride(t *testing.T) {
 	}
 }
 
-func TestBuildDeployment_LoggingStdoutDisabled(t *testing.T) {
+func TestBuildDeployment_LoggingUnsetDisabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	// stdout=false (default) → no log volume, no sidecars
+	// logging unset → no log volume, no sidecars
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
@@ -613,27 +613,23 @@ func TestBuildDeployment_LoggingStdoutDisabled(t *testing.T) {
 	}
 	for _, v := range deploy.Spec.Template.Spec.Volumes {
 		if v.Name == "log-volume" {
-			t.Errorf("log-volume should not exist when stdout=false")
+			t.Errorf("log-volume should not exist when logging is unset")
 		}
 	}
 }
 
-func TestBuildDeployment_LoggingStdoutEnabledNoLogs(t *testing.T) {
+func TestBuildDeployment_LoggingEmptyLogsDisabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{}}
+	// empty logs list → disabled: no log volume, no sidecars
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Logs: []string{}}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
-	// Volume should exist (stdout=true) but no sidecars (logs=[])
-	foundLogVol := false
 	for _, v := range deploy.Spec.Template.Spec.Volumes {
 		if v.Name == "log-volume" {
-			foundLogVol = true
+			t.Errorf("log-volume should not exist when logs is empty")
 		}
-	}
-	if !foundLogVol {
-		t.Errorf("log-volume should exist when stdout=true")
 	}
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
 		t.Errorf("expected 1 container (no sidecars for empty logs), got %d", len(deploy.Spec.Template.Spec.Containers))
@@ -644,8 +640,7 @@ func TestBuildDeployment_LoggingSidecars(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit", "request"},
+		Logs: []string{"audit", "request"},
 	}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
@@ -685,9 +680,8 @@ func TestBuildDeployment_LoggingCustomImage(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit"},
-		Image:  "alpine:3.19",
+		Logs:  []string{"audit"},
+		Image: "alpine:3.19",
 	}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
@@ -701,8 +695,7 @@ func TestBuildDeployment_LoggingResources(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit"},
+		Logs: []string{"audit"},
 		Resources: &corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU: resource.MustParse("10m"),
@@ -721,13 +714,11 @@ func TestBuildDeployment_LoggingResources(t *testing.T) {
 func TestBuildDeployment_LoggingNodeOverridesCluster(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit", "request"},
+		Logs: []string{"audit", "request"},
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"cluster"},
+		Logs: []string{"cluster"},
 	}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)

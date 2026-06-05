@@ -1088,9 +1088,8 @@ var _ = Describe("IdentityServerNode", func() {
 					Spec: v1alpha1.IdentityServerClusterSpec{
 						Version: "11.0",
 						Logging: &v1alpha1.LoggingSpec{
-							Level:  "DEBUG",
-							Stdout: true,
-							Logs:   []string{"audit", "request"},
+							Level: "DEBUG",
+							Logs:  []string{"audit", "request"},
 						},
 					},
 				}
@@ -1191,9 +1190,8 @@ var _ = Describe("IdentityServerNode", func() {
 					Spec: v1alpha1.IdentityServerClusterSpec{
 						Version: "11.0",
 						Logging: &v1alpha1.LoggingSpec{
-							Level:  "OFF",
-							Stdout: true,
-							Logs:   []string{"audit"},
+							Level: "OFF",
+							Logs:  []string{"audit"},
 						},
 					},
 				}

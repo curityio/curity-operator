@@ -133,8 +133,8 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 	logging := resolveLogging(cluster, node)
 	effectiveLevel := resolveLoggingLevel(cluster, node)
 
-	// Add log volume mount to main container if stdout logging enabled and level is not OFF
-	if logging != nil && logging.Stdout && effectiveLevel != "OFF" {
+	// Shared log volume, mounted only when sidecars will tail it.
+	if logging != nil && len(logging.Logs) > 0 && effectiveLevel != "OFF" {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 			Name:      "log-volume",
 			MountPath: "/opt/idsvr/var/log/",
@@ -653,7 +653,7 @@ const defaultLogImage = "busybox:latest"
 // buildLogSidecars creates sidecar containers that tail Curity log files to stdout.
 // One sidecar per log type (e.g., audit, request, cluster).
 func buildLogSidecars(logging *v1alpha1.LoggingSpec) []corev1.Container {
-	if logging == nil || !logging.Stdout || len(logging.Logs) == 0 {
+	if logging == nil || len(logging.Logs) == 0 {
 		return nil
 	}
 

@@ -329,13 +329,8 @@ type LoggingSpec struct {
 	// +kubebuilder:validation:Enum=ERROR;WARN;INFO;DEBUG;TRACE;OFF
 	Level string `json:"level,omitempty"`
 
-	// Stdout enables sidecar containers that tail Curity log files
-	// to stdout, making them accessible via kubectl logs.
-	// Sidecars are suppressed when Level is OFF, even if Stdout is true.
-	// +kubebuilder:default=false
-	Stdout bool `json:"stdout,omitempty"`
-
-	// Logs is the list of Curity log files to stream when stdout is enabled.
+	// Logs are the Curity log files to tail to stdout via sidecar containers (one
+	// per stream); a non-empty list enables them, empty/omitted or Level: OFF disables.
 	// Allowed values: audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts.
 	// +kubebuilder:validation:MaxItems=32
 	// +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts

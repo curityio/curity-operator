@@ -194,7 +194,6 @@ var _ = Describe("IdentityServerCluster cluster.xml regeneration", func() {
 			Data: map[string][]byte{
 				"ADMIN_PASSWORD":        []byte("password"),
 				"CONFIG_ENCRYPTION_KEY": []byte("initial-key"),
-				"KEYSTORE_PASSWORD":     []byte("keystore-pw"),
 			},
 		}
 		Expect(k8sClient.Create(ctx, credSecret)).To(Succeed())
@@ -210,7 +209,6 @@ var _ = Describe("IdentityServerCluster cluster.xml regeneration", func() {
 							Items: []v1alpha1.KeyToPath{
 								{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 								{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-								{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 							},
 						},
 					},

@@ -105,11 +105,6 @@ spec:
                 secretKeyRef:
                   name: pkg-snap-admin-creds
                   key: CONFIG_ENCRYPTION_KEY
-            - name: KEYSTORE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: pkg-snap-admin-creds
-                  key: KEYSTORE_PASSWORD
           volumeMounts:
             - name: cluster-config
               readOnly: true

@@ -158,7 +158,7 @@ kubectl apply -f isc.yaml
 kubectl -n demo get isc
 ```
 
-The operator creates a Secret `my-cluster-admin-creds` with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`, and `KEYSTORE_PASSWORD`.
+The operator creates a Secret `my-cluster-admin-creds` with `ADMIN_PASSWORD` and `CONFIG_ENCRYPTION_KEY`.
 
 To use a pre-existing Secret instead, set `spec.adminCredentials` — see [README §Create a Curity Identity Server Deployment](README.md#create-a-curity-identity-server-deployment).
 

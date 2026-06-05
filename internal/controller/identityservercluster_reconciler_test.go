@@ -103,7 +103,6 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 								Items: []v1alpha1.KeyToPath{
 									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 								},
 							},
 						},
@@ -116,7 +115,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			eventuallyGetResource(ns, "test-admin-secret", secret)
 			Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
 			Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
-			Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
+			Expect(secret.Data).NotTo(HaveKey("KEYSTORE_PASSWORD"))
 
 			// Verify no OwnerReference (survives cluster deletion)
 			Expect(secret.OwnerReferences).To(BeEmpty())
@@ -130,7 +129,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			eventuallyGetResource(ns, "cluster-no-creds-admin-creds", secret)
 			Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
 			Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
-			Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
+			Expect(secret.Data).NotTo(HaveKey("KEYSTORE_PASSWORD"))
+			Expect(secret.Data).To(HaveLen(2))
 			Expect(secret.Labels["app.kubernetes.io/managed-by"]).To(Equal("curity-operator"))
 			Expect(secret.Labels["curity.io/cluster"]).To(Equal("cluster-no-creds"))
 			Expect(secret.OwnerReferences).To(BeEmpty())
@@ -157,7 +157,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			envVars := deploy.Spec.Template.Spec.Containers[0].Env
 			Expect(hasEnvFromSecret(envVars, "PASSWORD", "cluster-default-env-admin-creds", "ADMIN_PASSWORD")).To(BeTrue())
 			Expect(hasEnvFromSecret(envVars, "CONFIG_ENCRYPTION_KEY", "cluster-default-env-admin-creds", "CONFIG_ENCRYPTION_KEY")).To(BeTrue())
-			Expect(hasEnvFromSecret(envVars, "KEYSTORE_PASSWORD", "cluster-default-env-admin-creds", "KEYSTORE_PASSWORD")).To(BeTrue())
+			Expect(envVars).NotTo(ContainElement(HaveField("Name", "KEYSTORE_PASSWORD")))
 		})
 	})
 
@@ -440,7 +440,6 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 								Items: []v1alpha1.KeyToPath{
 									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 								},
 							},
 						},
@@ -517,7 +516,6 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 								Items: []v1alpha1.KeyToPath{
 									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 								},
 							},
 						},
@@ -813,7 +811,6 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 								Items: []v1alpha1.KeyToPath{
 									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 								},
 							},
 						},

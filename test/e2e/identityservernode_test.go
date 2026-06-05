@@ -920,7 +920,8 @@ var _ = Describe("IdentityServerNode", func() {
 
 				Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
 				Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
-				Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
+				Expect(secret.Data).NotTo(HaveKey("KEYSTORE_PASSWORD"))
+				Expect(secret.Data).To(HaveLen(2))
 				Expect(len(secret.Data["ADMIN_PASSWORD"])).To(BeNumerically(">", 0))
 				Expect(secret.OwnerReferences).To(BeEmpty())
 				Expect(secret.Labels["app.kubernetes.io/managed-by"]).To(Equal("curity-operator"))
@@ -943,7 +944,6 @@ var _ = Describe("IdentityServerNode", func() {
 					Data: map[string][]byte{
 						"ADMIN_PASSWORD":        []byte("my-known-password"),
 						"CONFIG_ENCRYPTION_KEY": []byte("my-known-key"),
-						"KEYSTORE_PASSWORD":     []byte("my-known-ks"),
 					},
 				}
 				Expect(k().Create(ctx, preExisting)).To(Succeed())
@@ -1021,7 +1021,8 @@ var _ = Describe("IdentityServerNode", func() {
 
 				Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
 				Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
-				Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
+				Expect(secret.Data).NotTo(HaveKey("KEYSTORE_PASSWORD"))
+				Expect(secret.Data).To(HaveLen(2))
 				Expect(len(secret.Data["ADMIN_PASSWORD"])).To(BeNumerically(">", 0))
 				Expect(secret.Labels["app.kubernetes.io/managed-by"]).To(Equal("curity-operator"))
 				Expect(secret.Labels["curity.io/cluster"]).To(Equal("default-creds"))
@@ -1056,13 +1057,9 @@ var _ = Describe("IdentityServerNode", func() {
 							e.ValueFrom.SecretKeyRef.Name == "default-creds-admin-creds"
 					}),
 				), "expected CONFIG_ENCRYPTION_KEY env var from default-creds-admin-creds")
-				Expect(envVars).To(ContainElement(
-					Satisfy(func(e corev1.EnvVar) bool {
-						return e.Name == "KEYSTORE_PASSWORD" && e.ValueFrom != nil &&
-							e.ValueFrom.SecretKeyRef != nil &&
-							e.ValueFrom.SecretKeyRef.Name == "default-creds-admin-creds"
-					}),
-				), "expected KEYSTORE_PASSWORD env var from default-creds-admin-creds")
+				Expect(envVars).NotTo(ContainElement(
+					Satisfy(func(e corev1.EnvVar) bool { return e.Name == "KEYSTORE_PASSWORD" }),
+				), "KEYSTORE_PASSWORD env var must no longer be projected")
 
 				utils.MatchYAMLResource(deploy, "[deployment] default-admin")
 

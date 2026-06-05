@@ -261,10 +261,6 @@ func (r *IdentityServerClusterReconciler) ensureAdminCredentialsSecret(ctx conte
 	if err != nil {
 		return fmt.Errorf("failed to generate encryption key: %w", err)
 	}
-	keystorePassword, err := generateRandomAlphanumeric(16)
-	if err != nil {
-		return fmt.Errorf("failed to generate keystore password: %w", err)
-	}
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -279,7 +275,6 @@ func (r *IdentityServerClusterReconciler) ensureAdminCredentialsSecret(ctx conte
 		Data: map[string][]byte{
 			"ADMIN_PASSWORD":        []byte(adminPassword),
 			"CONFIG_ENCRYPTION_KEY": []byte(encryptionKey),
-			"KEYSTORE_PASSWORD":     []byte(keystorePassword),
 		},
 	}
 
@@ -308,7 +303,6 @@ func defaultAdminCredentials(clusterName string) *v1alpha1.CredentialsSource {
 				Items: []v1alpha1.KeyToPath{
 					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-					{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 				},
 			},
 		},

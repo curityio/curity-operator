@@ -187,6 +187,7 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `identityServerClusterRef` | object, required | `{name: "<cluster>"}` reference |
 | `replicas` | int32 (runtime only) | Runtime Deployment replicas; omitted defaults to 1. Must not be set on admin nodes — rejected at admission; the admin is always 1 |
 | `ui` | object | Admin UI config (see [Accessing the Admin UI](#accessing-the-admin-ui)) |
+| `skipInstall` | bool (admin only) | When `true`, passes `SKIP_INSTALL=1` so the admin starts without first-run setup. Set at bootstrap; provide config another way. Rejected on runtime nodes |
 | `service` | object | Service `type` (ClusterIP/LoadBalancer/NodePort) and `port` |
 | `environmentVariables` | list | Standard Kubernetes env vars |
 | `resources` | object | Overrides cluster-level resources |

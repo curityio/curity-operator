@@ -56,11 +56,6 @@ spec:
               value: "4465"
             - name: LOGGING_LEVEL
               value: INFO
-            - name: PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: cc-cluster-admin-creds
-                  key: ADMIN_PASSWORD
             - name: CONFIG_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:

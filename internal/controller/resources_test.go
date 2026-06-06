@@ -941,7 +941,7 @@ func TestBuildDeployment_AdminCredentialsEnvVarUsesPath(t *testing.T) {
 			},
 		},
 	}
-	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
@@ -985,13 +985,104 @@ func TestBuildDeployment_AdminCredentialsNoSpecialMapping(t *testing.T) {
 			},
 		},
 	}
-	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	// Should use Path as-is, not rename to PASSWORD
 	assertEnvVarFromSecret(t, envVars, "MY_CUSTOM_NAME", "admin-secret", "ADMIN_PASSWORD")
+}
+
+func TestBuildDeployment_RuntimeOmitsAdminPassword(t *testing.T) {
+	// The admin password is the installer trigger and must not reach runtime
+	// nodes; other credential keys still project there.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertNoEnvVar(t, envVars, "PASSWORD")
+	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "admin-secret", "CONFIG_ENCRYPTION_KEY")
+}
+
+func TestBuildDeployment_RuntimeOmitsAdminPasswordCustomName(t *testing.T) {
+	// Gating keys off the ADMIN_PASSWORD secret key, not its projected name, so
+	// any custom env name is still dropped on runtime.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "MY_CUSTOM_NAME"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertNoEnvVar(t, envVars, "MY_CUSTOM_NAME")
+}
+
+func TestBuildDeployment_SkipInstallAdmin(t *testing.T) {
+	// skipInstall passes SKIP_INSTALL=1; the password is still projected on the
+	// admin (the image skips first-run setup whenever SKIP_INSTALL is set).
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.SkipInstall = ptr.To(true)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVar(t, envVars, "SKIP_INSTALL", "1")
+	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
+	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "admin-secret", "CONFIG_ENCRYPTION_KEY")
+}
+
+func TestBuildDeployment_SkipInstallUnsetAdminKeepsPassword(t *testing.T) {
+	// Without skipInstall, the admin keeps the password and gets no SKIP_INSTALL.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
+	assertNoEnvVar(t, envVars, "SKIP_INSTALL")
 }
 
 // --- Admin UI PASSWORD auto-injection tests ---
@@ -1162,7 +1253,8 @@ func TestBuildDeployment_DefaultedCredentials_InjectsEnvVars(t *testing.T) {
 }
 
 func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
-	// Runtime nodes get all credential env vars from items mapping.
+	// Runtime nodes get the encryption key but not the admin password — the
+	// password is the installer trigger and belongs only on the admin.
 	cluster := newTestCluster()
 	cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
@@ -1170,7 +1262,7 @@ func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
-	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
+	assertNoEnvVar(t, envVars, "PASSWORD")
 	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "cluster-1-admin-creds", "CONFIG_ENCRYPTION_KEY")
 	assertNoEnvVar(t, envVars, "KEYSTORE_PASSWORD")
 }

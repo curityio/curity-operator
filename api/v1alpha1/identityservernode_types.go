@@ -12,6 +12,7 @@ import (
 // +kubebuilder:object:generate=true
 // +kubebuilder:validation:XValidation:rule="self.type != 'admin' || !has(self.replicas)",message="replicas cannot be set on admin-type nodes (Curity admin is always single-active with 1 replica)"
 // +kubebuilder:validation:XValidation:rule="self.type != 'admin' || !has(self.autoscaling) || !self.autoscaling.enabled",message="autoscaling cannot be enabled on admin-type nodes (Curity admin is single-active)"
+// +kubebuilder:validation:XValidation:rule="self.type == 'admin' || !has(self.skipInstall)",message="skipInstall can only be set on admin-type nodes"
 type IdentityServerNodeSpec struct {
 	// Type determines whether this is an admin or runtime node.
 	// Only one admin node is allowed per cluster.
@@ -28,6 +29,10 @@ type IdentityServerNodeSpec struct {
 
 	// UI configures the admin UI. Only applicable for admin-type nodes.
 	UI *UISpec `json:"ui,omitempty"`
+
+	// SkipInstall passes SKIP_INSTALL=1 to the admin container so it boots
+	// without running first-run setup. Admin-only (CEL-enforced).
+	SkipInstall *bool `json:"skipInstall,omitempty"`
 
 	// IdentityServerClusterRef references the IdentityServerCluster managing this node.
 	// +kubebuilder:validation:Required

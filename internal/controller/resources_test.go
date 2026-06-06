@@ -1955,6 +1955,100 @@ func TestBuildVolumes_BaseConfigMap(t *testing.T) {
 	}
 }
 
+func TestVolumeDefaultMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		configType string
+		isSecret   bool
+		want       int32
+	}{
+		{"postCommitScript ConfigMap → 0755 (other-exec)", ConfigTypePostCommitScript, false, 0o755},
+		{"postCommitScript Secret → 0555 (other-exec, no write)", ConfigTypePostCommitScript, true, 0o555},
+		{"base ConfigMap keeps apiserver default", ConfigTypeBase, false, corev1.ConfigMapVolumeSourceDefaultMode},
+		{"base Secret keeps apiserver default", ConfigTypeBase, true, corev1.SecretVolumeSourceDefaultMode},
+		{"logging ConfigMap keeps apiserver default", ConfigTypeLogging, false, corev1.ConfigMapVolumeSourceDefaultMode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := volumeDefaultMode(tc.configType, tc.isSecret)
+			if got == nil || *got != tc.want {
+				t.Errorf("volumeDefaultMode(%q, secret=%v) = %v, want %o", tc.configType, tc.isSecret, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildVolumes_PostCommitScriptConfigMapIsExecutableDirMount(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "hooks", IsSecret: false, ConfigType: ConfigTypePostCommitScript,
+			Data: map[string][]byte{"notify.sh": []byte("#!/bin/sh\n")}},
+		// Regression guard: a base ConfigMap in the same call must keep 0644.
+		{Name: "base-cm", IsSecret: false, ConfigType: ConfigTypeBase,
+			Data: map[string][]byte{"config.xml": []byte("<c/>")}},
+	}
+	volumes, mounts := buildVolumes("cluster-1", configs)
+
+	var scriptVol, baseVol *corev1.Volume
+	for i := range volumes {
+		switch volumes[i].Name {
+		case configVolumeName(false, "hooks"):
+			scriptVol = &volumes[i]
+		case configVolumeName(false, "base-cm"):
+			baseVol = &volumes[i]
+		}
+	}
+	if scriptVol == nil || scriptVol.ConfigMap == nil {
+		t.Fatalf("expected ConfigMap volume for postCommitScript; volumes=%v", volumes)
+	}
+	if scriptVol.ConfigMap.DefaultMode == nil || *scriptVol.ConfigMap.DefaultMode != 0o755 {
+		t.Errorf("expected postCommitScript volume DefaultMode 0755, got %v", scriptVol.ConfigMap.DefaultMode)
+	}
+	// Regression: the per-type mode helper must not disturb base config.
+	if baseVol == nil || baseVol.ConfigMap == nil ||
+		baseVol.ConfigMap.DefaultMode == nil || *baseVol.ConfigMap.DefaultMode != corev1.ConfigMapVolumeSourceDefaultMode {
+		t.Errorf("base ConfigMap DefaultMode must stay apiserver default, got %v", baseVol.ConfigMap.DefaultMode)
+	}
+
+	// Directory mount: per-key mangled filename under the post-commit-scripts dir.
+	wantPath := MountPathPostCommitScript + mountFilename(false, "hooks", "notify.sh")
+	var m *corev1.VolumeMount
+	for i := range mounts {
+		if mounts[i].MountPath == wantPath {
+			m = &mounts[i]
+			break
+		}
+	}
+	if m == nil {
+		t.Fatalf("expected mount at %s; mounts=%v", wantPath, mounts)
+	}
+	if m.SubPath != "notify.sh" {
+		t.Errorf("expected SubPath notify.sh, got %q", m.SubPath)
+	}
+	if !m.ReadOnly {
+		t.Error("expected ReadOnly mount")
+	}
+}
+
+func TestBuildVolumes_PostCommitScriptSecretIs0555(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "sec-hooks", IsSecret: true, ConfigType: ConfigTypePostCommitScript,
+			Data: map[string][]byte{"run.sh": []byte("#!/bin/sh\n")}},
+	}
+	volumes, _ := buildVolumes("cluster-1", configs)
+	var vol *corev1.Volume
+	for i := range volumes {
+		if volumes[i].Name == configVolumeName(true, "sec-hooks") {
+			vol = &volumes[i]
+		}
+	}
+	if vol == nil || vol.Secret == nil {
+		t.Fatalf("expected Secret volume for postCommitScript; volumes=%v", volumes)
+	}
+	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o555 {
+		t.Errorf("expected postCommitScript Secret DefaultMode 0555, got %v", vol.Secret.DefaultMode)
+	}
+}
+
 func TestBuildVolumes_LoggingConfigMapMountsAtLeafPath(t *testing.T) {
 	configs := []DiscoveredManagedResource{
 		{Name: "my-log4j2", IsSecret: false, ConfigType: ConfigTypeLogging,

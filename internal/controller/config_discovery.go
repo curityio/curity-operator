@@ -24,26 +24,29 @@ const (
 // Event reasons surfaced on managed ConfigMaps/Secrets (or the cluster CR
 // for operator-level scan failures).
 const (
-	EventReasonEmptyClusterScope      = "EmptyClusterScope"
-	EventReasonUnknownClusterInScope  = "UnknownClusterInScope"
-	EventReasonUnknownConfigType      = "UnknownConfigType"
-	EventReasonDuplicateConfigKey     = "DuplicateConfigKey"
-	EventReasonScanFailed             = "ScanFailed"
-	EventReasonLoggingConfigInvalid   = "LoggingConfigInvalid"
-	EventReasonDuplicateLoggingConfig = "DuplicateLoggingConfig"
+	EventReasonEmptyClusterScope       = "EmptyClusterScope"
+	EventReasonUnknownClusterInScope   = "UnknownClusterInScope"
+	EventReasonUnknownConfigType       = "UnknownConfigType"
+	EventReasonDuplicateConfigKey      = "DuplicateConfigKey"
+	EventReasonScanFailed              = "ScanFailed"
+	EventReasonLoggingConfigInvalid    = "LoggingConfigInvalid"
+	EventReasonDuplicateLoggingConfig  = "DuplicateLoggingConfig"
+	EventReasonPostCommitScriptNoAdmin = "PostCommitScriptNoAdmin"
 )
 
 // Config type values matching the README.
 const (
-	ConfigTypeBase    = "base"
-	ConfigTypeLicense = "license"
-	ConfigTypeLogging = "logging"
+	ConfigTypeBase             = "base"
+	ConfigTypeLicense          = "license"
+	ConfigTypeLogging          = "logging"
+	ConfigTypePostCommitScript = "postCommitScript"
 )
 
 const (
-	MountPathBase    = "/opt/idsvr/etc/init/"
-	MountPathLicense = "/opt/idsvr/etc/init/license/"
-	MountPathLogging = "/opt/idsvr/etc/log4j2.xml"
+	MountPathBase             = "/opt/idsvr/etc/init/"
+	MountPathLicense          = "/opt/idsvr/etc/init/license/"
+	MountPathLogging          = "/opt/idsvr/etc/log4j2.xml"
+	MountPathPostCommitScript = "/opt/idsvr/usr/bin/post-commit-scripts/"
 )
 
 const LoggingDataKey = "log4j2.xml"
@@ -327,32 +330,41 @@ func resolveConfigType(annotations map[string]string) (string, error) {
 		return ConfigTypeLicense, nil
 	case ConfigTypeLogging:
 		return ConfigTypeLogging, nil
+	case ConfigTypePostCommitScript:
+		return ConfigTypePostCommitScript, nil
 	default:
-		return "", fmt.Errorf("%w: %q (valid: %q, %q, %q)",
-			ErrUnknownConfigType, val, ConfigTypeBase, ConfigTypeLicense, ConfigTypeLogging)
+		return "", fmt.Errorf("%w: %q (valid: %q, %q, %q, %q)",
+			ErrUnknownConfigType, val, ConfigTypeBase, ConfigTypeLicense, ConfigTypeLogging, ConfigTypePostCommitScript)
 	}
 }
 
 // mountPathForConfigType returns the mount path and whether it is a single-
 // file leaf (logging) or a directory base shared by per-key mangled filenames
-// (base, license).
+// (base, license, postCommitScript).
 func mountPathForConfigType(configType string) (path string, isLeaf bool) {
 	switch configType {
 	case ConfigTypeLicense:
 		return MountPathLicense, false
 	case ConfigTypeLogging:
 		return MountPathLogging, true
+	case ConfigTypePostCommitScript:
+		return MountPathPostCommitScript, false
 	default:
 		return MountPathBase, false
 	}
 }
 
 // shouldMountConfig returns whether a node should receive a config of the
-// given type. Logging mounts on every node regardless; base and license
-// follow the admin-distributes pattern (admin-only when an admin exists).
+// given type. Logging mounts on every node. postCommitScript is strictly
+// admin-only — scripts run only where ConfigD runs, so never on runtime and
+// never on a standalone runtime-only cluster. base and license follow the
+// admin-distributes pattern (admin-only when an admin exists, else all nodes).
 func shouldMountConfig(nodeType v1alpha1.NodeType, adminExists bool, configType string) bool {
 	if configType == ConfigTypeLogging {
 		return true
+	}
+	if configType == ConfigTypePostCommitScript {
+		return nodeType == v1alpha1.NodeTypeAdmin
 	}
 	if !adminExists {
 		return true
@@ -465,7 +477,10 @@ type DuplicateKeyOwner struct {
 // ConfigMap vs Secret. Even though mountFilename() guarantees distinct mount
 // paths (cm_* vs secret_*), having the same data key in both a ConfigMap and
 // a Secret of the same config type is still likely a user mistake — it may
-// produce unexpected merged configuration.
+// produce unexpected merged configuration. logging and postCommitScript are
+// excluded: their files don't merge (logging is a single leaf; post-commit
+// scripts run independently from distinct paths), so a shared filename across
+// resources is benign rather than a collision.
 func detectDuplicateKeys(configs []DiscoveredManagedResource) []DuplicateKeyWarning {
 	type mountKey struct {
 		configType string
@@ -473,9 +488,10 @@ func detectDuplicateKeys(configs []DiscoveredManagedResource) []DuplicateKeyWarn
 	}
 	seen := make(map[mountKey][]DuplicateKeyOwner)
 	for _, cfg := range configs {
-		// Logging duplicates are reported via DuplicateLoggingConfig; skip
-		// here so the same root cause isn't surfaced twice.
-		if cfg.ConfigType == ConfigTypeLogging {
+		// base/license files all load into the same dir and merge, so a shared
+		// key matters. logging (reported via DuplicateLoggingConfig) and
+		// postCommitScript (independent scripts at distinct paths) don't merge.
+		if cfg.ConfigType == ConfigTypeLogging || cfg.ConfigType == ConfigTypePostCommitScript {
 			continue
 		}
 		kind := "ConfigMap"

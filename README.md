@@ -170,6 +170,13 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `logging` | object | Log level, stdout tailing, sidecar config |
 | `resources` | object | Default CPU/memory requests/limits |
 | `probes` | object | Default liveness/readiness probe config |
+| `imagePullPolicy` | enum: `Always`/`Never`/`IfNotPresent` | Pull policy for the main Curity container (default `IfNotPresent`) |
+| `terminationGracePeriodSeconds` | int64 (0–3600) | Pod shutdown grace period (default `30`); raise (60–180) for Curity's JVM drain |
+| `securityContext` | object | Pod-level security context; **merged** over the operator's required defaults (`runAsUser 10001`, `runAsGroup`/`fsGroup 10000`) so omitting a field never strips the required UID/GID |
+| `containerSecurityContext` | object | Security context for the main Curity container (privilege, capabilities, etc.) |
+| `initContainers` | list | User init containers, **appended** (never override operator-managed containers); name `curity` reserved; max 16 |
+| `extraContainers` | list | User sidecar containers, **appended** (never override operator-managed containers); same naming rules as `initContainers`; max 16 |
+| `networkPolicy` | object | Operator-managed NetworkPolicy protecting the cluster's admin node (cluster-scoped, opt-in by presence). See note below |
 | `autoscaling` | object | HPA defaults (minReplicas, maxReplicas, targetCPU) |
 | `podDisruptionBudget` | object | PodDisruptionBudget default. `minAvailable` accepts integer (`2`) or percentage (`"50%"`). Runtime nodes only; ignored on admin nodes with a Warning event |
 | `podAnnotations` | map | Applied to all managed pods |
@@ -194,6 +201,12 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `resources` | object | Overrides cluster-level resources |
 | `probes` | object | Overrides cluster-level probes |
 | `logging` | object | Overrides cluster-level logging |
+| `imagePullPolicy` | enum: `Always`/`Never`/`IfNotPresent` | Pull policy for the main Curity container (default `IfNotPresent`); overrides cluster |
+| `terminationGracePeriodSeconds` | int64 (0–3600) | Pod shutdown grace period (default `30`); overrides cluster |
+| `securityContext` | object | Pod-level security context; merged over operator defaults (UID/GID preserved); overrides cluster |
+| `containerSecurityContext` | object | Security context for the main Curity container; overrides cluster |
+| `initContainers` | list | User init containers, appended after package fetchers; `curity` reserved; max 16; overrides cluster |
+| `extraContainers` | list | User sidecar containers, appended after log sidecars; `curity` reserved; max 16; overrides cluster |
 | `autoscaling` | object | HPA configuration |
 | `podDisruptionBudget` | object | PodDisruptionBudget; node overrides cluster. `minAvailable` accepts integer or percentage string. Ignored on admin nodes (Warning event `PDBIgnored`) |
 | `podAnnotations` | map | Merges with cluster-level annotations |
@@ -202,6 +215,10 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `tolerations` | list | Overrides cluster-level tolerations |
 | `topologySpreadConstraints` | list | Overrides cluster-level topology |
 | `affinity` | object | Overrides cluster-level affinity |
+
+> **NetworkPolicy** (`isc.spec.networkPolicy`) is cluster-scoped — there is no `networkPolicy` field on `IdentityServerNode`. Setting it (even as `{}`) makes the operator create and own a NetworkPolicy that restricts ingress to the **admin** node: only same-cluster runtime pods may reach the config and distributed-service ports, plus — when `apiGatewayNamespace` is set and the admin UI is enabled — that namespace may reach the admin-UI port. It is **opt-in by presence** (omit to manage no policy) and only takes effect on a cluster whose CNI enforces NetworkPolicy.
+>
+> **Pod customization** fields (`initContainers`, `extraContainers`, `securityContext`, `containerSecurityContext`, `terminationGracePeriodSeconds`, `imagePullPolicy`) live on both specs; a node value replaces the cluster value entirely, **except** `securityContext`, which the operator merges over its required `runAsUser 10001` / `runAsGroup`/`fsGroup 10000` defaults. User `initContainers`/`extraContainers` are appended (never override operator-managed containers) and the name `curity` is rejected at admission.
 
 ## Configuration Management
 

@@ -511,3 +511,17 @@ type PackageBasicAuthSelector struct {
 	// +kubebuilder:validation:MinLength=1
 	PasswordKey string `json:"passwordKey"`
 }
+
+// NetworkPolicySpec configures the operator-managed NetworkPolicy that
+// restricts ingress to the cluster's admin node. Mirrors the upstream Helm
+// chart's release-level policy: ingress is allowed from same-cluster runtime
+// pods on the config and distributed-service ports, plus optionally from an
+// API-gateway namespace to the admin-UI port. Setting this field (even empty)
+// enables the policy; leaving it nil disables it.
+type NetworkPolicySpec struct {
+	// APIGatewayNamespace, when set and the admin UI is enabled, allows ingress
+	// to the admin-UI port from pods in this namespace. Omit to skip the UI rule.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	APIGatewayNamespace string `json:"apiGatewayNamespace,omitempty"`
+}

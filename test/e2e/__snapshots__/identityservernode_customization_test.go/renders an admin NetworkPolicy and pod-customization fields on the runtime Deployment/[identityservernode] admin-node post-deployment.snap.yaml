@@ -1,0 +1,60 @@
+
+[IdentityServerNode customization + NetworkPolicy renders an admin NetworkPolicy and pod-customization fields on the runtime Deployment - 1]
+metadata:
+  name: custom-admin
+  namespace: e2e-customization
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: custom-cluster
+  ownerReferences: <Any value>
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: admin
+  role: admin-ui-role
+  ui:
+    enabled: true
+    secure: true
+  identityServerClusterRef:
+    name: custom-cluster
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 6789
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: ClusterReady
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  deploymentName: custom-cluster-custom-admin-18772e45
+  serviceName: custom-cluster-custom-admin-18772e45
+
+---

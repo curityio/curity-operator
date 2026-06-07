@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -124,6 +125,7 @@ func (c *hpaUnsatisfiableCache) reap(nodeUID types.UID, current []autoscalingv2.
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile handles a single reconciliation loop for an IdentityServerNode.
 func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -835,6 +837,54 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
+	// 8b. Reconcile NetworkPolicy: admin nodes only, when cluster.Spec.NetworkPolicy
+	// is set. Runtime nodes never own one.
+	var npCollisionName string
+	if isAdmin && cluster.Spec.NetworkPolicy != nil {
+		desiredNP := buildNetworkPolicy(&cluster, &node)
+		existingNP := &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: desiredNP.Name, Namespace: desiredNP.Namespace},
+		}
+		result, err = controllerutil.CreateOrUpdate(ctx, r.Client, existingNP, func() error {
+			existingNP.Labels = mergeManagedLabels(existingNP.Labels, desiredNP.Labels)
+			existingNP.Spec = desiredNP.Spec
+			return controllerutil.SetControllerReference(&node, existingNP, r.Scheme)
+		})
+		if err != nil {
+			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, err); handled {
+				return res, statusErr
+			}
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile NetworkPolicy: %w", err)
+		}
+		if result != controllerutil.OperationResultNone {
+			log.Info("NetworkPolicy reconciled", "operation", result, "name", existingNP.Name)
+			r.Recorder.Eventf(&node, corev1.EventTypeNormal, "NetworkPolicyReconciled",
+				"NetworkPolicy %q %s", existingNP.Name, result)
+		}
+	} else {
+		// Delete a stale operator-owned NetworkPolicy (networkPolicy cleared, or the
+		// node flipped admin→runtime). Refuse to delete one we don't own; surface
+		// that collision as Degraded.
+		var existingNP networkingv1.NetworkPolicy
+		err := r.Get(ctx, client.ObjectKey{Name: OwnedResourceName(cluster.Name, node.Name), Namespace: node.Namespace}, &existingNP)
+		if err == nil {
+			if !metav1.IsControlledBy(&existingNP, &node) {
+				log.Info("skipping NetworkPolicy deletion, not owned by this node", "name", existingNP.Name)
+				r.Recorder.Eventf(&node, corev1.EventTypeWarning, "NetworkPolicyNotOwned",
+					"NetworkPolicy %q exists but is not managed by this node; skipping deletion", existingNP.Name)
+				npCollisionName = existingNP.Name
+			} else if delErr := r.Delete(ctx, &existingNP); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("failed to delete NetworkPolicy: %w", delErr)
+			} else {
+				log.Info("NetworkPolicy deleted", "name", existingNP.Name)
+				r.Recorder.Eventf(&node, corev1.EventTypeNormal, "NetworkPolicyDeleted",
+					"NetworkPolicy %q deleted", existingNP.Name)
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy: %w", err)
+		}
+	}
+
 	// 9. Compute status from Deployment.
 	// Capture PackagesReady (which lives outside the K8s-Deployment-mirror
 	// set) BEFORE computeNodeConditions rebuilds the slice — otherwise it
@@ -898,6 +948,13 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		setCondition(&node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
 			"PDBNotOwned",
 			fmt.Sprintf("A PodDisruptionBudget named %q exists but is not owned by this node", pdbCollisionName),
+			node.Generation)
+	}
+
+	if npCollisionName != "" {
+		setCondition(&node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
+			"NetworkPolicyNotOwned",
+			fmt.Sprintf("A NetworkPolicy named %q exists but is not owned by this node", npCollisionName),
 			node.Generation)
 	}
 
@@ -1018,6 +1075,7 @@ func (r *IdentityServerNodeReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Owns(&corev1.Service{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Watches(
 			&v1alpha1.IdentityServerCluster{},
 			handler.EnqueueRequestsFromMapFunc(r.findNodesForCluster),
@@ -1487,6 +1545,16 @@ func (r *IdentityServerNodeReconciler) cleanupOrphanChildren(
 	}
 	for i := range pdbs.Items {
 		if err := deleteIfOrphan(&pdbs.Items[i], "PodDisruptionBudget"); err != nil {
+			return err
+		}
+	}
+
+	var nps networkingv1.NetworkPolicyList
+	if err := r.List(ctx, &nps, listOpts...); err != nil {
+		return fmt.Errorf("list NetworkPolicies for orphan cleanup: %w", err)
+	}
+	for i := range nps.Items {
+		if err := deleteIfOrphan(&nps.Items[i], "NetworkPolicy"); err != nil {
 			return err
 		}
 	}

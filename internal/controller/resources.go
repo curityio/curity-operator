@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -94,7 +95,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 	container := corev1.Container{
 		Name:            containerName,
 		Image:           buildImage(cluster),
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: resolveImagePullPolicy(cluster, node),
 		Args:            buildContainerArgs(node),
 		Ports:           buildContainerPorts(node),
 		Env:             buildEnvVars(cluster, node),
@@ -103,15 +104,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 		// apiserver-default
 		TerminationMessagePath:   corev1.TerminationMessagePathDefault,
 		TerminationMessagePolicy: corev1.TerminationMessageReadFile,
-		// TODO: Add container-level security context in Phase 2
-		// SecurityContext: &corev1.SecurityContext{
-		// 	RunAsNonRoot:             ptr.To(true),
-		// 	AllowPrivilegeEscalation: ptr.To(false),
-		// 	ReadOnlyRootFilesystem:   ptr.To(false),
-		// 	Capabilities: &corev1.Capabilities{
-		// 		Drop: []corev1.Capability{"ALL"},
-		// 	},
-		// },
+		SecurityContext:          resolveContainerSecurityContext(cluster, node),
 	}
 
 	if resources != nil {
@@ -153,8 +146,10 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 		sidecars = buildLogSidecars(logging)
 	}
 
+	// Default sidecars + extra containers so apiserver-applied fields don't drift.
 	containers := []corev1.Container{container}
-	containers = append(containers, sidecars...)
+	containers = append(containers, ApplyContainerDefaultsAll(sidecars)...)
+	containers = append(containers, ApplyContainerDefaultsAll(resolveExtraContainers(cluster, node))...)
 
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -182,12 +177,8 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser:  ptr.To(int64(10001)),
-						RunAsGroup: ptr.To(int64(10000)),
-						FSGroup:    ptr.To(int64(10000)),
-					},
-					InitContainers:                buildPackageInitContainers(cluster.Spec.Packages, fetcherImage),
+					SecurityContext:               mergePodSecurityContext(resolvePodSecurityContext(cluster, node)),
+					InitContainers:                buildInitContainers(cluster, node, fetcherImage),
 					Containers:                    containers,
 					Volumes:                       volumes,
 					NodeSelector:                  resolveNodeSelector(cluster, node),
@@ -197,7 +188,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 					DNSPolicy:                     corev1.DNSClusterFirst,
 					RestartPolicy:                 corev1.RestartPolicyAlways,
 					SchedulerName:                 corev1.DefaultSchedulerName,
-					TerminationGracePeriodSeconds: ptr.To(int64(30)),
+					TerminationGracePeriodSeconds: resolveTerminationGracePeriodSeconds(cluster, node),
 					// WARNING: Priority is apiserver-derived from PriorityClassName.
 					// If `priorityClassName` is ever exposed on the CRD, remove
 					// this line — otherwise it stomps the resolved Priority and
@@ -648,6 +639,176 @@ func resolveTopologySpreadConstraints(cluster *v1alpha1.IdentityServerCluster, n
 	return cluster.Spec.TopologySpreadConstraints
 }
 
+func resolveInitContainers(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []corev1.Container {
+	if len(node.Spec.InitContainers) > 0 {
+		return node.Spec.InitContainers
+	}
+	return cluster.Spec.InitContainers
+}
+
+func resolveExtraContainers(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []corev1.Container {
+	if len(node.Spec.ExtraContainers) > 0 {
+		return node.Spec.ExtraContainers
+	}
+	return cluster.Spec.ExtraContainers
+}
+
+func resolvePodSecurityContext(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *corev1.PodSecurityContext {
+	if node.Spec.SecurityContext != nil {
+		return node.Spec.SecurityContext
+	}
+	return cluster.Spec.SecurityContext
+}
+
+func resolveContainerSecurityContext(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *corev1.SecurityContext {
+	if node.Spec.ContainerSecurityContext != nil {
+		return node.Spec.ContainerSecurityContext
+	}
+	return cluster.Spec.ContainerSecurityContext
+}
+
+// Defaulting to 30 (the operator's long-standing value) keeps an unset field drift-free.
+func resolveTerminationGracePeriodSeconds(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *int64 {
+	if node.Spec.TerminationGracePeriodSeconds != nil {
+		return node.Spec.TerminationGracePeriodSeconds
+	}
+	if cluster.Spec.TerminationGracePeriodSeconds != nil {
+		return cluster.Spec.TerminationGracePeriodSeconds
+	}
+	return ptr.To(int64(30))
+}
+
+func resolveImagePullPolicy(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) corev1.PullPolicy {
+	if node.Spec.ImagePullPolicy != "" {
+		return node.Spec.ImagePullPolicy
+	}
+	if cluster.Spec.ImagePullPolicy != "" {
+		return cluster.Spec.ImagePullPolicy
+	}
+	return corev1.PullIfNotPresent
+}
+
+// buildInitContainers appends the user's init containers after the operator's
+// package fetchers; user containers never override the operator's.
+func buildInitContainers(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode, fetcherImage string) []corev1.Container {
+	out := buildPackageInitContainers(cluster.Spec.Packages, fetcherImage)
+	return append(out, ApplyContainerDefaultsAll(resolveInitContainers(cluster, node))...)
+}
+
+// mergePodSecurityContext layers the user context over the operator base; an
+// omitted field keeps the UID/GID the Curity image requires, so a partial
+// override can't strip it. Always returns a populated context (drift-stable).
+func mergePodSecurityContext(user *corev1.PodSecurityContext) *corev1.PodSecurityContext {
+	result := &corev1.PodSecurityContext{}
+	if user != nil {
+		result = user.DeepCopy()
+	}
+	if result.RunAsUser == nil {
+		result.RunAsUser = ptr.To(int64(10001))
+	}
+	if result.RunAsGroup == nil {
+		result.RunAsGroup = ptr.To(int64(10000))
+	}
+	if result.FSGroup == nil {
+		result.FSGroup = ptr.To(int64(10000))
+	}
+	return result
+}
+
+// ApplyContainerDefaultsAll deep-copies each container (the CR spec must not be
+// mutated) and fills the fields the apiserver would default, so CreateOrUpdate
+// doesn't churn on them.
+func ApplyContainerDefaultsAll(in []corev1.Container) []corev1.Container {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]corev1.Container, 0, len(in))
+	for i := range in {
+		c := in[i].DeepCopy()
+		applyContainerDefaults(c)
+		out = append(out, *c)
+	}
+	return out
+}
+
+func applyContainerDefaults(c *corev1.Container) {
+	if c.TerminationMessagePath == "" {
+		c.TerminationMessagePath = corev1.TerminationMessagePathDefault
+	}
+	if c.TerminationMessagePolicy == "" {
+		c.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	}
+	if c.ImagePullPolicy == "" {
+		c.ImagePullPolicy = defaultPullPolicy(c.Image)
+	}
+	for i := range c.Ports {
+		if c.Ports[i].Protocol == "" {
+			c.Ports[i].Protocol = corev1.ProtocolTCP
+		}
+	}
+	defaultProbe(c.LivenessProbe)
+	defaultProbe(c.ReadinessProbe)
+	defaultProbe(c.StartupProbe)
+	defaultLifecycle(c.Lifecycle)
+}
+
+// defaultProbe fills every apiserver-defaulted probe field; missing any one of
+// them makes a user-declared probe drift on each reconcile.
+func defaultProbe(p *corev1.Probe) {
+	if p == nil {
+		return
+	}
+	if p.TimeoutSeconds == 0 {
+		p.TimeoutSeconds = 1
+	}
+	if p.PeriodSeconds == 0 {
+		p.PeriodSeconds = 10
+	}
+	if p.SuccessThreshold == 0 {
+		p.SuccessThreshold = 1
+	}
+	if p.FailureThreshold == 0 {
+		p.FailureThreshold = 3
+	}
+	if p.HTTPGet != nil && p.HTTPGet.Scheme == "" {
+		p.HTTPGet.Scheme = corev1.URISchemeHTTP
+	}
+}
+
+// defaultLifecycle fills the httpGet scheme on lifecycle handlers — the apiserver
+// defaults scheme on every HTTPGetAction, including preStop/postStart.
+func defaultLifecycle(l *corev1.Lifecycle) {
+	if l == nil {
+		return
+	}
+	for _, h := range []*corev1.LifecycleHandler{l.PostStart, l.PreStop} {
+		if h != nil && h.HTTPGet != nil && h.HTTPGet.Scheme == "" {
+			h.HTTPGet.Scheme = corev1.URISchemeHTTP
+		}
+	}
+}
+
+// defaultPullPolicy mirrors the apiserver: untagged or ":latest" → Always,
+// else IfNotPresent.
+func defaultPullPolicy(image string) corev1.PullPolicy {
+	ref := image
+	if at := strings.LastIndex(ref, "@"); at >= 0 {
+		ref = ref[:at]
+	}
+	tag := ""
+	if slash := strings.LastIndex(ref, "/"); slash >= 0 {
+		if colon := strings.LastIndex(ref[slash+1:], ":"); colon >= 0 {
+			tag = ref[slash+1+colon+1:]
+		}
+	} else if colon := strings.LastIndex(ref, ":"); colon >= 0 {
+		tag = ref[colon+1:]
+	}
+	if tag == "" || tag == "latest" {
+		return corev1.PullAlways
+	}
+	return corev1.PullIfNotPresent
+}
+
 const defaultLogImage = "busybox:latest"
 
 // buildLogSidecars creates sidecar containers that tail Curity log files to stdout.
@@ -675,9 +836,6 @@ func buildLogSidecars(logging *v1alpha1.LoggingSpec) []corev1.Container {
 					ReadOnly:  true,
 				},
 			},
-			// apiserver-default
-			TerminationMessagePath:   corev1.TerminationMessagePathDefault,
-			TerminationMessagePolicy: corev1.TerminationMessageReadFile,
 		}
 		if logging.Resources != nil {
 			sidecar.Resources = *logging.Resources
@@ -869,6 +1027,55 @@ func buildPDB(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentitySe
 			Selector: &metav1.LabelSelector{
 				MatchLabels: buildSelectorLabels(cluster, node),
 			},
+		},
+	}
+}
+
+// buildNetworkPolicy constructs the admin-protecting NetworkPolicy: ingress to
+// the admin pods is allowed only from same-cluster runtime pods (config + ds
+// ports), plus optionally from an API-gateway namespace to the admin-UI port.
+// policyTypes and port protocol are set explicitly (apiserver-defaulted → drift).
+// Caller must verify node is admin-type and cluster.Spec.NetworkPolicy is non-nil.
+func buildNetworkPolicy(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *networkingv1.NetworkPolicy {
+	tcp := corev1.ProtocolTCP
+	ingress := []networkingv1.NetworkPolicyIngressRule{
+		{
+			From: []networkingv1.NetworkPolicyPeer{{
+				PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"curity.io/cluster":           cluster.Name,
+					"app.kubernetes.io/component": string(v1alpha1.NodeTypeRuntime),
+				}},
+			}},
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(portConfig))},
+				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(portDistributedService))},
+			},
+		},
+	}
+
+	if node.Spec.UI != nil && node.Spec.UI.Enabled && cluster.Spec.NetworkPolicy.APIGatewayNamespace != "" {
+		ingress = append(ingress, networkingv1.NetworkPolicyIngressRule{
+			From: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"kubernetes.io/metadata.name": cluster.Spec.NetworkPolicy.APIGatewayNamespace,
+				}},
+			}},
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(portAdminUI))},
+			},
+		})
+	}
+
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      OwnedResourceName(cluster.Name, node.Name),
+			Namespace: node.Namespace,
+			Labels:    buildLabels(cluster, node),
+		},
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{MatchLabels: buildSelectorLabels(cluster, node)},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress},
+			Ingress:     ingress,
 		},
 	}
 }

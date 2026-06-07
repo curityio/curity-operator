@@ -242,7 +242,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Job should not be created when Secret is already populated")
 		})
 
-		It("should delete failed Job and create a new one", func() {
+		It("keeps a failed Job and reports JobFailed without recreating", func() {
 			testCreateCluster(ns, "fail-cluster")
 			testCreateNode(ns, "fail-admin", v1alpha1.NodeTypeAdmin, "fail-cluster")
 
@@ -250,18 +250,9 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			eventuallyGetResource(ns, "fail-cluster-cluster-config-job", job)
 			origUID := job.UID
 
-			// Manually set Job as Failed (envtest has no Job controller)
-			job.Status.Conditions = []batchv1.JobCondition{
-				{
-					Type:    batchv1.JobFailed,
-					Status:  corev1.ConditionTrue,
-					Message: "ImagePullBackOff",
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+			// Drive the Job to Failed (envtest has no Job controller).
+			markJobFailed(job, "ImagePullBackOff")
 
-			// Assert via Event (persists), not condition (operator flips
-			// JobFailed → JobCreated within ms when it recreates the Job).
 			Eventually(func() bool {
 				events := &corev1.EventList{}
 				if err := k8sClient.List(ctx, events, client.InNamespace(ns)); err != nil {
@@ -278,13 +269,49 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				return false
 			}, timeout, interval).Should(BeTrue(), "expected Warning ClusterConfigJobFailed event")
 
-			Eventually(func() bool {
-				newJob := &batchv1.Job{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster-cluster-config-job", Namespace: ns}, newJob); err != nil {
+			// ClusterConfigReady settles on JobFailed (no flip to JobCreated).
+			Eventually(func() string {
+				c := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster", Namespace: ns}, c); err != nil {
+					return ""
+				}
+				return conditionReason(c.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+			}, timeout, interval).Should(Equal("JobFailed"))
+
+			// chooseJobFailedMessage is wired: the condition carries the failure
+			// message (the generic fallback here — envtest has no pod to read a cause).
+			c := &v1alpha1.IdentityServerCluster{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster", Namespace: ns}, c)).To(Succeed())
+			cond := apimeta.FindStatusCondition(c.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Message).To(HavePrefix("genclust Job failed:"))
+
+			// Storm-suppression: the Warning fires exactly once and is not re-emitted
+			// across repeated reconciles (the changed-gate holds).
+			Consistently(func() int32 {
+				evs := &corev1.EventList{}
+				if err := k8sClient.List(ctx, evs, client.InNamespace(ns)); err != nil {
+					return -1
+				}
+				var total int32
+				for i := range evs.Items {
+					e := &evs.Items[i]
+					if e.InvolvedObject.Name == "fail-cluster" && e.Reason == "ClusterConfigJobFailed" {
+						total += e.Count
+					}
+				}
+				return total
+			}, 3*time.Second, interval).Should(Equal(int32(1)), "ClusterConfigJobFailed must fire exactly once")
+
+			// The failed Job is NOT deleted/recreated — same UID (regression guard:
+			// the old behavior deleted + recreated it, causing a JobRunning⇄JobFailed storm).
+			Consistently(func() bool {
+				cur := &batchv1.Job{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster-cluster-config-job", Namespace: ns}, cur); err != nil {
 					return false
 				}
-				return newJob.UID != origUID
-			}, timeout, interval).Should(BeTrue())
+				return cur.UID == origUID
+			}, 3*time.Second, interval).Should(BeTrue(), "failed Job must persist (no recreate storm)")
 		})
 
 		It("should not create duplicate Job on concurrent reconcile", func() {

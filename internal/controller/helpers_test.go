@@ -8,6 +8,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -308,4 +309,19 @@ func countCfgVolumes(deploy *appsv1.Deployment) int {
 		}
 	}
 	return count
+}
+
+// markJobFailed drives a Job to Failed via the status subresource (envtest has no
+// Job controller), setting the StartTime + FailureTarget fields newer apiservers
+// require alongside Failed so specs survive an ENVTEST_K8S_VERSION bump past ~1.33.
+func markJobFailed(job *batchv1.Job, message string) {
+	now := metav1.Now()
+	if job.Status.StartTime == nil {
+		job.Status.StartTime = &now
+	}
+	job.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: "PodFailurePolicy", Message: message, LastTransitionTime: now},
+		{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "PodFailurePolicy", Message: message, LastTransitionTime: now},
+	}
+	Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
 }

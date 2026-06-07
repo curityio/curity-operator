@@ -113,12 +113,18 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// 3. Ensure admin credentials secret (default when not specified)
-	if cluster.Spec.AdminCredentials == nil {
+	// 3. Ensure admin credentials secret. Capture provenance before mutating
+	// the spec: a user-provided name pointing at a missing Secret must not be
+	// silently fabricated (see ensureAdminCredentialsSecret).
+	defaulted := cluster.Spec.AdminCredentials == nil
+	if defaulted {
 		cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
 		log.Info("defaulting adminCredentials", "secretName", cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name)
 	}
-	if err := r.ensureAdminCredentialsSecret(ctx, &cluster); err != nil {
+	if err := r.ensureAdminCredentialsSecret(ctx, &cluster, defaulted); err != nil {
+		if res, handled, helperErr := r.handleAdminCredsSecretMissing(ctx, &cluster, err); handled {
+			return res, helperErr
+		}
 		if res, handled, helperErr := r.handlePermanentWriteError(ctx, &cluster, err); handled {
 			return res, helperErr
 		}
@@ -236,9 +242,12 @@ func (r *IdentityServerClusterReconciler) listChildNodes(ctx context.Context, cl
 	return children, nil
 }
 
-// ensureAdminCredentialsSecret creates the admin credentials secret with random
-// values if it does not already exist. Never overwrites existing secrets.
-func (r *IdentityServerClusterReconciler) ensureAdminCredentialsSecret(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) error {
+// ensureAdminCredentialsSecret creates the admin credentials Secret with random
+// values when the name was defaulted (user omitted adminCredentials). A
+// user-provided name whose Secret is missing returns errAdminCredsSecretMissing
+// so the operator waits for an external system to create it rather than
+// fabricating credentials. Never overwrites an existing Secret.
+func (r *IdentityServerClusterReconciler) ensureAdminCredentialsSecret(ctx context.Context, cluster *v1alpha1.IdentityServerCluster, defaulted bool) error {
 	log := ctrl.LoggerFrom(ctx)
 	secretName := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
 
@@ -250,6 +259,14 @@ func (r *IdentityServerClusterReconciler) ensureAdminCredentialsSecret(ctx conte
 	}
 	if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("failed to check admin credentials secret: %w", err)
+	}
+
+	// A valid user-provided name is an explicit reference to a Secret another
+	// controller is expected to create — wait instead of fabricating. An
+	// invalid name can never exist, so fall through to Create and let the
+	// apiserver reject it (handlePermanentWriteError surfaces InvalidSpec).
+	if !defaulted && isValidSecretName(secretName) {
+		return errAdminCredsSecretMissing
 	}
 
 	// Generate random values

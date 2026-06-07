@@ -60,6 +60,12 @@ const (
 	// (apierrors.IsInvalid). Only a CR spec edit can resolve this; the
 	// reconciler does not requeue.
 	ReasonInvalidSpec = "InvalidSpec"
+
+	// ReasonAdminCredsSecretMissing is set on ConditionDegraded (True) and
+	// ConditionReady (False) when a user-provided adminCredentials Secret name
+	// references a Secret that does not exist. The operator waits for it rather
+	// than fabricating one; the Secret-watch resumes reconciliation on create.
+	ReasonAdminCredsSecretMissing = "AdminCredsSecretMissing"
 )
 
 // Reason values for ConditionPackagesReady (set by the pre-check leg or the

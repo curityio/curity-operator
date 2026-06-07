@@ -125,21 +125,20 @@ var _ = Describe("IdentityServerCluster invalid-spec classifier", func() {
 			g.Expect(k8sClient.Update(ctx, &fresh)).To(Succeed())
 		}, timeout, interval).Should(Succeed())
 
-		// Degraded transitions OFF InvalidSpec (computeClusterConditions rebuilds it from child state).
-		// Ready likewise transitions off InvalidSpec — auto-recovery confirms U-3:
-		// computeClusterConditions unconditionally writes Ready in conditions.go,
-		// overwriting the helper's stale Ready=False/InvalidSpec.
+		// The new name is valid but missing, so the operator now waits: Degraded
+		// and Ready both move from InvalidSpec to AdminCredsSecretMissing. The
+		// handler sets both, so neither stays stale at InvalidSpec.
 		Eventually(func(g Gomega) {
 			var fresh v1alpha1.IdentityServerCluster
 			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "recover-cluster", Namespace: ns}, &fresh)).To(Succeed())
 			deg := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionDegraded)
 			g.Expect(deg).NotTo(BeNil())
-			g.Expect(deg.Reason).NotTo(Equal(v1alpha1.ReasonInvalidSpec),
-				"Degraded should have transitioned off InvalidSpec after the fix; got reason=%q", deg.Reason)
+			g.Expect(deg.Reason).To(Equal(v1alpha1.ReasonAdminCredsSecretMissing),
+				"Degraded should move off InvalidSpec to AdminCredsSecretMissing (valid but missing name); got reason=%q", deg.Reason)
 			ready := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionReady)
 			g.Expect(ready).NotTo(BeNil())
-			g.Expect(ready.Reason).NotTo(Equal(v1alpha1.ReasonInvalidSpec),
-				"Ready should have transitioned off InvalidSpec after the fix; got reason=%q", ready.Reason)
+			g.Expect(ready.Reason).To(Equal(v1alpha1.ReasonAdminCredsSecretMissing),
+				"Ready should move off InvalidSpec to AdminCredsSecretMissing; got reason=%q", ready.Reason)
 		}, timeout, interval).Should(Succeed())
 	})
 })

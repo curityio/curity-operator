@@ -16,16 +16,12 @@ import (
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
 
-// errAdminCredsSecretMissing is the sentinel returned by
-// ensureAdminCredentialsSecret when a user-provided adminCredentials Secret
-// name references a Secret that does not exist. handleAdminCredsSecretMissing
-// matches it with errors.Is and surfaces AdminCredsSecretMissing.
+// errAdminCredsSecretMissing signals a user-provided adminCredentials Secret
+// that does not exist, so the operator waits rather than fabricating one.
 var errAdminCredsSecretMissing = errors.New("admin credentials Secret does not exist")
 
-// isValidSecretName reports whether name is a structurally valid Secret name
-// (DNS-1123 subdomain). An invalid name can never be created by any controller,
-// so the operator must not wait on it — it falls through to Create and surfaces
-// as InvalidSpec instead.
+// isValidSecretName reports whether name is a valid DNS-1123 subdomain. An
+// invalid name can never exist, so the wait path must not block on it.
 func isValidSecretName(name string) bool {
 	return len(validation.IsDNS1123Subdomain(name)) == 0
 }
@@ -209,12 +205,10 @@ func (r *IdentityServerClusterReconciler) handleAdmissionForbidden(
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, true, nil
 }
 
-// handleAdminCredsSecretMissing surfaces a user-provided adminCredentials
-// Secret that does not exist. Sets Degraded=True/AdminCredsSecretMissing and
-// Ready=False/AdminCredsSecretMissing (end-to-end Ready: the named credentials
-// aren't available, so the cluster isn't being honored) and emits one Warning,
-// changed-bool gated. No RequeueAfter — the Secret-watch resumes the reconcile
-// when the named Secret is created.
+// handleAdminCredsSecretMissing surfaces a missing user-provided adminCredentials
+// Secret as Degraded=True and Ready=False/AdminCredsSecretMissing plus one
+// Warning, changed-bool gated. No RequeueAfter — the Secret-watch resumes the
+// reconcile when the Secret is created.
 func (r *IdentityServerClusterReconciler) handleAdminCredsSecretMissing(
 	ctx context.Context,
 	cluster *v1alpha1.IdentityServerCluster,

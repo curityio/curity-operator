@@ -113,9 +113,8 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// 3. Ensure admin credentials secret. Capture provenance before mutating
-	// the spec: a user-provided name pointing at a missing Secret must not be
-	// silently fabricated (see ensureAdminCredentialsSecret).
+	// 3. Ensure admin credentials secret. Capture whether the name was
+	// defaulted before the spec is mutated below.
 	defaulted := cluster.Spec.AdminCredentials == nil
 	if defaulted {
 		cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
@@ -242,11 +241,10 @@ func (r *IdentityServerClusterReconciler) listChildNodes(ctx context.Context, cl
 	return children, nil
 }
 
-// ensureAdminCredentialsSecret creates the admin credentials Secret with random
-// values when the name was defaulted (user omitted adminCredentials). A
-// user-provided name whose Secret is missing returns errAdminCredsSecretMissing
-// so the operator waits for an external system to create it rather than
-// fabricating credentials. Never overwrites an existing Secret.
+// ensureAdminCredentialsSecret creates the Secret with random values when the
+// name was defaulted. A missing user-provided name returns
+// errAdminCredsSecretMissing so the operator waits rather than fabricating one.
+// Never overwrites an existing Secret.
 func (r *IdentityServerClusterReconciler) ensureAdminCredentialsSecret(ctx context.Context, cluster *v1alpha1.IdentityServerCluster, defaulted bool) error {
 	log := ctrl.LoggerFrom(ctx)
 	secretName := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
@@ -261,10 +259,9 @@ func (r *IdentityServerClusterReconciler) ensureAdminCredentialsSecret(ctx conte
 		return fmt.Errorf("failed to check admin credentials secret: %w", err)
 	}
 
-	// A valid user-provided name is an explicit reference to a Secret another
-	// controller is expected to create — wait instead of fabricating. An
-	// invalid name can never exist, so fall through to Create and let the
-	// apiserver reject it (handlePermanentWriteError surfaces InvalidSpec).
+	// A valid user-provided name is an explicit reference another controller
+	// will create — wait, don't fabricate. An invalid name can never exist, so
+	// fall through to Create and surface the apiserver's rejection as InvalidSpec.
 	if !defaulted && isValidSecretName(secretName) {
 		return errAdminCredsSecretMissing
 	}

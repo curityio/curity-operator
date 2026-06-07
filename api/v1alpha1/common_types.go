@@ -61,10 +61,8 @@ const (
 	// reconciler does not requeue.
 	ReasonInvalidSpec = "InvalidSpec"
 
-	// ReasonAdminCredsSecretMissing is set on ConditionDegraded (True) and
-	// ConditionReady (False) when a user-provided adminCredentials Secret name
-	// references a Secret that does not exist. The operator waits for it rather
-	// than fabricating one; the Secret-watch resumes reconciliation on create.
+	// ReasonAdminCredsSecretMissing is set on Degraded=True and Ready=False when a
+	// user-provided adminCredentials Secret name points at a Secret that does not exist.
 	ReasonAdminCredsSecretMissing = "AdminCredsSecretMissing"
 )
 

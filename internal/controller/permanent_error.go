@@ -10,10 +10,21 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
+
+// errAdminCredsSecretMissing signals a user-provided adminCredentials Secret
+// that does not exist, so the operator waits rather than fabricating one.
+var errAdminCredsSecretMissing = errors.New("admin credentials Secret does not exist")
+
+// isValidSecretName reports whether name is a valid DNS-1123 subdomain. An
+// invalid name can never exist, so the wait path must not block on it.
+func isValidSecretName(name string) bool {
+	return len(validation.IsDNS1123Subdomain(name)) == 0
+}
 
 // extractInvalid returns the apiserver's Kind and Message from an IsInvalid
 // write error, or (_, _, false) for anything else — including IsInvalid
@@ -192,4 +203,52 @@ func (r *IdentityServerClusterReconciler) handleAdmissionForbidden(
 		"genclust pod admission denied: %s", apiMsg)
 
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, true, nil
+}
+
+// handleAdminCredsSecretMissing surfaces a missing user-provided adminCredentials
+// Secret as Degraded=True and Ready=False/AdminCredsSecretMissing plus one
+// Warning, changed-bool gated. No RequeueAfter — the Secret-watch resumes the
+// reconcile when the Secret is created.
+func (r *IdentityServerClusterReconciler) handleAdminCredsSecretMissing(
+	ctx context.Context,
+	cluster *v1alpha1.IdentityServerCluster,
+	writeErr error,
+) (ctrl.Result, bool, error) {
+	if !errors.Is(writeErr, errAdminCredsSecretMissing) {
+		return ctrl.Result{}, false, nil
+	}
+
+	name := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
+
+	degChanged := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionDegraded,
+		Status:             metav1.ConditionTrue,
+		Reason:             v1alpha1.ReasonAdminCredsSecretMissing,
+		Message:            fmt.Sprintf("adminCredentials Secret %q does not exist; waiting for it to be created", name),
+		ObservedGeneration: cluster.Generation,
+	})
+	readyChanged := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             v1alpha1.ReasonAdminCredsSecretMissing,
+		Message:            "admin credentials Secret is missing; see Degraded condition",
+		ObservedGeneration: cluster.Generation,
+	})
+	if !degChanged && !readyChanged {
+		return ctrl.Result{}, true, nil
+	}
+
+	cluster.Status.ObservedGeneration = cluster.Generation
+
+	if err := r.Status().Update(ctx, cluster); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, true, nil
+		}
+		return ctrl.Result{}, true, fmt.Errorf("updating status for missing admin-creds Secret: %w", err)
+	}
+
+	r.Recorder.Eventf(cluster, corev1.EventTypeWarning, v1alpha1.ReasonAdminCredsSecretMissing,
+		"adminCredentials Secret %q does not exist; waiting for it to be created", name)
+
+	return ctrl.Result{}, true, nil
 }

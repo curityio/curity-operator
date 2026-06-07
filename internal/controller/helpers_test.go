@@ -59,6 +59,37 @@ func testCreateNode(ns, name string, nodeType v1alpha1.NodeType, clusterName str
 	Expect(k8sClient.Create(ctx, node)).To(Succeed())
 }
 
+// userAdminCreds builds a CredentialsSource referencing a user-provided Secret
+// name with the conventional key→path items (mirrors defaultAdminCredentials).
+func userAdminCreds(name string) *v1alpha1.CredentialsSource {
+	return &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: name,
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+}
+
+// createOpaqueCredsSecret pre-creates an admin-credentials Secret with the
+// expected keys — for tests that exercise paths past the "Secret exists" gate
+// (e.g. encryption-key rotation) now that the operator no longer auto-creates a
+// user-provided Secret.
+func createOpaqueCredsSecret(ns, name string) {
+	Expect(k8sClient.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"ADMIN_PASSWORD":        []byte("test-password"),
+			"CONFIG_ENCRYPTION_KEY": []byte("test-encryption-key"),
+		},
+	})).To(Succeed())
+}
+
 func hasCondition(conditions []metav1.Condition, condType string, status metav1.ConditionStatus) bool {
 	for _, c := range conditions {
 		if c.Type == condType && c.Status == status {

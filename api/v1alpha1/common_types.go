@@ -60,6 +60,10 @@ const (
 	// (apierrors.IsInvalid). Only a CR spec edit can resolve this; the
 	// reconciler does not requeue.
 	ReasonInvalidSpec = "InvalidSpec"
+
+	// ReasonAdminCredsSecretMissing is set on Degraded=True and Ready=False when a
+	// user-provided adminCredentials Secret name points at a Secret that does not exist.
+	ReasonAdminCredsSecretMissing = "AdminCredsSecretMissing"
 )
 
 // Reason values for ConditionPackagesReady (set by the pre-check leg or the

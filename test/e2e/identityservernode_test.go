@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -920,32 +921,44 @@ var _ = Describe("IdentityServerNode", func() {
 	// =================================================================
 	Context("credentials", func() {
 
-		Describe("Admin credentials auto-generation", Ordered, func() {
+		Describe("User-provided Secret missing", Ordered, func() {
 			const ns = "e2e-creds"
 			BeforeAll(func() { createNS(ns) })
 			AfterAll(func() { deleteNS(ns) })
 
-			It("should create secret with random values when it does not exist", func() {
+			It("waits without fabricating, then recovers when the Secret is created", func() {
 				ctx := context.Background()
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-with-creds.yaml", ns,
 					map[string]interface{}{"name": "creds-cluster", "namespace": ns, "secretName": "auto-gen-secret"})
 
-				secret := &corev1.Secret{}
-				Eventually(func() error {
-					return k().Get(ctx, client.ObjectKey{Name: "auto-gen-secret", Namespace: ns}, secret)
-				}, e2eTimeout, e2eInterval).Should(Succeed())
-
-				Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
-				Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
-				Expect(secret.Data).NotTo(HaveKey("KEYSTORE_PASSWORD"))
-				Expect(secret.Data).To(HaveLen(2))
-				Expect(len(secret.Data["ADMIN_PASSWORD"])).To(BeNumerically(">", 0))
-				Expect(secret.OwnerReferences).To(BeEmpty())
-				Expect(secret.Labels["app.kubernetes.io/managed-by"]).To(Equal("curity-operator"))
-
 				cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "creds-cluster", Namespace: ns}}
-				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
-				utils.MatchCRDResource(cluster, "creds-cluster")
+				By("surfacing Degraded=AdminCredsSecretMissing without fabricating the Secret")
+				Eventually(func(g Gomega) {
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: "creds-cluster", Namespace: ns}, cluster)).To(Succeed())
+					deg := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionDegraded)
+					g.Expect(deg).NotTo(BeNil())
+					g.Expect(deg.Status).To(Equal(metav1.ConditionTrue))
+					g.Expect(deg.Reason).To(Equal(v1alpha1.ReasonAdminCredsSecretMissing))
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+				Consistently(func() bool {
+					return apierrors.IsNotFound(k().Get(ctx, client.ObjectKey{Name: "auto-gen-secret", Namespace: ns}, &corev1.Secret{}))
+				}, 5*time.Second, e2eInterval).Should(BeTrue(), "operator must not auto-create a user-provided Secret")
+
+				By("recovering once the Secret is created externally")
+				Expect(k().Create(ctx, &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "auto-gen-secret", Namespace: ns},
+					Type:       corev1.SecretTypeOpaque,
+					Data: map[string][]byte{
+						"ADMIN_PASSWORD":        []byte("e2e-pass"),
+						"CONFIG_ENCRYPTION_KEY": []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+					},
+				})).To(Succeed())
+				Eventually(func(g Gomega) {
+					g.Expect(k().Get(ctx, client.ObjectKey{Name: "creds-cluster", Namespace: ns}, cluster)).To(Succeed())
+					deg := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionDegraded)
+					g.Expect(deg).NotTo(BeNil())
+					g.Expect(deg.Reason).NotTo(Equal(v1alpha1.ReasonAdminCredsSecretMissing))
+				}, e2eTimeout, e2eInterval).Should(Succeed())
 			})
 		})
 
@@ -990,6 +1003,16 @@ var _ = Describe("IdentityServerNode", func() {
 
 			It("should keep secret after cluster is deleted", func() {
 				ctx := context.Background()
+				// User-provided creds Secret must pre-exist (the operator no longer
+				// fabricates one); verify the unowned Secret survives cluster deletion.
+				Expect(k().Create(ctx, &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "surv-secret", Namespace: ns},
+					Type:       corev1.SecretTypeOpaque,
+					Data: map[string][]byte{
+						"ADMIN_PASSWORD":        []byte("e2e-pass"),
+						"CONFIG_ENCRYPTION_KEY": []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+					},
+				})).To(Succeed())
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-with-creds.yaml", ns,
 					map[string]interface{}{"name": "surv-cluster", "namespace": ns, "secretName": "surv-secret"})
 
@@ -1009,6 +1032,7 @@ var _ = Describe("IdentityServerNode", func() {
 					return false
 				}, e2eTimeout, e2eInterval).Should(BeTrue())
 
+				utils.WaitForConditions(cluster, e2eTimeout, e2eInterval)
 				utils.MatchCRDResource(cluster, "surv-cluster before-delete")
 
 				Expect(k().Delete(ctx, cluster)).To(Succeed())

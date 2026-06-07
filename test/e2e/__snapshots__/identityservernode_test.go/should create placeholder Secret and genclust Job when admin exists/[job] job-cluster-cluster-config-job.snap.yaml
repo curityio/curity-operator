@@ -17,6 +17,18 @@ metadata:
 spec:
   parallelism: 1
   completions: 1
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+            status: "True"
+      - action: FailJob
+        onExitCodes:
+          containerName: genclust
+          operator: In
+          values:
+            - 1
   backoffLimit: 3
   selector: <Any value>
   manualSelector: false
@@ -42,7 +54,7 @@ spec:
                   key: CONFIG_ENCRYPTION_KEY
                   optional: true
           terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
+          terminationMessagePolicy: FallbackToLogsOnError
           imagePullPolicy: IfNotPresent
       restartPolicy: Never
       terminationGracePeriodSeconds: 30
@@ -55,6 +67,6 @@ spec:
       schedulerName: default-scheduler
   completionMode: NonIndexed
   suspend: false
-  podReplacementPolicy: TerminatingOrFailed
+  podReplacementPolicy: Failed
 
 ---

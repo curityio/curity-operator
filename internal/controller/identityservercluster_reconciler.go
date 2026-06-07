@@ -418,23 +418,24 @@ func isClusterConfigReady(secret *corev1.Secret) bool {
 	return ok && len(data) > 0 && string(data) != clusterConfigPlaceholder
 }
 
-// computeEncryptionKeyHash returns the SHA256 hex hash of the CONFIG_ENCRYPTION_KEY
-// from the admin credentials Secret. Returns "" if not configured.
-func (r *IdentityServerClusterReconciler) computeEncryptionKeyHash(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) string {
+// computeEncryptionKeyHash returns the SHA256 hex of CONFIG_ENCRYPTION_KEY, or
+// ("", nil) when there's no key. A read error returns ("", err) so callers requeue
+// rather than create an un-annotated Job that strands key-drift recovery.
+func (r *IdentityServerClusterReconciler) computeEncryptionKeyHash(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) (string, error) {
 	if cluster.Spec.AdminCredentials == nil {
-		return ""
+		return "", nil
 	}
 	secretName := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
 	var credSecret corev1.Secret
 	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: cluster.Namespace}, &credSecret); err != nil {
-		return ""
+		return "", err
 	}
 	key, ok := credSecret.Data["CONFIG_ENCRYPTION_KEY"]
 	if !ok || len(key) == 0 {
-		return ""
+		return "", nil
 	}
 	h := sha256.Sum256(key)
-	return hex.EncodeToString(h[:])
+	return hex.EncodeToString(h[:]), nil
 }
 
 // computeClusterConfigHash hashes the spec inputs that should trigger a
@@ -557,6 +558,26 @@ func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeNam
 		},
 		Spec: batchv1.JobSpec{
 			BackoffLimit: &backoff,
+			// Let infra disruptions retry without counting; fail fast on a genclust
+			// logic error. Silently dropped on clusters that predate podFailurePolicy.
+			PodFailurePolicy: &batchv1.PodFailurePolicy{
+				Rules: []batchv1.PodFailurePolicyRule{
+					{
+						Action: batchv1.PodFailurePolicyActionIgnore,
+						OnPodConditions: []batchv1.PodFailurePolicyOnPodConditionsPattern{
+							{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue},
+						},
+					},
+					{
+						Action: batchv1.PodFailurePolicyActionFailJob,
+						OnExitCodes: &batchv1.PodFailurePolicyOnExitCodesRequirement{
+							ContainerName: ptr.To("genclust"),
+							Operator:      batchv1.PodFailurePolicyOnExitCodesOpIn,
+							Values:        []int32{1},
+						},
+					},
+				},
+			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
@@ -576,6 +597,9 @@ func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeNam
 						{
 							Name:  "genclust",
 							Image: buildImage(cluster),
+							// Surface genclust's log tail in terminated.message so the
+							// failure cause is readable from status without streaming logs.
+							TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 							Command: []string{
 								"/bin/sh", "-c",
 								"/opt/idsvr/bin/genclust -c $CONFIG_SERVICE_HOST -p $CONFIG_SERVICE_PORT",
@@ -677,7 +701,10 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: cluster.Namespace}, &configSecret); err == nil {
 		secretExists = true
 		if isClusterConfigReady(&configSecret) {
-			currentKeyHash := r.computeEncryptionKeyHash(ctx, cluster)
+			currentKeyHash, hashErr := r.computeEncryptionKeyHash(ctx, cluster)
+			if hashErr != nil {
+				return fmt.Errorf("reading encryption key for rotation check: %w", hashErr)
+			}
 			currentConfigHash := computeClusterConfigHash(cluster, adminNodeName)
 			storedConfigHash := configSecret.Annotations["curity.io/cluster-config-hash"]
 			storedAdmin := configSecret.Annotations["curity.io/admin-node"]
@@ -808,7 +835,10 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 
 	// 3. Ensure placeholder Secret exists
 	if !secretExists {
-		keyHash := r.computeEncryptionKeyHash(ctx, cluster)
+		keyHash, hashErr := r.computeEncryptionKeyHash(ctx, cluster)
+		if hashErr != nil {
+			return fmt.Errorf("reading encryption key for placeholder Secret: %w", hashErr)
+		}
 		placeholder := buildClusterConfigSecret(cluster, nil, adminNodeName, keyHash, computeClusterConfigHash(cluster, adminNodeName))
 		if err := r.Create(ctx, placeholder); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
@@ -830,9 +860,19 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 		// (e.g. wrong admin host baked into <host>).
 		jobConfigHash := job.Annotations["curity.io/cluster-config-hash"]
 		currentConfigHash := computeClusterConfigHash(cluster, adminNodeName)
-		if jobConfigHash != "" && jobConfigHash != currentConfigHash {
+		jobKeyHash := job.Annotations["curity.io/encryption-key-hash"]
+		currentKeyHash, hashErr := r.computeEncryptionKeyHash(ctx, cluster)
+		if hashErr != nil {
+			return fmt.Errorf("reading encryption key for drift check: %w", hashErr)
+		}
+		// Empty-guard both hashes so a pre-annotation Job (operator upgrade) isn't
+		// spuriously recreated. The key-hash arm recovers a failed cluster after a fix.
+		configDrift := jobConfigHash != "" && jobConfigHash != currentConfigHash
+		keyDrift := jobKeyHash != "" && jobKeyHash != currentKeyHash
+		if configDrift || keyDrift {
 			log.Info("input drift detected on in-flight Job, deleting to recreate with current spec",
-				"jobHash", jobConfigHash, "currentHash", currentConfigHash)
+				"jobConfigHash", jobConfigHash, "currentConfigHash", currentConfigHash,
+				"jobKeyHash", jobKeyHash, "currentKeyHash", currentKeyHash)
 			if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
 				return fmt.Errorf("failed to delete drifted Job: %w", err)
 			}
@@ -882,7 +922,10 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 				}
 
 				// Update Secret with real data
-				keyHash := r.computeEncryptionKeyHash(ctx, cluster)
+				keyHash, hashErr := r.computeEncryptionKeyHash(ctx, cluster)
+				if hashErr != nil {
+					return fmt.Errorf("reading encryption key for Secret update: %w", hashErr)
+				}
 				updatedSecret := buildClusterConfigSecret(cluster, clusterXML, adminNodeName, keyHash, computeClusterConfigHash(cluster, adminNodeName))
 				var existing corev1.Secret
 				if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: cluster.Namespace}, &existing); err != nil {
@@ -917,16 +960,29 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 			}
 
 			if cond.Type == batchv1.JobFailed && cond.Status == corev1.ConditionTrue {
-				// Job failed — delete and retry on next reconcile
-				log.Info("cluster config Job failed", "message", cond.Message)
-				if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
-					return fmt.Errorf("failed to delete failed Job: %w", err)
+				// Terminal: surface the cause and STOP (no delete+recreate — that
+				// oscillated). Recovery is the drift check above when the user fixes
+				// spec or the key.
+				podCause := ""
+				if pods, perr := r.listClusterConfigPods(ctx, cluster.Name, cluster.Namespace); perr != nil {
+					log.Error(perr, "listing cluster-config pods for failure cause; using fallback message")
+				} else if podCause = extractGenclustFailureMessage(pods); podCause == "" {
+					log.Info("no genclust failure cause in pod status; using fallback message")
 				}
-				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
-					metav1.ConditionFalse, "JobFailed",
-					fmt.Sprintf("genclust Job failed: %s", cond.Message), cluster.Generation)
-				r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ClusterConfigJobFailed",
-					"genclust Job failed: %s", cond.Message)
+				// Don't regress the captured cause if the pod is later GC'd.
+				existing := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+				msg := chooseJobFailedMessage(podCause, existing, cond.Message)
+				changed := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
+					Type:               v1alpha1.ConditionClusterConfigReady,
+					Status:             metav1.ConditionFalse,
+					Reason:             "JobFailed",
+					Message:            msg,
+					ObservedGeneration: cluster.Generation,
+				})
+				if changed {
+					log.Info("cluster config Job failed", "message", msg)
+					r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ClusterConfigJobFailed", "%s", msg)
+				}
 				return nil
 			}
 		}
@@ -973,6 +1029,15 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 	// deletion so a recreated cluster can re-use the existing keystore.
 	{
 		newJob := buildClusterConfigJob(cluster, adminNodeName, computeClusterConfigHash(cluster, adminNodeName))
+		// Stamp the key hash so the drift check recreates the Job once the user
+		// fixes CONFIG_ENCRYPTION_KEY.
+		keyHash, hashErr := r.computeEncryptionKeyHash(ctx, cluster)
+		if hashErr != nil {
+			return fmt.Errorf("reading encryption key before creating genclust Job: %w", hashErr)
+		}
+		if keyHash != "" {
+			newJob.Annotations["curity.io/encryption-key-hash"] = keyHash
+		}
 		if err := controllerutil.SetControllerReference(cluster, newJob, r.Scheme); err != nil {
 			return fmt.Errorf("failed to set owner ref on genclust Job: %w", err)
 		}
@@ -1369,6 +1434,106 @@ func mostRecentClusterConfigPod(pods []corev1.Pod) *corev1.Pod {
 		}
 	}
 	return winner
+}
+
+// extractGenclustFailureMessage returns a concise failure cause from the most
+// recent cluster-config Pod's failed genclust container, or "" if none is found.
+func extractGenclustFailureMessage(pods []corev1.Pod) string {
+	pod := mostRecentClusterConfigPod(pods)
+	if pod == nil {
+		return ""
+	}
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if cs.Name != "genclust" || cs.State.Terminated == nil || cs.State.Terminated.ExitCode == 0 {
+			continue
+		}
+		if m := summarizeTerminationMessage(cs.State.Terminated.Message); m != "" {
+			return m
+		}
+		return cs.State.Terminated.Reason // e.g. "Error", "OOMKilled"
+	}
+	return ""
+}
+
+// summarizeTerminationMessage reduces a log tail (often a Java stack trace) to a
+// single bounded line. Java prints the root cause in the LAST "Caused by:" line,
+// so that wins; then the first Exception/Error line; then the first non-frame line.
+func summarizeTerminationMessage(raw string) string {
+	const maxLen = 256
+	var causedBy, exception, firstNonFrame string
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "at ") || strings.HasPrefix(line, "...") {
+			continue // stack frame
+		}
+		switch {
+		case strings.HasPrefix(line, "Caused by:"):
+			causedBy = line // keep the last (deepest) one
+		case exception == "" && (strings.Contains(line, "Exception") || strings.Contains(line, "Error")):
+			exception = line
+		case firstNonFrame == "":
+			firstNonFrame = line
+		}
+	}
+	switch {
+	case causedBy != "":
+		return truncateMessage(humanizeJavaMessage(causedBy), maxLen)
+	case exception != "":
+		return truncateMessage(humanizeJavaMessage(exception), maxLen)
+	case firstNonFrame != "":
+		return truncateMessage(firstNonFrame, maxLen)
+	default:
+		return truncateMessage(strings.TrimSpace(raw), maxLen)
+	}
+}
+
+// humanizeJavaMessage drops a leading "Caused by:" and fully-qualified throwable
+// class so status shows the actionable cause, not Java/Guava internals.
+func humanizeJavaMessage(line string) string {
+	line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "Caused by:"))
+	if i := strings.Index(line, ": "); i > 0 && isJavaThrowableName(line[:i]) {
+		if msg := strings.TrimSpace(line[i+2:]); msg != "" {
+			return msg
+		}
+	}
+	if isJavaThrowableName(line) {
+		if j := strings.LastIndexAny(line, ".$"); j >= 0 {
+			return line[j+1:]
+		}
+	}
+	return line
+}
+
+// isJavaThrowableName reports whether s is a fully-qualified Java throwable
+// (dotted, no spaces, *Exception/*Error) — the only prefix we strip.
+func isJavaThrowableName(s string) bool {
+	if s == "" || strings.ContainsAny(s, " \t") || !strings.Contains(s, ".") {
+		return false
+	}
+	return strings.Contains(s, "Exception") || strings.Contains(s, "Error")
+}
+
+func truncateMessage(s string, max int) string {
+	if r := []rune(s); len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return s
+}
+
+// chooseJobFailedMessage picks a non-regressing JobFailed message. The genclust
+// cause lives only in the failed pod's terminated.message, which PodGC may remove,
+// so once captured it must not regress to the generic form (which re-fires the
+// Warning). Order: fresh pod cause; else the captured JobFailed message; else generic.
+func chooseJobFailedMessage(podCause string, existing *metav1.Condition, jobCondMessage string) string {
+	if podCause != "" {
+		return "genclust failed: " + podCause
+	}
+	if existing != nil && existing.Status == metav1.ConditionFalse &&
+		existing.Reason == "JobFailed" && existing.Message != "" {
+		return existing.Message
+	}
+	return "genclust Job failed: " + jobCondMessage
 }
 
 // classifyClusterConfigPodScheduling returns JobPodSchedulingFailed when the

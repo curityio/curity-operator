@@ -7,8 +7,10 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1419,6 +1421,150 @@ func TestBuildClusterConfigJob_BasicSpec(t *testing.T) {
 	// Restart policy
 	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("expected RestartPolicyNever")
+	}
+}
+
+func TestBuildClusterConfigJob_PodFailurePolicyAndTerminationMessage(t *testing.T) {
+	job := buildClusterConfigJob(newTestCluster(), "admin-1", "")
+
+	if got := job.Spec.Template.Spec.Containers[0].TerminationMessagePolicy; got != corev1.TerminationMessageFallbackToLogsOnError {
+		t.Errorf("expected terminationMessagePolicy FallbackToLogsOnError, got %q", got)
+	}
+
+	pfp := job.Spec.PodFailurePolicy
+	if pfp == nil || len(pfp.Rules) != 2 {
+		t.Fatalf("expected 2 podFailurePolicy rules, got %+v", pfp)
+	}
+	// Rule 0: Ignore infra disruptions (DisruptionTarget).
+	if pfp.Rules[0].Action != batchv1.PodFailurePolicyActionIgnore ||
+		len(pfp.Rules[0].OnPodConditions) != 1 ||
+		pfp.Rules[0].OnPodConditions[0].Type != corev1.DisruptionTarget {
+		t.Errorf("rule 0: expected Ignore on DisruptionTarget, got %+v", pfp.Rules[0])
+	}
+	// Rule 1: FailJob on genclust exit code 1.
+	r1 := pfp.Rules[1]
+	if r1.Action != batchv1.PodFailurePolicyActionFailJob || r1.OnExitCodes == nil ||
+		r1.OnExitCodes.ContainerName == nil || *r1.OnExitCodes.ContainerName != "genclust" ||
+		r1.OnExitCodes.Operator != batchv1.PodFailurePolicyOnExitCodesOpIn ||
+		len(r1.OnExitCodes.Values) != 1 || r1.OnExitCodes.Values[0] != 1 {
+		t.Errorf("rule 1: expected FailJob on genclust exit 1, got %+v", r1)
+	}
+}
+
+func TestExtractGenclustFailureMessage(t *testing.T) {
+	pod := func(csName string, exit int32, msg, reason string) corev1.Pod {
+		return corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "p"},
+			Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  csName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: exit, Message: msg, Reason: reason}},
+			}}},
+		}
+	}
+	podAt := func(name string, ts int64, msg string) corev1.Pod {
+		p := pod("genclust", 1, msg, "Error")
+		p.Name = name
+		p.CreationTimestamp = metav1.NewTime(time.Unix(ts, 0))
+		return p
+	}
+	multiContainer := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "mc"},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: "log-sidecar", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+			{Name: "genclust", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Message: "boom"}}},
+		}},
+	}
+	stackTail := "\t... 14 more\nCaused by: com.google.common.io.BaseEncoding$DecodingException: Invalid input length 65\n\tat com.google.Foo.bar(Foo.java:1)\n\t... 3 more"
+	tests := []struct {
+		name string
+		pods []corev1.Pod
+		want string
+	}{
+		{"exception line from stack tail", []corev1.Pod{pod("genclust", 1, stackTail, "Error")},
+			"Invalid input length 65"},
+		{"empty message falls back to reason", []corev1.Pod{pod("genclust", 1, "", "OOMKilled")}, "OOMKilled"},
+		{"exit 0 ignored", []corev1.Pod{pod("genclust", 0, "x", "Completed")}, ""},
+		{"non-genclust container ignored", []corev1.Pod{pod("other", 1, "boom Exception", "Error")}, ""},
+		{"newest failed pod wins", []corev1.Pod{podAt("old", 100, "older cause"), podAt("new", 200, "newer cause")}, "newer cause"},
+		{"skips non-genclust container in same pod", []corev1.Pod{multiContainer}, "boom"},
+		{"no pods", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractGenclustFailureMessage(tt.pods); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSummarizeTerminationMessage(t *testing.T) {
+	if got := summarizeTerminationMessage("plain first line\n\tat x\nboom Exception: bad key"); got != "boom Exception: bad key" {
+		t.Errorf("exception line: got %q", got)
+	}
+	if got := summarizeTerminationMessage("just a plain message\n\tat frame(F.java:1)"); got != "just a plain message" {
+		t.Errorf("fallback first non-frame line: got %q", got)
+	}
+	if got := summarizeTerminationMessage(strings.Repeat("x", 300)); len([]rune(got)) != 257 || !strings.HasSuffix(got, "…") {
+		t.Errorf("truncation (fallback line): runes=%d suffixOK=%v", len([]rune(got)), strings.HasSuffix(got, "…"))
+	}
+	// Java root cause: the last "Caused by:" wins over the outer exception line,
+	// and the "Caused by:" + fully-qualified class prefix is stripped.
+	root := "Exception in thread \"main\" java.lang.IllegalArgumentException: wrapper\n\tat a.B(C.java:1)\nCaused by: com.x.RootException: the real reason\n\t... 9 more"
+	if got := summarizeTerminationMessage(root); got != "the real reason" {
+		t.Errorf("caused-by preference: got %q", got)
+	}
+	// Truncation also applies on the matched exception-line path (not just fallback).
+	if got := summarizeTerminationMessage("RootException: " + strings.Repeat("y", 300)); len([]rune(got)) != 257 || !strings.HasSuffix(got, "…") {
+		t.Errorf("truncation (matched line): runes=%d suffixOK=%v", len([]rune(got)), strings.HasSuffix(got, "…"))
+	}
+}
+
+func TestHumanizeJavaMessage(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"caused-by + fqcn", "Caused by: com.google.common.io.BaseEncoding$DecodingException: Invalid input length 65", "Invalid input length 65"},
+		{"keeps inner colon", "Caused by: com.x.BaseEncoding$DecodingException: Unrecognized character: Z", "Unrecognized character: Z"},
+		{"fqcn without caused-by", "com.x.RootException: the real reason", "the real reason"},
+		{"bare fqcn, no message", "java.lang.NullPointerException", "NullPointerException"},
+		{"package-less class not stripped", "RootException: x", "RootException: x"},
+		{"spaced head not stripped", "boom Exception: bad key", "boom Exception: bad key"},
+		{"dotted non-throwable not stripped", "config.yaml: bad", "config.yaml: bad"},
+		{"plain message untouched", "Invalid input length 65", "Invalid input length 65"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := humanizeJavaMessage(tt.in); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChooseJobFailedMessage(t *testing.T) {
+	jobFailed := func(msg string) *metav1.Condition {
+		return &metav1.Condition{Type: "ClusterConfigReady", Status: metav1.ConditionFalse, Reason: "JobFailed", Message: msg}
+	}
+	tests := []struct {
+		name       string
+		podCause   string
+		existing   *metav1.Condition
+		jobCondMsg string
+		want       string
+	}{
+		{"fresh pod cause wins", "Invalid input length 65", jobFailed("genclust failed: stale"), "backoff", "genclust failed: Invalid input length 65"},
+		{"pod GC'd: preserve captured cause (no regress, no re-event)", "", jobFailed("genclust failed: Invalid input length 65"), "backoff", "genclust failed: Invalid input length 65"},
+		{"first failure, no pod: generic", "", nil, "Job has reached the specified backoff limit", "genclust Job failed: Job has reached the specified backoff limit"},
+		{"prior condition not JobFailed: generic", "", &metav1.Condition{Type: "ClusterConfigReady", Status: metav1.ConditionFalse, Reason: "JobRunning", Message: "running"}, "boom", "genclust Job failed: boom"},
+		{"upgrade generic->cause when pod reappears", "real cause", jobFailed("genclust Job failed: backoff"), "backoff", "genclust failed: real cause"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := chooseJobFailedMessage(tt.podCause, tt.existing, tt.jobCondMsg); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

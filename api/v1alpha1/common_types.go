@@ -290,8 +290,8 @@ type AppliedManagedResource struct {
 	// +kubebuilder:validation:Enum=ConfigMap;Secret
 	Kind string `json:"kind"`
 
-	// ConfigType is the curity.io/config-type annotation value ("base", "license", or "logging").
-	// +kubebuilder:validation:Enum=base;license;logging
+	// ConfigType is the curity.io/config-type annotation value ("base", "license", "logging", or "postCommitScript").
+	// +kubebuilder:validation:Enum=base;license;logging;postCommitScript
 	ConfigType string `json:"configType"`
 }
 

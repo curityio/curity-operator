@@ -441,7 +441,7 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
 						SecretName:  cfg.Name,
-						DefaultMode: ptr.To(corev1.SecretVolumeSourceDefaultMode),
+						DefaultMode: volumeDefaultMode(cfg.ConfigType, true),
 					},
 				},
 			})
@@ -451,7 +451,7 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{Name: cfg.Name},
-						DefaultMode:          ptr.To(corev1.ConfigMapVolumeSourceDefaultMode),
+						DefaultMode:          volumeDefaultMode(cfg.ConfigType, false),
 					},
 				},
 			})
@@ -478,6 +478,21 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 	}
 
 	return volumes, mounts
+}
+
+// volumeDefaultMode: postCommitScript files must be executable regardless of
+// fsGroup, so use an other-exec mode (0755 ConfigMap, 0555 Secret); others keep 0644.
+func volumeDefaultMode(configType string, isSecret bool) *int32 {
+	if configType == ConfigTypePostCommitScript {
+		if isSecret {
+			return ptr.To(int32(0o555))
+		}
+		return ptr.To(int32(0o755))
+	}
+	if isSecret {
+		return ptr.To(corev1.SecretVolumeSourceDefaultMode)
+	}
+	return ptr.To(corev1.ConfigMapVolumeSourceDefaultMode)
 }
 
 // buildLabels returns the standard Kubernetes labels for the resource.

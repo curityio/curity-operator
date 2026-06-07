@@ -164,7 +164,7 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 	}
 
 	// 6. Default config-type annotations, surface scope issues, discover managed configs
-	if err := r.ensureManagedConfigDiscovery(ctx, &cluster); err != nil {
+	if err := r.ensureManagedConfigDiscovery(ctx, &cluster, findAdminNodeName(childNodes) != ""); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1115,7 +1115,7 @@ func (r *IdentityServerClusterReconciler) readJobPodLogs(ctx context.Context, jo
 // subset that affects this cluster's mount behaviour (UnknownConfigType,
 // DuplicateConfigKey). Scope-only issues (UnknownClusterInScope,
 // EmptyClusterScope) are Events only — they don't change what mounts here.
-func (r *IdentityServerClusterReconciler) ensureManagedConfigDiscovery(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) error {
+func (r *IdentityServerClusterReconciler) ensureManagedConfigDiscovery(ctx context.Context, cluster *v1alpha1.IdentityServerCluster, adminExists bool) error {
 	log := ctrl.LoggerFrom(ctx)
 
 	// One ScanFailed event per reconcile: the three List paths below share a
@@ -1140,6 +1140,27 @@ func (r *IdentityServerClusterReconciler) ensureManagedConfigDiscovery(ctx conte
 	if err != nil {
 		emitScanFailed()
 		return fmt.Errorf("discovering managed configs: %w", err)
+	}
+
+	// postCommitScript scripts run only on the admin (ConfigD) node. If one is
+	// applicable here but no admin node exists, it mounts nowhere — warn on the
+	// cluster. Event only: the config itself is valid, so no managedResourceIssue
+	// and no ManagedConfigsValid flip (an admin node may yet be added).
+	if !adminExists {
+		for _, cfg := range configs {
+			if cfg.ConfigType != ConfigTypePostCommitScript {
+				continue
+			}
+			kind := "ConfigMap"
+			if cfg.IsSecret {
+				kind = "Secret"
+			}
+			log.Info("postCommitScript has no admin node to run it; not mounted",
+				"kind", kind, "name", cfg.Name)
+			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, EventReasonPostCommitScriptNoAdmin,
+				"%s/%s is a postCommitScript but cluster %q has no admin node; post-commit scripts run only on the admin (ConfigD) node and will not be mounted. Add an admin IdentityServerNode.",
+				kind, cfg.Name, cluster.Name)
+		}
 	}
 
 	issues := make([]v1alpha1.ManagedResourceIssue, 0)

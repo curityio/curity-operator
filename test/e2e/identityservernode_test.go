@@ -94,6 +94,23 @@ func e2eHasVolumeMount(deploy *appsv1.Deployment, name, mountPath string) bool {
 	return false
 }
 
+// e2eConfigVolumeMode returns the DefaultMode of a cfg-* volume (ConfigMap or
+// Secret), or nil if the volume is absent.
+func e2eConfigVolumeMode(deploy *appsv1.Deployment, volumeName string) *int32 {
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if v.Name != volumeName {
+			continue
+		}
+		if v.ConfigMap != nil {
+			return v.ConfigMap.DefaultMode
+		}
+		if v.Secret != nil {
+			return v.Secret.DefaultMode
+		}
+	}
+	return nil
+}
+
 var _ = Describe("IdentityServerNode", func() {
 
 	// =================================================================
@@ -1553,6 +1570,126 @@ var _ = Describe("IdentityServerNode", func() {
 					}, e2eTimeout, e2eInterval).Should(Succeed())
 
 					utils.MatchYAMLResource(deploy, "[deployment] cfg-lic-admin")
+				})
+			})
+
+			Describe("Post-commit scripts — admin-only executable mount", Ordered, func() {
+				const ns = "e2e-cfg-pcs"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("mounts postCommitScript executable on the admin only, and records status", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "pcs-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "pcs-admin", "namespace": ns, "clusterName": "pcs-cluster"})
+					utils.SimulateClusterConfigReady(ns, "pcs-cluster", e2eTimeout, e2eInterval)
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "pcs-runtime", "namespace": ns, "clusterName": "pcs-cluster"})
+
+					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pcs-cluster", "pcs-admin"), Namespace: ns}}
+					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
+					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pcs-cluster", "pcs-runtime"), Namespace: ns}}
+					utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
+
+					By("creating a postCommitScript ConfigMap (0755) and Secret (0555)")
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "hooks-cm", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/config-type": "postCommitScript"},
+						},
+						Data: map[string]string{"notify.sh": "#!/bin/sh\necho hi\n"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+					secret := &corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "hooks-sec", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/config-type": "postCommitScript"},
+						},
+						Data: map[string][]byte{"rotate.sh": []byte("#!/bin/sh\necho rotate\n")},
+					}
+					Expect(k().Create(ctx, secret)).To(Succeed())
+
+					By("verifying the admin mounts both under the post-commit-scripts dir, executable")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("pcs-cluster", "pcs-admin"), Namespace: ns}, adminDeploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(adminDeploy, "cfg-cm-hooks-cm")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(adminDeploy, "cfg-cm-hooks-cm", "/opt/idsvr/usr/bin/post-commit-scripts/cm_hooks-cm_notify.sh")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(adminDeploy, "cfg-secret-hooks-sec", "/opt/idsvr/usr/bin/post-commit-scripts/secret_hooks-sec_rotate.sh")).To(BeTrue())
+						cmMode := e2eConfigVolumeMode(adminDeploy, "cfg-cm-hooks-cm")
+						g.Expect(cmMode).NotTo(BeNil())
+						g.Expect(*cmMode).To(Equal(int32(0o755)), "ConfigMap script must be 0755 (other-exec)")
+						secMode := e2eConfigVolumeMode(adminDeploy, "cfg-secret-hooks-sec")
+						g.Expect(secMode).NotTo(BeNil())
+						g.Expect(*secMode).To(Equal(int32(0o555)), "Secret script must be 0555 (other-exec)")
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("verifying the runtime gets NO script (strict admin-only)")
+					Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("pcs-cluster", "pcs-runtime"), Namespace: ns}, runtimeDeploy)).To(Succeed())
+					Expect(e2eCountCfgVolumes(runtimeDeploy)).To(Equal(0), "runtime must not receive post-commit scripts")
+
+					By("verifying the admin node status records both as postCommitScript")
+					adminNode := &v1alpha1.IdentityServerNode{}
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: "pcs-admin", Namespace: ns}, adminNode)).To(Succeed())
+						types := map[string]string{}
+						for _, r := range adminNode.Status.AppliedManagedResources {
+							types[r.Name] = r.ConfigType
+						}
+						g.Expect(types["hooks-cm"]).To(Equal("postCommitScript"))
+						g.Expect(types["hooks-sec"]).To(Equal("postCommitScript"))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+				})
+			})
+
+			Describe("Post-commit script with no admin — cluster warning", Ordered, func() {
+				const ns = "e2e-cfg-pcs-noadmin"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("warns on the cluster and mounts nowhere when no admin exists", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "pcs-na-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "pcs-na-runtime", "namespace": ns, "clusterName": "pcs-na-cluster"})
+
+					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pcs-na-cluster", "pcs-na-runtime"), Namespace: ns}}
+					utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
+
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "orphan-hook", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/config-type": "postCommitScript"},
+						},
+						Data: map[string]string{"boot.sh": "#!/bin/sh\n"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					By("verifying a PostCommitScriptNoAdmin Warning fires on the IdentityServerCluster")
+					Eventually(func(g Gomega) {
+						events := &corev1.EventList{}
+						g.Expect(k().List(ctx, events, client.InNamespace(ns))).To(Succeed())
+						found := false
+						for _, e := range events.Items {
+							if e.Reason == "PostCommitScriptNoAdmin" &&
+								e.InvolvedObject.Kind == "IdentityServerCluster" &&
+								e.InvolvedObject.Name == "pcs-na-cluster" {
+								found = true
+							}
+						}
+						g.Expect(found).To(BeTrue(), "expected PostCommitScriptNoAdmin event on the cluster")
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("verifying the script mounts nowhere (strict admin-only, no admin)")
+					Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("pcs-na-cluster", "pcs-na-runtime"), Namespace: ns}, runtimeDeploy)).To(Succeed())
+					Expect(e2eCountCfgVolumes(runtimeDeploy)).To(Equal(0), "post-commit scripts must not mount on runtime even with no admin")
 				})
 			})
 

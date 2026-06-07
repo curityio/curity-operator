@@ -18,7 +18,6 @@ spec:
   role: admin-role-2
   identityServerClusterRef:
     name: dup-cluster
-  replicas: 1
   service:
     type: ClusterIP
     port: 8443

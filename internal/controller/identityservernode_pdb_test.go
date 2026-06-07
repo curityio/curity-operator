@@ -370,6 +370,7 @@ var _ = Describe("IdentityServerNode Reconciler / PodDisruptionBudget", func() {
 				return err
 			}
 			fresh.Spec.Type = v1alpha1.NodeTypeAdmin
+			fresh.Spec.Replicas = nil // admin must not set replicas
 			return k8sClient.Update(ctxLocal, &fresh)
 		}, timeout, interval).Should(Succeed())
 

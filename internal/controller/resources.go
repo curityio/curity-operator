@@ -133,8 +133,8 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 	logging := resolveLogging(cluster, node)
 	effectiveLevel := resolveLoggingLevel(cluster, node)
 
-	// Add log volume mount to main container if stdout logging enabled and level is not OFF
-	if logging != nil && logging.Stdout && effectiveLevel != "OFF" {
+	// Shared log volume, mounted only when sidecars will tail it.
+	if logging != nil && len(logging.Logs) > 0 && effectiveLevel != "OFF" {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 			Name:      "log-volume",
 			MountPath: "/opt/idsvr/var/log/",
@@ -316,9 +316,13 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		{Name: "LOGGING_LEVEL", Value: resolveLoggingLevel(cluster, node)},
 	}
 
+	isAdmin := node.Spec.Type == v1alpha1.NodeTypeAdmin
+	// skipInstall is admin-only; guard the type for in-process paths that bypass CEL.
+	skipInstall := isAdmin && node.Spec.SkipInstall != nil && *node.Spec.SkipInstall
+
 	// Admin UI HTTP mode. nil Secure falls through to the secure-HTTPS default
 	// (a guard for in-process construction paths that bypass admission).
-	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
+	if isAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
 		httpMode := "false"
 		if node.Spec.UI.Secure != nil && !*node.Spec.UI.Secure {
 			httpMode = "true"
@@ -326,10 +330,14 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		envVars = append(envVars, corev1.EnvVar{Name: "ADMIN_UI_HTTP_MODE", Value: httpMode})
 	}
 
-	// Admin credentials as env vars from secret
+	// Admin credentials as env vars. The admin password is the installer
+	// trigger, so it goes only on the admin node.
 	if cluster.Spec.AdminCredentials != nil {
 		secretName := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
 		for _, item := range cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Items {
+			if item.Key == "ADMIN_PASSWORD" && !isAdmin {
+				continue
+			}
 			envVars = append(envVars, corev1.EnvVar{
 				Name: item.Path,
 				ValueFrom: &corev1.EnvVarSource{
@@ -342,10 +350,14 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		}
 	}
 
+	if skipInstall {
+		envVars = append(envVars, corev1.EnvVar{Name: "SKIP_INSTALL", Value: "1"})
+	}
+
 	// Auto-inject PASSWORD for Curity's unattended installer when admin UI is enabled.
 	// The installer checks for PASSWORD (not ADMIN_PASSWORD) to trigger first-run setup
 	// which configures the admin-service XML and starts the UI on port 6749.
-	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
+	if isAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
 		if cluster.Spec.AdminCredentials != nil {
 			hasPassword := false
 			for _, item := range cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Items {
@@ -429,7 +441,7 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
 						SecretName:  cfg.Name,
-						DefaultMode: ptr.To(corev1.SecretVolumeSourceDefaultMode),
+						DefaultMode: volumeDefaultMode(cfg.ConfigType, true),
 					},
 				},
 			})
@@ -439,7 +451,7 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{Name: cfg.Name},
-						DefaultMode:          ptr.To(corev1.ConfigMapVolumeSourceDefaultMode),
+						DefaultMode:          volumeDefaultMode(cfg.ConfigType, false),
 					},
 				},
 			})
@@ -466,6 +478,21 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 	}
 
 	return volumes, mounts
+}
+
+// volumeDefaultMode: postCommitScript files must be executable regardless of
+// fsGroup, so use an other-exec mode (0755 ConfigMap, 0555 Secret); others keep 0644.
+func volumeDefaultMode(configType string, isSecret bool) *int32 {
+	if configType == ConfigTypePostCommitScript {
+		if isSecret {
+			return ptr.To(int32(0o555))
+		}
+		return ptr.To(int32(0o755))
+	}
+	if isSecret {
+		return ptr.To(corev1.SecretVolumeSourceDefaultMode)
+	}
+	return ptr.To(corev1.ConfigMapVolumeSourceDefaultMode)
 }
 
 // buildLabels returns the standard Kubernetes labels for the resource.
@@ -653,7 +680,7 @@ const defaultLogImage = "busybox:latest"
 // buildLogSidecars creates sidecar containers that tail Curity log files to stdout.
 // One sidecar per log type (e.g., audit, request, cluster).
 func buildLogSidecars(logging *v1alpha1.LoggingSpec) []corev1.Container {
-	if logging == nil || !logging.Stdout || len(logging.Logs) == 0 {
+	if logging == nil || len(logging.Logs) == 0 {
 		return nil
 	}
 

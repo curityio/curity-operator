@@ -48,9 +48,12 @@ func testCreateNode(ns, name string, nodeType v1alpha1.NodeType, clusterName str
 			Type:                     nodeType,
 			Role:                     name + "-role",
 			IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
-			Replicas:                 ptr.To(int32(1)),
 			Service:                  defaultTestService(),
 		},
+	}
+	// Admin nodes reject replicas at admission; runtime defaults to 1 anyway.
+	if nodeType != v1alpha1.NodeTypeAdmin {
+		node.Spec.Replicas = ptr.To(int32(1))
 	}
 	Expect(k8sClient.Create(ctx, node)).To(Succeed())
 }
@@ -65,14 +68,13 @@ func userAdminCreds(name string) *v1alpha1.CredentialsSource {
 				Items: []v1alpha1.KeyToPath{
 					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-					{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 				},
 			},
 		},
 	}
 }
 
-// createOpaqueCredsSecret pre-creates an admin-credentials Secret with the three
+// createOpaqueCredsSecret pre-creates an admin-credentials Secret with the
 // expected keys — for tests that exercise paths past the "Secret exists" gate
 // (e.g. encryption-key rotation) now that the operator no longer auto-creates a
 // user-provided Secret.
@@ -83,7 +85,6 @@ func createOpaqueCredsSecret(ns, name string) {
 		Data: map[string][]byte{
 			"ADMIN_PASSWORD":        []byte("test-password"),
 			"CONFIG_ENCRYPTION_KEY": []byte("test-encryption-key"),
-			"KEYSTORE_PASSWORD":     []byte("test-keystore-password"),
 		},
 	})).To(Succeed())
 }
@@ -153,9 +154,8 @@ func newUnstructuredNode(ns, name, role, clusterRef string) *unstructured.Unstru
 				"namespace": ns,
 			},
 			"spec": map[string]interface{}{
-				"type":     "runtime",
-				"role":     role,
-				"replicas": int64(1),
+				"type": "runtime",
+				"role": role,
 				"identityServerClusterRef": map[string]interface{}{
 					"name": clusterRef,
 				},

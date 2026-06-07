@@ -164,9 +164,8 @@ type KeyToPath struct {
 }
 
 // SecretKeyRefSource references the admin-credentials Secret. Items must
-// contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY,
-// and KEYSTORE_PASSWORD — these specific keys are what the operator projects
-// into Curity pods.
+// contain exactly one entry each for ADMIN_PASSWORD and CONFIG_ENCRYPTION_KEY —
+// these specific keys are what the operator projects into Curity pods.
 type SecretKeyRefSource struct {
 	// Name must be a valid DNS-1123 subdomain Secret name.
 	// +kubebuilder:validation:Required
@@ -175,9 +174,9 @@ type SecretKeyRefSource struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
-	// +kubebuilder:validation:MinItems=3
-	// +kubebuilder:validation:MaxItems=3
-	// +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY') && self.exists_one(i, i.key == 'KEYSTORE_PASSWORD')",message="items must contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD"
+	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=2
+	// +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY')",message="items must contain exactly one entry each for ADMIN_PASSWORD and CONFIG_ENCRYPTION_KEY"
 	Items []KeyToPath `json:"items"`
 }
 
@@ -297,8 +296,8 @@ type AppliedManagedResource struct {
 	// +kubebuilder:validation:Enum=ConfigMap;Secret
 	Kind string `json:"kind"`
 
-	// ConfigType is the curity.io/config-type annotation value ("base", "license", or "logging").
-	// +kubebuilder:validation:Enum=base;license;logging
+	// ConfigType is the curity.io/config-type annotation value ("base", "license", "logging", or "postCommitScript").
+	// +kubebuilder:validation:Enum=base;license;logging;postCommitScript
 	ConfigType string `json:"configType"`
 }
 
@@ -336,13 +335,8 @@ type LoggingSpec struct {
 	// +kubebuilder:validation:Enum=ERROR;WARN;INFO;DEBUG;TRACE;OFF
 	Level string `json:"level,omitempty"`
 
-	// Stdout enables sidecar containers that tail Curity log files
-	// to stdout, making them accessible via kubectl logs.
-	// Sidecars are suppressed when Level is OFF, even if Stdout is true.
-	// +kubebuilder:default=false
-	Stdout bool `json:"stdout,omitempty"`
-
-	// Logs is the list of Curity log files to stream when stdout is enabled.
+	// Logs are the Curity log files to tail to stdout via sidecar containers (one
+	// per stream); a non-empty list enables them, empty/omitted or Level: OFF disables.
 	// Allowed values: audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts.
 	// +kubebuilder:validation:MaxItems=32
 	// +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts

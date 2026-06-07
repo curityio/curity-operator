@@ -566,7 +566,7 @@ func TestBuildDeployment_LoggingLevelOff(t *testing.T) {
 func TestBuildDeployment_LoggingOffSuppressesSidecars(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF", Stdout: true, Logs: []string{"audit"}}
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF", Logs: []string{"audit"}}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
@@ -580,14 +580,14 @@ func TestBuildDeployment_LoggingOffSuppressesSidecars(t *testing.T) {
 	}
 }
 
-func TestBuildDeployment_LoggingOffClusterNodeStdoutOverride(t *testing.T) {
-	// Regression: cluster sets OFF, node overrides only Stdout/Logs (not Level).
+func TestBuildDeployment_LoggingOffClusterNodeLogsOverride(t *testing.T) {
+	// Regression: cluster sets OFF, node overrides only Logs (not Level).
 	// resolveLogging returns node spec (Level:""), resolveLoggingLevel returns "OFF".
 	// Sidecars and log-volume must still be suppressed.
 	cluster := newTestCluster()
 	cluster.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF"}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{"audit"}}
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Logs: []string{"audit"}}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
@@ -602,10 +602,10 @@ func TestBuildDeployment_LoggingOffClusterNodeStdoutOverride(t *testing.T) {
 	}
 }
 
-func TestBuildDeployment_LoggingStdoutDisabled(t *testing.T) {
+func TestBuildDeployment_LoggingUnsetDisabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	// stdout=false (default) → no log volume, no sidecars
+	// logging unset → no log volume, no sidecars
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
@@ -613,27 +613,23 @@ func TestBuildDeployment_LoggingStdoutDisabled(t *testing.T) {
 	}
 	for _, v := range deploy.Spec.Template.Spec.Volumes {
 		if v.Name == "log-volume" {
-			t.Errorf("log-volume should not exist when stdout=false")
+			t.Errorf("log-volume should not exist when logging is unset")
 		}
 	}
 }
 
-func TestBuildDeployment_LoggingStdoutEnabledNoLogs(t *testing.T) {
+func TestBuildDeployment_LoggingEmptyLogsDisabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{}}
+	// empty logs list → disabled: no log volume, no sidecars
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Logs: []string{}}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
-	// Volume should exist (stdout=true) but no sidecars (logs=[])
-	foundLogVol := false
 	for _, v := range deploy.Spec.Template.Spec.Volumes {
 		if v.Name == "log-volume" {
-			foundLogVol = true
+			t.Errorf("log-volume should not exist when logs is empty")
 		}
-	}
-	if !foundLogVol {
-		t.Errorf("log-volume should exist when stdout=true")
 	}
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
 		t.Errorf("expected 1 container (no sidecars for empty logs), got %d", len(deploy.Spec.Template.Spec.Containers))
@@ -644,8 +640,7 @@ func TestBuildDeployment_LoggingSidecars(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit", "request"},
+		Logs: []string{"audit", "request"},
 	}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
@@ -685,9 +680,8 @@ func TestBuildDeployment_LoggingCustomImage(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit"},
-		Image:  "alpine:3.19",
+		Logs:  []string{"audit"},
+		Image: "alpine:3.19",
 	}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
@@ -701,8 +695,7 @@ func TestBuildDeployment_LoggingResources(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit"},
+		Logs: []string{"audit"},
 		Resources: &corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU: resource.MustParse("10m"),
@@ -721,13 +714,11 @@ func TestBuildDeployment_LoggingResources(t *testing.T) {
 func TestBuildDeployment_LoggingNodeOverridesCluster(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit", "request"},
+		Logs: []string{"audit", "request"},
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"cluster"},
+		Logs: []string{"cluster"},
 	}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
@@ -950,7 +941,7 @@ func TestBuildDeployment_AdminCredentialsEnvVarUsesPath(t *testing.T) {
 			},
 		},
 	}
-	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
@@ -968,7 +959,6 @@ func TestBuildDeployment_AdminCredentialsMultipleItems(t *testing.T) {
 				Items: []v1alpha1.KeyToPath{
 					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-					{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 				},
 			},
 		},
@@ -980,7 +970,6 @@ func TestBuildDeployment_AdminCredentialsMultipleItems(t *testing.T) {
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
 	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "admin-secret", "CONFIG_ENCRYPTION_KEY")
-	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "admin-secret", "KEYSTORE_PASSWORD")
 }
 
 func TestBuildDeployment_AdminCredentialsNoSpecialMapping(t *testing.T) {
@@ -996,13 +985,104 @@ func TestBuildDeployment_AdminCredentialsNoSpecialMapping(t *testing.T) {
 			},
 		},
 	}
-	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	// Should use Path as-is, not rename to PASSWORD
 	assertEnvVarFromSecret(t, envVars, "MY_CUSTOM_NAME", "admin-secret", "ADMIN_PASSWORD")
+}
+
+func TestBuildDeployment_RuntimeOmitsAdminPassword(t *testing.T) {
+	// The admin password is the installer trigger and must not reach runtime
+	// nodes; other credential keys still project there.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertNoEnvVar(t, envVars, "PASSWORD")
+	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "admin-secret", "CONFIG_ENCRYPTION_KEY")
+}
+
+func TestBuildDeployment_RuntimeOmitsAdminPasswordCustomName(t *testing.T) {
+	// Gating keys off the ADMIN_PASSWORD secret key, not its projected name, so
+	// any custom env name is still dropped on runtime.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "MY_CUSTOM_NAME"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertNoEnvVar(t, envVars, "MY_CUSTOM_NAME")
+}
+
+func TestBuildDeployment_SkipInstallAdmin(t *testing.T) {
+	// skipInstall passes SKIP_INSTALL=1; the password is still projected on the
+	// admin (the image skips first-run setup whenever SKIP_INSTALL is set).
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.SkipInstall = ptr.To(true)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVar(t, envVars, "SKIP_INSTALL", "1")
+	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
+	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "admin-secret", "CONFIG_ENCRYPTION_KEY")
+}
+
+func TestBuildDeployment_SkipInstallUnsetAdminKeepsPassword(t *testing.T) {
+	// Without skipInstall, the admin keeps the password and gets no SKIP_INSTALL.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
+	assertNoEnvVar(t, envVars, "SKIP_INSTALL")
 }
 
 // --- Admin UI PASSWORD auto-injection tests ---
@@ -1143,13 +1223,12 @@ func TestDefaultAdminCredentials_SecretName(t *testing.T) {
 func TestDefaultAdminCredentials_Items(t *testing.T) {
 	creds := defaultAdminCredentials("test")
 	items := creds.ValueFrom.SecretKeyRef.Items
-	if len(items) != 3 {
-		t.Fatalf("expected 3 items, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
 	}
 	expected := []v1alpha1.KeyToPath{
 		{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 		{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-		{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 	}
 	for i, item := range items {
 		if item.Key != expected[i].Key || item.Path != expected[i].Path {
@@ -1170,11 +1249,12 @@ func TestBuildDeployment_DefaultedCredentials_InjectsEnvVars(t *testing.T) {
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
 	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "cluster-1-admin-creds", "CONFIG_ENCRYPTION_KEY")
-	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "cluster-1-admin-creds", "KEYSTORE_PASSWORD")
+	assertNoEnvVar(t, envVars, "KEYSTORE_PASSWORD")
 }
 
 func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
-	// Runtime nodes get all credential env vars from items mapping.
+	// Runtime nodes get the encryption key but not the admin password — the
+	// password is the installer trigger and belongs only on the admin.
 	cluster := newTestCluster()
 	cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
@@ -1182,9 +1262,9 @@ func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
-	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
+	assertNoEnvVar(t, envVars, "PASSWORD")
 	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "cluster-1-admin-creds", "CONFIG_ENCRYPTION_KEY")
-	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "cluster-1-admin-creds", "KEYSTORE_PASSWORD")
+	assertNoEnvVar(t, envVars, "KEYSTORE_PASSWORD")
 }
 
 // --- Cluster Config Builder Tests ---
@@ -1573,6 +1653,16 @@ func assertEnvVarFromSecret(t *testing.T, envVars []corev1.EnvVar, envName, secr
 	t.Errorf("expected env var %s to exist", envName)
 }
 
+func assertNoEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) {
+	t.Helper()
+	for _, e := range envVars {
+		if e.Name == name {
+			t.Errorf("expected env var %s to be absent", name)
+			return
+		}
+	}
+}
+
 // --- Scheduling tests ---
 
 func TestBuildDeployment_NodeSelectorClusterOnly(t *testing.T) {
@@ -1862,6 +1952,100 @@ func TestBuildVolumes_BaseConfigMap(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected mount at %s", wantPath)
+	}
+}
+
+func TestVolumeDefaultMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		configType string
+		isSecret   bool
+		want       int32
+	}{
+		{"postCommitScript ConfigMap → 0755 (other-exec)", ConfigTypePostCommitScript, false, 0o755},
+		{"postCommitScript Secret → 0555 (other-exec, no write)", ConfigTypePostCommitScript, true, 0o555},
+		{"base ConfigMap keeps apiserver default", ConfigTypeBase, false, corev1.ConfigMapVolumeSourceDefaultMode},
+		{"base Secret keeps apiserver default", ConfigTypeBase, true, corev1.SecretVolumeSourceDefaultMode},
+		{"logging ConfigMap keeps apiserver default", ConfigTypeLogging, false, corev1.ConfigMapVolumeSourceDefaultMode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := volumeDefaultMode(tc.configType, tc.isSecret)
+			if got == nil || *got != tc.want {
+				t.Errorf("volumeDefaultMode(%q, secret=%v) = %v, want %o", tc.configType, tc.isSecret, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildVolumes_PostCommitScriptConfigMapIsExecutableDirMount(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "hooks", IsSecret: false, ConfigType: ConfigTypePostCommitScript,
+			Data: map[string][]byte{"notify.sh": []byte("#!/bin/sh\n")}},
+		// Regression guard: a base ConfigMap in the same call must keep 0644.
+		{Name: "base-cm", IsSecret: false, ConfigType: ConfigTypeBase,
+			Data: map[string][]byte{"config.xml": []byte("<c/>")}},
+	}
+	volumes, mounts := buildVolumes("cluster-1", configs)
+
+	var scriptVol, baseVol *corev1.Volume
+	for i := range volumes {
+		switch volumes[i].Name {
+		case configVolumeName(false, "hooks"):
+			scriptVol = &volumes[i]
+		case configVolumeName(false, "base-cm"):
+			baseVol = &volumes[i]
+		}
+	}
+	if scriptVol == nil || scriptVol.ConfigMap == nil {
+		t.Fatalf("expected ConfigMap volume for postCommitScript; volumes=%v", volumes)
+	}
+	if scriptVol.ConfigMap.DefaultMode == nil || *scriptVol.ConfigMap.DefaultMode != 0o755 {
+		t.Errorf("expected postCommitScript volume DefaultMode 0755, got %v", scriptVol.ConfigMap.DefaultMode)
+	}
+	// Regression: the per-type mode helper must not disturb base config.
+	if baseVol == nil || baseVol.ConfigMap == nil ||
+		baseVol.ConfigMap.DefaultMode == nil || *baseVol.ConfigMap.DefaultMode != corev1.ConfigMapVolumeSourceDefaultMode {
+		t.Errorf("base ConfigMap DefaultMode must stay apiserver default, got %v", baseVol.ConfigMap.DefaultMode)
+	}
+
+	// Directory mount: per-key mangled filename under the post-commit-scripts dir.
+	wantPath := MountPathPostCommitScript + mountFilename(false, "hooks", "notify.sh")
+	var m *corev1.VolumeMount
+	for i := range mounts {
+		if mounts[i].MountPath == wantPath {
+			m = &mounts[i]
+			break
+		}
+	}
+	if m == nil {
+		t.Fatalf("expected mount at %s; mounts=%v", wantPath, mounts)
+	}
+	if m.SubPath != "notify.sh" {
+		t.Errorf("expected SubPath notify.sh, got %q", m.SubPath)
+	}
+	if !m.ReadOnly {
+		t.Error("expected ReadOnly mount")
+	}
+}
+
+func TestBuildVolumes_PostCommitScriptSecretIs0555(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "sec-hooks", IsSecret: true, ConfigType: ConfigTypePostCommitScript,
+			Data: map[string][]byte{"run.sh": []byte("#!/bin/sh\n")}},
+	}
+	volumes, _ := buildVolumes("cluster-1", configs)
+	var vol *corev1.Volume
+	for i := range volumes {
+		if volumes[i].Name == configVolumeName(true, "sec-hooks") {
+			vol = &volumes[i]
+		}
+	}
+	if vol == nil || vol.Secret == nil {
+		t.Fatalf("expected Secret volume for postCommitScript; volumes=%v", volumes)
+	}
+	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o555 {
+		t.Errorf("expected postCommitScript Secret DefaultMode 0555, got %v", vol.Secret.DefaultMode)
 	}
 }
 

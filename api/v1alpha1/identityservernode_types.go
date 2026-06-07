@@ -7,11 +7,12 @@ import (
 
 // IdentityServerNodeSpec defines the desired state of IdentityServerNode.
 // Each node creates a Deployment and Service for a Curity Identity Server instance.
-// Admin nodes are single-active by Curity design: replicas must be 1 and
+// Admin nodes are single-active by Curity design: replicas cannot be set and
 // autoscaling must not be enabled — both enforced at admission.
 // +kubebuilder:object:generate=true
-// +kubebuilder:validation:XValidation:rule="self.type != 'admin' || self.replicas <= 1",message="replicas must be 1 for admin-type nodes (Curity admin is single-active)"
+// +kubebuilder:validation:XValidation:rule="self.type != 'admin' || !has(self.replicas)",message="replicas cannot be set on admin-type nodes (Curity admin is always single-active with 1 replica)"
 // +kubebuilder:validation:XValidation:rule="self.type != 'admin' || !has(self.autoscaling) || !self.autoscaling.enabled",message="autoscaling cannot be enabled on admin-type nodes (Curity admin is single-active)"
+// +kubebuilder:validation:XValidation:rule="self.type == 'admin' || !has(self.skipInstall)",message="skipInstall can only be set on admin-type nodes"
 type IdentityServerNodeSpec struct {
 	// Type determines whether this is an admin or runtime node.
 	// Only one admin node is allowed per cluster.
@@ -29,14 +30,17 @@ type IdentityServerNodeSpec struct {
 	// UI configures the admin UI. Only applicable for admin-type nodes.
 	UI *UISpec `json:"ui,omitempty"`
 
+	// SkipInstall passes SKIP_INSTALL=1 to the admin container so it boots
+	// without running first-run setup. Admin-only (CEL-enforced).
+	SkipInstall *bool `json:"skipInstall,omitempty"`
+
 	// IdentityServerClusterRef references the IdentityServerCluster managing this node.
 	// +kubebuilder:validation:Required
 	IdentityServerClusterRef ObjectReference `json:"identityServerClusterRef"`
 
-	// Replicas is the number of pods (Deployment replicas) for this node.
-	// Admin-type nodes are restricted to replicas=1 by the CEL rule on
-	// IdentityServerNodeSpec (Curity admin is single-active).
-	// +kubebuilder:default=1
+	// Replicas is the number of pods (Deployment replicas) for runtime nodes.
+	// Must not be set on admin nodes; the admin is always 1 (CEL-enforced).
+	// Omitted runtime nodes default to 1 in the reconciler.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10000
 	Replicas *int32 `json:"replicas,omitempty"`

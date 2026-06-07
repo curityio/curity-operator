@@ -34,23 +34,23 @@ spec:
     # +kubebuilder:validation:Required
     valueFrom:
       secretKeyRef:
-        # Secret must contain three data keys with these exact names: ADMIN_PASSWORD,
-        # CONFIG_ENCRYPTION_KEY, KEYSTORE_PASSWORD. The operator reads these keys
-        # directly in several reconciler paths (Secret bootstrap, encryption-key
-        # hashing, genclust Job, admin-UI password projection), so the names are
-        # load-bearing and not user-configurable. Only items[].path (the env var
-        # name projected into the container) is user-configurable below.
+        # Secret must contain two data keys with these exact names: ADMIN_PASSWORD,
+        # CONFIG_ENCRYPTION_KEY. The operator reads these keys directly in several
+        # reconciler paths (Secret bootstrap, encryption-key hashing, genclust Job,
+        # admin-UI password projection), so the names are load-bearing and not
+        # user-configurable. Only items[].path (the env var name projected into the
+        # container) is user-configurable below.
         # +kubebuilder:validation:Required
         # +kubebuilder:validation:MinLength=1
         # +kubebuilder:validation:MaxLength=253
         # +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
         name: curity-admin-secret
-        # The items slice projects three specific Secret keys into Curity pods.
-        # Must contain exactly one entry each for ADMIN_PASSWORD,
-        # CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD.
-        # +kubebuilder:validation:MinItems=3
-        # +kubebuilder:validation:MaxItems=3
-        # +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY') && self.exists_one(i, i.key == 'KEYSTORE_PASSWORD')",message="items must contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD"
+        # The items slice projects two specific Secret keys into Curity pods.
+        # Must contain exactly one entry each for ADMIN_PASSWORD and
+        # CONFIG_ENCRYPTION_KEY.
+        # +kubebuilder:validation:MinItems=2
+        # +kubebuilder:validation:MaxItems=2
+        # +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY')",message="items must contain exactly one entry each for ADMIN_PASSWORD and CONFIG_ENCRYPTION_KEY"
         # items[].path is the env var NAME projected into the Curity container.
         # Must be a valid POSIX env var identifier — starts with letter or
         # underscore, then alphanumerics or underscore.
@@ -63,8 +63,6 @@ spec:
             path: ADMIN_PASSWORD
           - key: CONFIG_ENCRYPTION_KEY
             path: CONFIG_ENCRYPTION_KEY
-          - key: KEYSTORE_PASSWORD
-            path: KEYSTORE_PASSWORD
 
   # Remote packages (ZIP archives) to download and unpack into each node's container at startup.
   # Supports public URLs, private GitHub releases, and any HTTP(S) endpoint requiring TLS customisation or credentials.
@@ -166,7 +164,7 @@ spec:
 # ------------------------------------------------------------
 
   # Default logging options for nodes unless overridden per IdentityServerNode.
-  # When `stdout` is true, the operator adds sidecar containers that tail files under `var/log` for each name in `logs` and stream them to the pod’s stdout.
+  # When `logs` is non-empty, the operator adds sidecar containers that tail files under `var/log` for each named stream to the pod’s stdout. An empty or omitted `logs` disables the sidecars.
   # The `resources` field under `logging` applies only to those sidecars, not the main Identity Server container.
   # +kubebuilder:validation:Optional
   logging:
@@ -178,10 +176,7 @@ spec:
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:MaxLength=512
     image: busybox:latest
-    # When true, deploy sidecars that tail additional log files listed in `logs` from `var/log` to stdout.
-    # +kubebuilder:validation:Optional
-    stdout: false
-    # Names of extra log streams to tail when `stdout` is true (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts).
+    # Names of log streams to tail from `var/log` to stdout (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts). A non-empty list deploys one sidecar per stream; empty disables them.
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:MaxItems=32
     # +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts

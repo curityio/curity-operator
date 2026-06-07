@@ -64,8 +64,8 @@ spec:
 ```
 
 When `adminCredentials` is omitted, the operator automatically creates a Secret
-named `<cluster>-admin-creds` with generated values for `ADMIN_PASSWORD`,
-`CONFIG_ENCRYPTION_KEY`, and `KEYSTORE_PASSWORD`.
+named `<cluster>-admin-creds` with generated values for `ADMIN_PASSWORD` and
+`CONFIG_ENCRYPTION_KEY`.
 
 To use a pre-existing Secret instead, specify `adminCredentials` explicitly:
 
@@ -80,8 +80,6 @@ spec:
             path: ADMIN_PASSWORD
           - key: CONFIG_ENCRYPTION_KEY
             path: CONFIG_ENCRYPTION_KEY
-          - key: KEYSTORE_PASSWORD
-            path: KEYSTORE_PASSWORD
 ```
 
 2. Create an admin node with the UI enabled:
@@ -97,7 +95,7 @@ spec:
   role: admin
   identityServerClusterRef:
     name: my-cluster
-  replicas: 1
+  # admin is single-active: replicas must not be set (always 1)
   ui:
     enabled: true
     secure: false
@@ -166,8 +164,8 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `version` | string, required | Curity Identity Server version |
 | `image` | string | Override container image (for private mirrors) |
 | `imagePullSecret` | string | Secret name for pulling images |
-| `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`, `KEYSTORE_PASSWORD`; auto-generated if omitted |
-| `logging` | object | Log level, stdout tailing, sidecar config |
+| `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`; auto-generated if omitted |
+| `logging` | object | Log level, log streams to tail, sidecar config |
 | `resources` | object | Default CPU/memory requests/limits |
 | `probes` | object | Default liveness/readiness probe config |
 | `autoscaling` | object | HPA defaults (minReplicas, maxReplicas, targetCPU) |
@@ -187,8 +185,9 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `type` | enum: `admin`/`runtime`, required | Node type; only one admin per cluster |
 | `role` | string, required | Unique node identifier within the cluster |
 | `identityServerClusterRef` | object, required | `{name: "<cluster>"}` reference |
-| `replicas` | int32, default: 1 | Deployment replicas; forced to 1 for admin |
+| `replicas` | int32 (runtime only) | Runtime Deployment replicas; omitted defaults to 1. Must not be set on admin nodes — rejected at admission; the admin is always 1 |
 | `ui` | object | Admin UI config (see [Accessing the Admin UI](#accessing-the-admin-ui)) |
+| `skipInstall` | bool (admin only) | When `true`, passes `SKIP_INSTALL=1` so the admin starts without first-run setup. Set at bootstrap; provide config another way. Rejected on runtime nodes |
 | `service` | object | Service `type` (ClusterIP/LoadBalancer/NodePort) and `port` |
 | `environmentVariables` | list | Standard Kubernetes env vars |
 | `resources` | object | Overrides cluster-level resources |
@@ -235,14 +234,37 @@ data:
 
 Set the `curity.io/config-type` annotation to control where configs are mounted. If omitted, it is treated as `base`. The operator does not modify the annotation.
 
-| Type | Annotation Value | Mount Path |
-|---|---|---|
-| Base config | `base` (default) | `/opt/idsvr/etc/init/{kind}_{resource-name}_{filename}` |
-| License | `license` | `/opt/idsvr/etc/init/license/{kind}_{resource-name}_{filename}` |
+| Type | Annotation Value | Mount Path | Mounted on |
+|---|---|---|---|
+| Base config | `base` (default) | `/opt/idsvr/etc/init/{kind}_{resource-name}_{filename}` | Admin (all nodes if no admin) |
+| License | `license` | `/opt/idsvr/etc/init/license/{kind}_{resource-name}_{filename}` | Admin (all nodes if no admin) |
+| Logging | `logging` | `/opt/idsvr/etc/log4j2.xml` (single file; replaces the shipped default) | Every node |
+| Post-commit script | `postCommitScript` | `/opt/idsvr/usr/bin/post-commit-scripts/{kind}_{resource-name}_{filename}` (executable) | Admin only |
 
-Mount filenames are prefixed with the resource kind and name to prevent collisions when multiple ConfigMaps/Secrets contain the same data key. The `{kind}` prefix is `cm` for ConfigMaps and `secret` for Secrets (e.g. `cm_my-config_base-config.xml`).
+Mount filenames are prefixed with the resource kind and name to prevent collisions when multiple ConfigMaps/Secrets contain the same data key. The `{kind}` prefix is `cm` for ConfigMaps and `secret` for Secrets (e.g. `cm_my-config_base-config.xml`). The `logging` type is the exception — it mounts a single `log4j2.xml` at a fixed path with no mangling.
 
 A resource with an unknown `curity.io/config-type` value is skipped (not mounted) and the operator emits an `UnknownConfigType` Warning event on the offending ConfigMap/Secret itself. Other managed resources in the namespace are unaffected.
+
+#### Post-commit scripts
+
+A `postCommitScript`-typed ConfigMap (or Secret) mounts each data key as an **executable** file (`0755`, or `0555` for Secrets) into `/opt/idsvr/usr/bin/post-commit-scripts/` on the **admin node only**. Curity runs these after a configuration commit (see Curity's post-commit-scripts documentation) — the operator's role is to deliver them executable to the right place. Editing a script rolls the admin pod so the new content is picked up. You can stream their output with `spec.logging.logs: [post-commit-scripts]`.
+
+If a `postCommitScript` is applied to a cluster with no admin node, it mounts nowhere — the operator emits a `PostCommitScriptNoAdmin` Warning event on the IdentityServerCluster.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: provision-hooks
+  labels:
+    curity.io/managed: "true"
+  annotations:
+    curity.io/config-type: postCommitScript
+data:
+  notify.sh: |
+    #!/bin/sh
+    echo "config committed at $(date)"
+```
 
 ### Debugging managed resources
 
@@ -264,18 +286,37 @@ kubectl get isc                 # 'Issues' column shows the count
 kubectl describe isc <cluster>  # full list with Kind, Name, Reason, Message
 ```
 
-Scope-only issues (`UnknownClusterInScope`, `EmptyClusterScope`) appear only in events on the resource — they don't change what mounts on any cluster, so they are not represented in cluster status.
+Scope-only issues (`UnknownClusterInScope`, `EmptyClusterScope`) appear only in events on the resource — they don't change what mounts on any cluster, so they are not represented in cluster status. The `PostCommitScriptNoAdmin` warning fires on the **IdentityServerCluster** (not the ConfigMap): the config is valid, but the cluster has no admin node to run it.
 
 ### Admin Routing
 
-Config volumes are mounted based on whether an admin node exists:
+Where a config mounts depends on its type and whether an admin node exists:
 
-- **With admin node**: Only the admin pod gets the config volumes. Runtime pods do not.
-- **Without admin node** (runtime-only cluster): All runtime pods get the config volumes.
+- **`base` / `license`**: the admin pod only when an admin node exists; all runtime pods in a runtime-only cluster.
+- **`logging`**: every node (admin and runtime).
+- **`postCommitScript`**: the admin node only — never on runtime, and nothing in a runtime-only cluster (post-commit scripts run only where ConfigD runs).
 
 ### Namespace Scoping
 
 All managed configs in a namespace are discovered by all clusters in that namespace. To scope configs to a specific cluster, use separate namespaces.
+
+## Logging
+
+`spec.logging` (on the cluster, overridable per node) controls the Curity server log level and optional log-to-stdout streaming.
+
+```yaml
+spec:
+  logging:
+    level: INFO          # ERROR, WARN, INFO, DEBUG, TRACE, OFF (default INFO)
+    logs:                # a non-empty list enables one stdout-tailing sidecar per stream
+      - request
+      - audit
+```
+
+- **`level`** sets the server log level (delivered as the `LOGGING_LEVEL` env var). `OFF` additionally suppresses the log sidecars and the shared log volume.
+- **`logs`** drives the sidecars: a **non-empty list** adds one lightweight sidecar container per stream, each tailing the matching file from `/opt/idsvr/var/log/` so it appears in `kubectl logs <pod> -c <log-name>`. An empty or omitted list (or `level: OFF`) means no sidecars. Allowed values: `audit`, `request`, `cluster`, `confsvc`, `confsvc-internal`, `post-commit-scripts`.
+- Node-level `logging` overrides cluster-level entirely (not merged).
+- To replace Curity's log4j2 configuration wholesale, mount a `logging` config-type ConfigMap — see [Config Types](#config-types).
 
 ## Packages
 

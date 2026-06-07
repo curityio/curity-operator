@@ -116,7 +116,7 @@ spec:
   environmentVariables: []
 
   # Log-tailing sidecar configuration for this node.
-  # When `stdout` is true, sidecars tail files under `var/log` for each name in `logs` and write them to stdout.
+  # When `logs` is non-empty, sidecars tail files under `var/log` for each named stream and write them to stdout. An empty or omitted `logs` disables the sidecars.
   # +kubebuilder:validation:Optional
   logging:
     # Log level for the main Identity Server container (default `INFO`).
@@ -127,10 +127,7 @@ spec:
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:MaxLength=512
     image: busybox:latest
-    # When true, deploy sidecars that tail the log streams listed in `logs` to stdout.
-    # +kubebuilder:validation:Optional
-    stdout: false
-    # Names of extra log streams to tail when `stdout` is true (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts).
+    # Names of log streams to tail from `var/log` to stdout (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts). A non-empty list deploys one sidecar per stream; empty disables them.
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:MaxItems=32
     # +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts

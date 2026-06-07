@@ -21,7 +21,6 @@ spec:
     secure: true
   identityServerClusterRef:
     name: move-b
-  replicas: 1
 status:
   conditions:
     - type: Ready
@@ -78,7 +77,6 @@ spec:
     secure: true
   identityServerClusterRef:
     name: move-b
-  replicas: 1
   service:
     type: ClusterIP
     port: 6789

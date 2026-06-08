@@ -116,7 +116,7 @@ spec:
   environmentVariables: []
 
   # Log-tailing sidecar configuration for this node.
-  # When `stdout` is true, sidecars tail files under `var/log` for each name in `logs` and write them to stdout.
+  # When `logs` is non-empty, sidecars tail files under `var/log` for each named stream and write them to stdout. An empty or omitted `logs` disables the sidecars.
   # +kubebuilder:validation:Optional
   logging:
     # Log level for the main Identity Server container (default `INFO`).
@@ -127,10 +127,7 @@ spec:
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:MaxLength=512
     image: busybox:latest
-    # When true, deploy sidecars that tail the log streams listed in `logs` to stdout.
-    # +kubebuilder:validation:Optional
-    stdout: false
-    # Names of extra log streams to tail when `stdout` is true (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts).
+    # Names of log streams to tail from `var/log` to stdout (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts). A non-empty list deploys one sidecar per stream; empty disables them.
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:MaxItems=32
     # +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts
@@ -235,16 +232,24 @@ spec:
     # +kubebuilder:validation:MaxItems=100
     customMetrics: []
 
-  # Limits voluntary disruption of this node’s pods during drains and similar operations. Set `minAvailable` or `maxUnavailable`, not both.
+  # Limits voluntary disruption of this node’s pods during drains and similar operations. Set exactly one of `minAvailable` or `maxUnavailable`.
   # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:XValidation:rule="(has(self.minAvailable) ? 1 : 0) + (has(self.maxUnavailable) ? 1 : 0) == 1",message="exactly one of minAvailable or maxUnavailable must be set"
   podDisruptionBudget:
-    # Minimum pods that must stay available during a disruption (integer or percentage string). Use this or `maxUnavailable`, not both.
+    # Minimum pods that must stay available during a disruption (integer or percentage string). Mutually exclusive with `maxUnavailable`.
     # Must be non-negative.
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:XIntOrString
     # +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
     # +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="minAvailable must be non-negative"
     minAvailable: 1
+    # Maximum pods that may be unavailable during a disruption (integer or percentage string). Mutually exclusive with `minAvailable`.
+    # Must be non-negative.
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:XIntOrString
+    # +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
+    # +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="maxUnavailable must be non-negative"
+    # maxUnavailable: 1
   
   # Restrict this node’s pods to nodes with matching labels.
   # +kubebuilder:validation:Optional

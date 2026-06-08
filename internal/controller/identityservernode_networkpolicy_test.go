@@ -58,7 +58,22 @@ var _ = Describe("IdentityServerNode Reconciler / NetworkPolicy", func() {
 		Expect(np.OwnerReferences[0].Name).To(Equal(nodeName))
 		Expect(np.Spec.PolicyTypes).To(Equal([]networkingv1.PolicyType{networkingv1.PolicyTypeIngress}))
 		Expect(np.Spec.PodSelector.MatchLabels).To(HaveKeyWithValue("curity.io/owned-by", ownedName(clusterName, nodeName)))
-		Expect(np.Spec.Ingress).To(HaveLen(1), "UI off → only the runtime→admin clustering rule")
+		Expect(np.Spec.Ingress).To(HaveLen(2), "UI off → runtime→admin clustering rule + genclust→admin config rule")
+
+		// The genclust config Job must be an allowed ingress peer or an enforcing
+		// CNI denies cluster-config generation (initial, key rotation, drift, packages).
+		var genclustRule *networkingv1.NetworkPolicyIngressRule
+		for i := range np.Spec.Ingress {
+			r := &np.Spec.Ingress[i]
+			if len(r.From) == 1 && r.From[0].PodSelector != nil &&
+				r.From[0].PodSelector.MatchLabels["curity.io/component"] == "cluster-config" {
+				genclustRule = r
+			}
+		}
+		Expect(genclustRule).NotTo(BeNil(), "genclust (curity.io/component=cluster-config) must be an allowed peer")
+		Expect(genclustRule.From[0].PodSelector.MatchLabels).To(HaveKeyWithValue("curity.io/cluster", clusterName))
+		Expect(genclustRule.Ports).To(HaveLen(1), "genclust needs only the config port")
+		Expect(genclustRule.Ports[0].Port.IntValue()).To(Equal(6789), "config port")
 	})
 
 	It("does not create a NetworkPolicy for a runtime node", func() {
@@ -267,13 +282,15 @@ var _ = Describe("IdentityServerNode Reconciler / NetworkPolicy", func() {
 				&networkingv1.NetworkPolicy{}))
 		}, 2*time.Second, interval).Should(BeTrue())
 
-		// Flip runtime→admin (replicas=1 keeps it CEL-valid): the operator must now create the NP.
+		// Flip runtime→admin: the operator must now create the NP. Clear replicas —
+		// admin nodes reject it at admission.
 		Eventually(func() error {
 			var n v1alpha1.IdentityServerNode
 			if err := k8sClient.Get(ctx, types.NamespacedName{Name: nodeName, Namespace: ns}, &n); err != nil {
 				return err
 			}
 			n.Spec.Type = v1alpha1.NodeTypeAdmin
+			n.Spec.Replicas = nil
 			return k8sClient.Update(ctx, &n)
 		}, timeout, interval).Should(Succeed())
 		testSimulateClusterConfigReady(ns, clusterName)

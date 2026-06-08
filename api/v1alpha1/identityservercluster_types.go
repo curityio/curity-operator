@@ -23,9 +23,9 @@ type IdentityServerClusterSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	ImagePullSecret string `json:"imagePullSecret,omitempty"`
 
-	// AdminCredentials references a Secret containing ADMIN_PASSWORD,
-	// CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD. The operator creates
-	// the secret with random values if it does not exist.
+	// AdminCredentials references a Secret containing ADMIN_PASSWORD and
+	// CONFIG_ENCRYPTION_KEY. The operator creates the secret with random
+	// values if it does not exist.
 	AdminCredentials *CredentialsSource `json:"adminCredentials,omitempty"`
 
 	// Packages declares remote ZIP archives the operator downloads at
@@ -111,8 +111,9 @@ type IdentityServerClusterSpec struct {
 	// +kubebuilder:validation:Maximum=3600
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
-	// ImagePullPolicy overrides the pull policy of the main Curity container
-	// (default IfNotPresent).
+	// ImagePullPolicy overrides the pull policy of the main Curity container.
+	// When unset it defaults like Kubernetes: Always for a :latest or untagged
+	// image, otherwise IfNotPresent.
 	// +kubebuilder:validation:Enum=Always;Never;IfNotPresent
 	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 

@@ -102,7 +102,6 @@ var _ = Describe("cluster.xml regeneration", func() {
 				Data: map[string][]byte{
 					"ADMIN_PASSWORD":        []byte("e2e-password"),
 					"CONFIG_ENCRYPTION_KEY": []byte("initial-key-e2e"),
-					"KEYSTORE_PASSWORD":     []byte("e2e-keystore-pw"),
 				},
 			}
 			Expect(k().Create(ctx, creds)).To(Succeed())

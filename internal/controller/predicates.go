@@ -249,7 +249,9 @@ func (p packageInitContainerStatusChangedPredicate) Update(e event.UpdateEvent) 
 	if !ok {
 		return false
 	}
-	return packageInitContainerStatusDiffers(oldPod, newPod)
+	// Fire on a package-fetch status change (PackagesReady) OR any container
+	// failure-state transition (the Degraded pod-failure overlay).
+	return packageInitContainerStatusDiffers(oldPod, newPod) || containerFailureStateDiffers(oldPod, newPod)
 }
 
 // labelManagedBy and labelManagedByCurityOperator name the standard label

@@ -94,6 +94,23 @@ func e2eHasVolumeMount(deploy *appsv1.Deployment, name, mountPath string) bool {
 	return false
 }
 
+// e2eConfigVolumeMode returns the DefaultMode of a cfg-* volume (ConfigMap or
+// Secret), or nil if the volume is absent.
+func e2eConfigVolumeMode(deploy *appsv1.Deployment, volumeName string) *int32 {
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if v.Name != volumeName {
+			continue
+		}
+		if v.ConfigMap != nil {
+			return v.ConfigMap.DefaultMode
+		}
+		if v.Secret != nil {
+			return v.Secret.DefaultMode
+		}
+	}
+	return nil
+}
+
 var _ = Describe("IdentityServerNode", func() {
 
 	// =================================================================
@@ -464,7 +481,6 @@ var _ = Describe("IdentityServerNode", func() {
 					Spec: v1alpha1.IdentityServerNodeSpec{
 						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role-2",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "dup-cluster"},
-						Replicas:                 ptr.To(int32(1)),
 						Service:                  defaultTestService(),
 					},
 				}
@@ -831,10 +847,10 @@ var _ = Describe("IdentityServerNode", func() {
 				}
 				err := k().Create(ctx, node)
 				Expect(err).To(HaveOccurred(), "admin node with replicas=5 must be rejected by CEL")
-				Expect(err.Error()).To(ContainSubstring("replicas must be 1 for admin-type nodes"))
+				Expect(err.Error()).To(ContainSubstring("replicas cannot be set on admin-type nodes"))
 			})
 
-			It("should accept admin node with replicas = 1 (boundary)", func() {
+			It("should reject admin node with replicas = 1 via CEL", func() {
 				ctx := context.Background()
 				node := &v1alpha1.IdentityServerNode{
 					ObjectMeta: metav1.ObjectMeta{Name: "admin-1", Namespace: ns},
@@ -845,7 +861,9 @@ var _ = Describe("IdentityServerNode", func() {
 						Service:                  defaultTestService(),
 					},
 				}
-				Expect(k().Create(ctx, node)).To(Succeed())
+				err := k().Create(ctx, node)
+				Expect(err).To(HaveOccurred(), "admin must not set replicas at all — not even 1")
+				Expect(err.Error()).To(ContainSubstring("replicas cannot be set on admin-type nodes"))
 			})
 		})
 
@@ -919,7 +937,8 @@ var _ = Describe("IdentityServerNode", func() {
 
 				Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
 				Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
-				Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
+				Expect(secret.Data).NotTo(HaveKey("KEYSTORE_PASSWORD"))
+				Expect(secret.Data).To(HaveLen(2))
 				Expect(len(secret.Data["ADMIN_PASSWORD"])).To(BeNumerically(">", 0))
 				Expect(secret.OwnerReferences).To(BeEmpty())
 				Expect(secret.Labels["app.kubernetes.io/managed-by"]).To(Equal("curity-operator"))
@@ -942,7 +961,6 @@ var _ = Describe("IdentityServerNode", func() {
 					Data: map[string][]byte{
 						"ADMIN_PASSWORD":        []byte("my-known-password"),
 						"CONFIG_ENCRYPTION_KEY": []byte("my-known-key"),
-						"KEYSTORE_PASSWORD":     []byte("my-known-ks"),
 					},
 				}
 				Expect(k().Create(ctx, preExisting)).To(Succeed())
@@ -1020,7 +1038,8 @@ var _ = Describe("IdentityServerNode", func() {
 
 				Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
 				Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
-				Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
+				Expect(secret.Data).NotTo(HaveKey("KEYSTORE_PASSWORD"))
+				Expect(secret.Data).To(HaveLen(2))
 				Expect(len(secret.Data["ADMIN_PASSWORD"])).To(BeNumerically(">", 0))
 				Expect(secret.Labels["app.kubernetes.io/managed-by"]).To(Equal("curity-operator"))
 				Expect(secret.Labels["curity.io/cluster"]).To(Equal("default-creds"))
@@ -1055,13 +1074,9 @@ var _ = Describe("IdentityServerNode", func() {
 							e.ValueFrom.SecretKeyRef.Name == "default-creds-admin-creds"
 					}),
 				), "expected CONFIG_ENCRYPTION_KEY env var from default-creds-admin-creds")
-				Expect(envVars).To(ContainElement(
-					Satisfy(func(e corev1.EnvVar) bool {
-						return e.Name == "KEYSTORE_PASSWORD" && e.ValueFrom != nil &&
-							e.ValueFrom.SecretKeyRef != nil &&
-							e.ValueFrom.SecretKeyRef.Name == "default-creds-admin-creds"
-					}),
-				), "expected KEYSTORE_PASSWORD env var from default-creds-admin-creds")
+				Expect(envVars).NotTo(ContainElement(
+					Satisfy(func(e corev1.EnvVar) bool { return e.Name == "KEYSTORE_PASSWORD" }),
+				), "KEYSTORE_PASSWORD env var must no longer be projected")
 
 				utils.MatchYAMLResource(deploy, "[deployment] default-admin")
 
@@ -1090,9 +1105,8 @@ var _ = Describe("IdentityServerNode", func() {
 					Spec: v1alpha1.IdentityServerClusterSpec{
 						Version: "11.0",
 						Logging: &v1alpha1.LoggingSpec{
-							Level:  "DEBUG",
-							Stdout: true,
-							Logs:   []string{"audit", "request"},
+							Level: "DEBUG",
+							Logs:  []string{"audit", "request"},
 						},
 					},
 				}
@@ -1193,9 +1207,8 @@ var _ = Describe("IdentityServerNode", func() {
 					Spec: v1alpha1.IdentityServerClusterSpec{
 						Version: "11.0",
 						Logging: &v1alpha1.LoggingSpec{
-							Level:  "OFF",
-							Stdout: true,
-							Logs:   []string{"audit"},
+							Level: "OFF",
+							Logs:  []string{"audit"},
 						},
 					},
 				}
@@ -1557,6 +1570,126 @@ var _ = Describe("IdentityServerNode", func() {
 					}, e2eTimeout, e2eInterval).Should(Succeed())
 
 					utils.MatchYAMLResource(deploy, "[deployment] cfg-lic-admin")
+				})
+			})
+
+			Describe("Post-commit scripts — admin-only executable mount", Ordered, func() {
+				const ns = "e2e-cfg-pcs"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("mounts postCommitScript executable on the admin only, and records status", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "pcs-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin.yaml", ns,
+						map[string]interface{}{"name": "pcs-admin", "namespace": ns, "clusterName": "pcs-cluster"})
+					utils.SimulateClusterConfigReady(ns, "pcs-cluster", e2eTimeout, e2eInterval)
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "pcs-runtime", "namespace": ns, "clusterName": "pcs-cluster"})
+
+					adminDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pcs-cluster", "pcs-admin"), Namespace: ns}}
+					utils.WaitForResource(adminDeploy, e2eTimeout, e2eInterval)
+					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pcs-cluster", "pcs-runtime"), Namespace: ns}}
+					utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
+
+					By("creating a postCommitScript ConfigMap (0755) and Secret (0555)")
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "hooks-cm", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/config-type": "postCommitScript"},
+						},
+						Data: map[string]string{"notify.sh": "#!/bin/sh\necho hi\n"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+					secret := &corev1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "hooks-sec", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/config-type": "postCommitScript"},
+						},
+						Data: map[string][]byte{"rotate.sh": []byte("#!/bin/sh\necho rotate\n")},
+					}
+					Expect(k().Create(ctx, secret)).To(Succeed())
+
+					By("verifying the admin mounts both under the post-commit-scripts dir, executable")
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("pcs-cluster", "pcs-admin"), Namespace: ns}, adminDeploy)).To(Succeed())
+						g.Expect(e2eHasCfgVolume(adminDeploy, "cfg-cm-hooks-cm")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(adminDeploy, "cfg-cm-hooks-cm", "/opt/idsvr/usr/bin/post-commit-scripts/cm_hooks-cm_notify.sh")).To(BeTrue())
+						g.Expect(e2eHasVolumeMount(adminDeploy, "cfg-secret-hooks-sec", "/opt/idsvr/usr/bin/post-commit-scripts/secret_hooks-sec_rotate.sh")).To(BeTrue())
+						cmMode := e2eConfigVolumeMode(adminDeploy, "cfg-cm-hooks-cm")
+						g.Expect(cmMode).NotTo(BeNil())
+						g.Expect(*cmMode).To(Equal(int32(0o755)), "ConfigMap script must be 0755 (other-exec)")
+						secMode := e2eConfigVolumeMode(adminDeploy, "cfg-secret-hooks-sec")
+						g.Expect(secMode).NotTo(BeNil())
+						g.Expect(*secMode).To(Equal(int32(0o555)), "Secret script must be 0555 (other-exec)")
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("verifying the runtime gets NO script (strict admin-only)")
+					Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("pcs-cluster", "pcs-runtime"), Namespace: ns}, runtimeDeploy)).To(Succeed())
+					Expect(e2eCountCfgVolumes(runtimeDeploy)).To(Equal(0), "runtime must not receive post-commit scripts")
+
+					By("verifying the admin node status records both as postCommitScript")
+					adminNode := &v1alpha1.IdentityServerNode{}
+					Eventually(func(g Gomega) {
+						g.Expect(k().Get(ctx, client.ObjectKey{Name: "pcs-admin", Namespace: ns}, adminNode)).To(Succeed())
+						types := map[string]string{}
+						for _, r := range adminNode.Status.AppliedManagedResources {
+							types[r.Name] = r.ConfigType
+						}
+						g.Expect(types["hooks-cm"]).To(Equal("postCommitScript"))
+						g.Expect(types["hooks-sec"]).To(Equal("postCommitScript"))
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+				})
+			})
+
+			Describe("Post-commit script with no admin — cluster warning", Ordered, func() {
+				const ns = "e2e-cfg-pcs-noadmin"
+				BeforeAll(func() { createNS(ns) })
+				AfterAll(func() { deleteNS(ns) })
+
+				It("warns on the cluster and mounts nowhere when no admin exists", func() {
+					ctx := context.Background()
+
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+						map[string]interface{}{"name": "pcs-na-cluster", "namespace": ns})
+					utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+						map[string]interface{}{"name": "pcs-na-runtime", "namespace": ns, "clusterName": "pcs-na-cluster"})
+
+					runtimeDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("pcs-na-cluster", "pcs-na-runtime"), Namespace: ns}}
+					utils.WaitForResource(runtimeDeploy, e2eTimeout, e2eInterval)
+
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "orphan-hook", Namespace: ns,
+							Labels:      map[string]string{"curity.io/managed": "true"},
+							Annotations: map[string]string{"curity.io/config-type": "postCommitScript"},
+						},
+						Data: map[string]string{"boot.sh": "#!/bin/sh\n"},
+					}
+					Expect(k().Create(ctx, cm)).To(Succeed())
+
+					By("verifying a PostCommitScriptNoAdmin Warning fires on the IdentityServerCluster")
+					Eventually(func(g Gomega) {
+						events := &corev1.EventList{}
+						g.Expect(k().List(ctx, events, client.InNamespace(ns))).To(Succeed())
+						found := false
+						for _, e := range events.Items {
+							if e.Reason == "PostCommitScriptNoAdmin" &&
+								e.InvolvedObject.Kind == "IdentityServerCluster" &&
+								e.InvolvedObject.Name == "pcs-na-cluster" {
+								found = true
+							}
+						}
+						g.Expect(found).To(BeTrue(), "expected PostCommitScriptNoAdmin event on the cluster")
+					}, e2eTimeout, e2eInterval).Should(Succeed())
+
+					By("verifying the script mounts nowhere (strict admin-only, no admin)")
+					Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("pcs-na-cluster", "pcs-na-runtime"), Namespace: ns}, runtimeDeploy)).To(Succeed())
+					Expect(e2eCountCfgVolumes(runtimeDeploy)).To(Equal(0), "post-commit scripts must not mount on runtime even with no admin")
 				})
 			})
 
@@ -2451,7 +2584,6 @@ var _ = Describe("IdentityServerNode", func() {
 					Spec: v1alpha1.IdentityServerNodeSpec{
 						Type: v1alpha1.NodeTypeAdmin, Role: "my-admin-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "args-cluster"},
-						Replicas:                 ptr.To(int32(1)),
 						Service:                  defaultTestService(),
 					},
 				}
@@ -2853,7 +2985,6 @@ spec:
 					Spec: v1alpha1.IdentityServerNodeSpec{
 						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "hpa-adm-cluster"},
-						Replicas:                 ptr.To(int32(1)),
 						Service:                  defaultTestService(),
 						Autoscaling: &v1alpha1.AutoscalingSpec{
 							Enabled:                        true,
@@ -3610,7 +3741,6 @@ spec:
 					Spec: v1alpha1.IdentityServerNodeSpec{
 						Type: v1alpha1.NodeTypeAdmin, Role: "admin-role",
 						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "pdb-adm-cluster"},
-						Replicas:                 ptr.To(int32(1)),
 						Service:                  defaultTestService(),
 						PodDisruptionBudget:      &v1alpha1.PDBSpec{MinAvailable: &min},
 					},

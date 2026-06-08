@@ -406,6 +406,16 @@ func TestMountPathForConfigType_Logging(t *testing.T) {
 	}
 }
 
+func TestMountPathForConfigType_PostCommitScript(t *testing.T) {
+	got, isLeaf := mountPathForConfigType(ConfigTypePostCommitScript)
+	if got != MountPathPostCommitScript {
+		t.Errorf("expected %q, got %q", MountPathPostCommitScript, got)
+	}
+	if isLeaf {
+		t.Error("postCommitScript is a directory base (per-key mangled filenames), not a leaf")
+	}
+}
+
 func TestMountPathForConfigType_DefaultsToBase(t *testing.T) {
 	got, isLeaf := mountPathForConfigType("something-unknown")
 	if got != MountPathBase {
@@ -451,6 +461,26 @@ func TestShouldMountConfig_LoggingMountsOnRuntimeWithAdminExists(t *testing.T) {
 func TestShouldMountConfig_LoggingMountsOnAdminWithAdminExists(t *testing.T) {
 	if !shouldMountConfig(v1alpha1.NodeTypeAdmin, true, ConfigTypeLogging) {
 		t.Error("expected true: logging mounts on admin")
+	}
+}
+
+func TestShouldMountConfig_PostCommitScriptAdminWithAdminExists(t *testing.T) {
+	if !shouldMountConfig(v1alpha1.NodeTypeAdmin, true, ConfigTypePostCommitScript) {
+		t.Error("expected true: postCommitScript mounts on the admin")
+	}
+}
+
+func TestShouldMountConfig_PostCommitScriptRuntimeWithAdminExists(t *testing.T) {
+	if shouldMountConfig(v1alpha1.NodeTypeRuntime, true, ConfigTypePostCommitScript) {
+		t.Error("expected false: postCommitScript must not mount on runtime")
+	}
+}
+
+func TestShouldMountConfig_PostCommitScriptRuntimeNoAdminIsStrictlyAdminOnly(t *testing.T) {
+	// Unlike base/license, postCommitScript does NOT fall back to mounting on a
+	// standalone runtime-only cluster — it is strictly admin-only.
+	if shouldMountConfig(v1alpha1.NodeTypeRuntime, false, ConfigTypePostCommitScript) {
+		t.Error("expected false: postCommitScript is strictly admin-only, never on a standalone runtime")
 	}
 }
 
@@ -794,6 +824,20 @@ func TestDetectDuplicateKeys_SameKeyDifferentConfigType(t *testing.T) {
 	}
 }
 
+func TestDetectDuplicateKeys_PostCommitScriptExcluded(t *testing.T) {
+	// Two postCommitScript resources sharing a key mount at distinct prefixed
+	// paths and run independently (no merge), so this must NOT be flagged.
+	cmA := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "ns"}}
+	secB := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "ns"}}
+	configs := []DiscoveredManagedResource{
+		{Name: "a", ConfigType: ConfigTypePostCommitScript, Data: map[string][]byte{"run.sh": []byte("#!/bin/sh\n")}, Object: cmA},
+		{Name: "b", IsSecret: true, ConfigType: ConfigTypePostCommitScript, Data: map[string][]byte{"run.sh": []byte("#!/bin/sh\n")}, Object: secB},
+	}
+	if warnings := detectDuplicateKeys(configs); len(warnings) != 0 {
+		t.Errorf("expected no DuplicateConfigKey warnings for postCommitScript, got %v", warnings)
+	}
+}
+
 func TestDetectDuplicateKeys_SameKeySameType(t *testing.T) {
 	// Use real CM pointers so DiscoveredManagedResource.Object is populated;
 	// this exercises the full Object propagation chain into DuplicateKeyOwner
@@ -948,6 +992,25 @@ func TestResolveConfigType_Logging(t *testing.T) {
 	}
 	if got != ConfigTypeLogging {
 		t.Errorf("expected %q, got %q", ConfigTypeLogging, got)
+	}
+}
+
+func TestResolveConfigType_PostCommitScript(t *testing.T) {
+	got, err := resolveConfigType(map[string]string{AnnotationConfigType: "postCommitScript"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != ConfigTypePostCommitScript {
+		t.Errorf("expected %q, got %q", ConfigTypePostCommitScript, got)
+	}
+}
+
+func TestResolveConfigType_PostCommitScriptNearMissRejected(t *testing.T) {
+	// The value is camelCase; kebab/lower-case near-misses must be rejected.
+	for _, v := range []string{"post-commit-script", "postcommitscript", "PostCommitScript"} {
+		if _, err := resolveConfigType(map[string]string{AnnotationConfigType: v}); err == nil {
+			t.Errorf("expected error for near-miss %q, got nil", v)
+		}
 	}
 }
 

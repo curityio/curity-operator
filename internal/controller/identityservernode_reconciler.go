@@ -145,8 +145,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if controllerutil.ContainsFinalizer(&node, v1alpha1.NodeFinalizer) {
 			log.Info("deleting IdentityServerNode", "name", node.Name)
 			r.Recorder.Event(&node, corev1.EventTypeNormal, "Deleting", "Node is being deleted")
+			original := node.DeepCopy()
 			controllerutil.RemoveFinalizer(&node, v1alpha1.NodeFinalizer)
-			if err := r.Update(ctx, &node); err != nil {
+			if err := r.Patch(ctx, &node, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
 				if apierrors.IsConflict(err) {
 					return ctrl.Result{Requeue: true}, nil
 				}
@@ -158,6 +159,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 3. Ensure finalizer and cluster label are set (combined to reduce API round trips)
 	clusterRef := node.Spec.IdentityServerClusterRef
+	original := node.DeepCopy()
 	needsUpdate := false
 	if !controllerutil.ContainsFinalizer(&node, v1alpha1.NodeFinalizer) {
 		controllerutil.AddFinalizer(&node, v1alpha1.NodeFinalizer)
@@ -171,7 +173,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		needsUpdate = true
 	}
 	if needsUpdate {
-		if err := r.Update(ctx, &node); err != nil {
+		// Patch, not Update: a full Update round-trips spec and omitempty would drop
+		// an explicit empty list (e.g. initContainers: []). Lock guards finalizers.
+		if err := r.Patch(ctx, &node, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) {
 				return ctrl.Result{Requeue: true}, nil
 			}
@@ -218,8 +222,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Provides cascade-delete safety under Foreground propagation; the
 	// cluster-side finalizer is what actually blocks cluster deletion
 	// until all child nodes are gone.
+	ownerRefOriginal := node.DeepCopy()
 	if changed := ensureClusterOwnerRef(&node, &cluster); changed {
-		if err := r.Update(ctx, &node); err != nil {
+		if err := r.Patch(ctx, &node, client.MergeFromWithOptions(ownerRefOriginal, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) {
 				return ctrl.Result{Requeue: true}, nil
 			}
@@ -426,17 +431,48 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 		// Warn once per spec edit when user podLabels collide with
 		// operator-owned keys; runtime drops the user values silently.
-		if overridden := userPodLabelsOverridden(&cluster, &node); len(overridden) > 0 {
+		if overridden := userPodLabelsOverridden(&cluster, &node); len(overridden) > 0 &&
+			node.Status.ObservedGeneration < node.Generation {
 			log.Info("ignoring operator-owned keys in user podLabels",
 				"node", node.Name, "keys", overridden)
-			if node.Status.ObservedGeneration < node.Generation {
-				r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PodLabelsIgnored",
-					"podLabels keys %v are operator-owned; pods use operator values",
-					overridden)
-			}
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PodLabelsIgnored",
+				"podLabels keys %v are operator-owned; pods use operator values",
+				overridden)
 		}
 
 		desiredDeploy := buildDeployment(&cluster, &node, applicableConfigs, fetcherImage)
+
+		// Pre-flight: a user container whose name collides with an operator-
+		// generated one (log sidecar, package fetcher, the main container) would
+		// be rejected by the apiserver with a bare "Duplicate value". Surface the
+		// source here so the message is self-explanatory, and skip the doomed write.
+		if msg, conflict := detectContainerNameConflict(desiredDeploy, &cluster, &node); conflict {
+			degChanged := apimeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionDegraded,
+				Status:             metav1.ConditionTrue,
+				Reason:             v1alpha1.ReasonInvalidSpec,
+				Message:            msg,
+				ObservedGeneration: node.Generation,
+			})
+			apimeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             v1alpha1.ReasonInvalidSpec,
+				Message:            "Deployment is invalid; see Degraded condition",
+				ObservedGeneration: node.Generation,
+			})
+			node.Status.ObservedGeneration = node.Generation
+			if statusErr := r.Status().Update(ctx, &node); statusErr != nil {
+				if apierrors.IsConflict(statusErr) {
+					return ctrl.Result{Requeue: true}, nil
+				}
+				return ctrl.Result{}, fmt.Errorf("updating status after container-name conflict: %w", statusErr)
+			}
+			if degChanged {
+				r.Recorder.Eventf(&node, corev1.EventTypeWarning, v1alpha1.ReasonInvalidSpec, "%s", msg)
+			}
+			return ctrl.Result{}, nil
+		}
 
 		// Inject cluster config hash annotation for rolling restart when Secret changes.
 		// Only inject when config is ready or no admin exists — avoids hashing
@@ -751,14 +787,15 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	// 8. Reconcile PodDisruptionBudget (runtime nodes only, when minAvailable is set).
+	// 8. Reconcile PodDisruptionBudget (runtime nodes only). CEL guarantees
+	// exactly one of minAvailable/maxUnavailable is set when the spec is present.
 	pdbSpec := resolvePDB(&cluster, &node)
-	pdbRequested := pdbSpec != nil && pdbSpec.MinAvailable != nil
+	pdbRequested := pdbSpec != nil && (pdbSpec.MinAvailable != nil || pdbSpec.MaxUnavailable != nil)
 
 	// Admin guard: log + event whenever PDB is requested on an admin node, regardless
 	// of whether a stale PDB exists. K8s Event server-side dedup absorbs repeats.
 	if isAdmin && pdbRequested {
-		log.Info("ignoring PDB spec on admin node", "node", node.Name, "minAvailable", pdbSpec.MinAvailable)
+		log.Info("ignoring PDB spec on admin node", "node", node.Name)
 		r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PDBIgnored",
 			"PodDisruptionBudget spec is set but ignored: PDB is not supported on admin nodes")
 	}
@@ -956,6 +993,29 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			"NetworkPolicyNotOwned",
 			fmt.Sprintf("A NetworkPolicy named %q exists but is not owned by this node", npCollisionName),
 			node.Generation)
+	}
+
+	// Pod-failure overlay: surface a stuck rollout's cause (bad image, crashloop,
+	// config error) that computeNodeConditions hides behind Ready=True off the old
+	// pod. Skipped when a collision overlay already set Degraded — those are more
+	// actionable, don't clobber them.
+	collisionActive := hpaCollisionName != "" || len(hpaMissingRequestResources) > 0 ||
+		pdbCollisionName != "" || npCollisionName != ""
+	if !collisionActive {
+		if pods, listErr := r.listOwnedPods(ctx, cluster.Name, node.Name, node.Namespace); listErr != nil {
+			log.Error(listErr, "failed to list pods for pod-failure overlay")
+		} else if pf := translatePodFailure(pods); pf.failing {
+			changed := apimeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionDegraded,
+				Status:             metav1.ConditionTrue,
+				Reason:             "PodUnhealthy",
+				Message:            pf.message,
+				ObservedGeneration: node.Generation,
+			})
+			if changed {
+				r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PodUnhealthy", "%s", pf.message)
+			}
+		}
 	}
 
 	// PackagesReady overlay (translator leg). When packages are configured,

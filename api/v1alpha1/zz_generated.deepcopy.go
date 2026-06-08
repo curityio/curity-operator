@@ -360,6 +360,11 @@ func (in *IdentityServerNodeSpec) DeepCopyInto(out *IdentityServerNodeSpec) {
 		*out = new(UISpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.SkipInstall != nil {
+		in, out := &in.SkipInstall, &out.SkipInstall
+		*out = new(bool)
+		**out = **in
+	}
 	out.IdentityServerClusterRef = in.IdentityServerClusterRef
 	if in.Replicas != nil {
 		in, out := &in.Replicas, &out.Replicas
@@ -597,6 +602,11 @@ func (in *PDBSpec) DeepCopyInto(out *PDBSpec) {
 	*out = *in
 	if in.MinAvailable != nil {
 		in, out := &in.MinAvailable, &out.MinAvailable
+		*out = new(intstr.IntOrString)
+		**out = **in
+	}
+	if in.MaxUnavailable != nil {
+		in, out := &in.MaxUnavailable, &out.MaxUnavailable
 		*out = new(intstr.IntOrString)
 		**out = **in
 	}

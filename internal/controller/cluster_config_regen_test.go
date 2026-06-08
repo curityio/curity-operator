@@ -194,7 +194,6 @@ var _ = Describe("IdentityServerCluster cluster.xml regeneration", func() {
 			Data: map[string][]byte{
 				"ADMIN_PASSWORD":        []byte("password"),
 				"CONFIG_ENCRYPTION_KEY": []byte("initial-key"),
-				"KEYSTORE_PASSWORD":     []byte("keystore-pw"),
 			},
 		}
 		Expect(k8sClient.Create(ctx, credSecret)).To(Succeed())
@@ -210,7 +209,6 @@ var _ = Describe("IdentityServerCluster cluster.xml regeneration", func() {
 							Items: []v1alpha1.KeyToPath{
 								{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 								{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-								{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 							},
 						},
 					},
@@ -551,6 +549,54 @@ var _ = Describe("IdentityServerCluster cluster.xml regeneration", func() {
 		readyCond := apimeta.FindStatusCondition(c.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
 		Expect(readyCond).NotTo(BeNil())
 		Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
+	})
+
+	It("recreates an in-flight (placeholder) Job when the encryption key changes", func() {
+		// Exercises the key-hash drift arm in the in-flight/placeholder state
+		// (NOT Branch A, which needs ClusterConfigReady).
+		sum := func(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+		credSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "kd-creds", Namespace: ns},
+			Data:       map[string][]byte{"ADMIN_PASSWORD": []byte("pw"), "CONFIG_ENCRYPTION_KEY": []byte("key-A")},
+		}
+		Expect(k8sClient.Create(ctx, credSecret)).To(Succeed())
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "kd-cluster", Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version: "11.0",
+				AdminCredentials: &v1alpha1.CredentialsSource{ValueFrom: v1alpha1.CredentialsValueFrom{SecretKeyRef: v1alpha1.SecretKeyRefSource{
+					Name:  "kd-creds",
+					Items: []v1alpha1.KeyToPath{{Key: "ADMIN_PASSWORD", Path: "PASSWORD"}, {Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"}},
+				}}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+		testCreateNode(ns, "kd-admin", v1alpha1.NodeTypeAdmin, "kd-cluster")
+		// Deliberately NOT simulating ClusterConfigReady — the Job stays in-flight.
+
+		jobKey := types.NamespacedName{Name: "kd-cluster-cluster-config-job", Namespace: ns}
+		var uidA types.UID
+		Eventually(func() string {
+			j := &batchv1.Job{}
+			if err := k8sClient.Get(ctx, jobKey, j); err != nil {
+				return ""
+			}
+			uidA = j.UID
+			return j.Annotations["curity.io/encryption-key-hash"]
+		}, timeout, interval).Should(Equal(sum("key-A")), "placeholder Job must be stamped with the key-A hash")
+
+		// Fix the key — the Secret-watch + key-hash drift arm must replace the Job.
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "kd-creds", Namespace: ns}, credSecret)).To(Succeed())
+		credSecret.Data["CONFIG_ENCRYPTION_KEY"] = []byte("key-B")
+		Expect(k8sClient.Update(ctx, credSecret)).To(Succeed())
+
+		Eventually(func() bool {
+			j := &batchv1.Job{}
+			if err := k8sClient.Get(ctx, jobKey, j); err != nil {
+				return false // briefly absent during delete/recreate
+			}
+			return j.UID != uidA && j.Annotations["curity.io/encryption-key-hash"] == sum("key-B")
+		}, timeout, interval).Should(BeTrue(), "Job must be recreated with the key-B hash after the key changes")
 	})
 
 	// Empty-output retry — exercises the EmptyClusterConfig branch when

@@ -56,7 +56,6 @@ var _ = Describe("IdentityServerCluster pod-admission visibility", func() {
 				Type:                     v1alpha1.NodeTypeAdmin,
 				Role:                     "admin-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
-				Replicas:                 ptrTo(int32(1)),
 				Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 6789},
 			},
 		}
@@ -121,8 +120,4 @@ func makeClusterConfigPod(ns, clusterName, podName string) *corev1.Pod {
 			}},
 		},
 	}
-}
-
-func ptrTo[T any](v T) *T {
-	return &v
 }

@@ -126,8 +126,8 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 	logging := resolveLogging(cluster, node)
 	effectiveLevel := resolveLoggingLevel(cluster, node)
 
-	// Add log volume mount to main container if stdout logging enabled and level is not OFF
-	if logging != nil && logging.Stdout && effectiveLevel != "OFF" {
+	// Shared log volume, mounted only when sidecars will tail it.
+	if logging != nil && len(logging.Logs) > 0 && effectiveLevel != "OFF" {
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 			Name:      "log-volume",
 			MountPath: "/opt/idsvr/var/log/",
@@ -307,9 +307,13 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		{Name: "LOGGING_LEVEL", Value: resolveLoggingLevel(cluster, node)},
 	}
 
+	isAdmin := node.Spec.Type == v1alpha1.NodeTypeAdmin
+	// skipInstall is admin-only; guard the type for in-process paths that bypass CEL.
+	skipInstall := isAdmin && node.Spec.SkipInstall != nil && *node.Spec.SkipInstall
+
 	// Admin UI HTTP mode. nil Secure falls through to the secure-HTTPS default
 	// (a guard for in-process construction paths that bypass admission).
-	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
+	if isAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
 		httpMode := "false"
 		if node.Spec.UI.Secure != nil && !*node.Spec.UI.Secure {
 			httpMode = "true"
@@ -317,10 +321,14 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		envVars = append(envVars, corev1.EnvVar{Name: "ADMIN_UI_HTTP_MODE", Value: httpMode})
 	}
 
-	// Admin credentials as env vars from secret
+	// Admin credentials as env vars. The admin password is the installer
+	// trigger, so it goes only on the admin node.
 	if cluster.Spec.AdminCredentials != nil {
 		secretName := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
 		for _, item := range cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Items {
+			if item.Key == "ADMIN_PASSWORD" && !isAdmin {
+				continue
+			}
 			envVars = append(envVars, corev1.EnvVar{
 				Name: item.Path,
 				ValueFrom: &corev1.EnvVarSource{
@@ -333,10 +341,14 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 		}
 	}
 
+	if skipInstall {
+		envVars = append(envVars, corev1.EnvVar{Name: "SKIP_INSTALL", Value: "1"})
+	}
+
 	// Auto-inject PASSWORD for Curity's unattended installer when admin UI is enabled.
 	// The installer checks for PASSWORD (not ADMIN_PASSWORD) to trigger first-run setup
 	// which configures the admin-service XML and starts the UI on port 6749.
-	if node.Spec.Type == v1alpha1.NodeTypeAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
+	if isAdmin && node.Spec.UI != nil && node.Spec.UI.Enabled {
 		if cluster.Spec.AdminCredentials != nil {
 			hasPassword := false
 			for _, item := range cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Items {
@@ -420,7 +432,7 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 				VolumeSource: corev1.VolumeSource{
 					Secret: &corev1.SecretVolumeSource{
 						SecretName:  cfg.Name,
-						DefaultMode: ptr.To(corev1.SecretVolumeSourceDefaultMode),
+						DefaultMode: volumeDefaultMode(cfg.ConfigType, true),
 					},
 				},
 			})
@@ -430,7 +442,7 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{Name: cfg.Name},
-						DefaultMode:          ptr.To(corev1.ConfigMapVolumeSourceDefaultMode),
+						DefaultMode:          volumeDefaultMode(cfg.ConfigType, false),
 					},
 				},
 			})
@@ -457,6 +469,21 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 	}
 
 	return volumes, mounts
+}
+
+// volumeDefaultMode: postCommitScript files must be executable regardless of
+// fsGroup, so use an other-exec mode (0755 ConfigMap, 0555 Secret); others keep 0644.
+func volumeDefaultMode(configType string, isSecret bool) *int32 {
+	if configType == ConfigTypePostCommitScript {
+		if isSecret {
+			return ptr.To(int32(0o555))
+		}
+		return ptr.To(int32(0o755))
+	}
+	if isSecret {
+		return ptr.To(corev1.SecretVolumeSourceDefaultMode)
+	}
+	return ptr.To(corev1.ConfigMapVolumeSourceDefaultMode)
 }
 
 // buildLabels returns the standard Kubernetes labels for the resource.
@@ -578,7 +605,7 @@ func resolveNodeSelector(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1
 
 // resolveTolerations returns the effective tolerations, preferring node over cluster entirely.
 func resolveTolerations(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []corev1.Toleration {
-	if len(node.Spec.Tolerations) > 0 {
+	if node.Spec.Tolerations != nil {
 		return node.Spec.Tolerations
 	}
 	return cluster.Spec.Tolerations
@@ -633,21 +660,24 @@ func resolveAffinity(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 // resolveTopologySpreadConstraints returns the effective topology spread constraints,
 // preferring node over cluster entirely.
 func resolveTopologySpreadConstraints(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []corev1.TopologySpreadConstraint {
-	if len(node.Spec.TopologySpreadConstraints) > 0 {
+	if node.Spec.TopologySpreadConstraints != nil {
 		return node.Spec.TopologySpreadConstraints
 	}
 	return cluster.Spec.TopologySpreadConstraints
 }
 
+// A non-nil node list (including an explicit []) overrides the cluster; only a
+// nil (absent) node list inherits. This lets a node set [] to clear an inherited
+// list — the apiserver preserves the empty array, so nil and [] are distinct.
 func resolveInitContainers(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []corev1.Container {
-	if len(node.Spec.InitContainers) > 0 {
+	if node.Spec.InitContainers != nil {
 		return node.Spec.InitContainers
 	}
 	return cluster.Spec.InitContainers
 }
 
 func resolveExtraContainers(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []corev1.Container {
-	if len(node.Spec.ExtraContainers) > 0 {
+	if node.Spec.ExtraContainers != nil {
 		return node.Spec.ExtraContainers
 	}
 	return cluster.Spec.ExtraContainers
@@ -685,7 +715,9 @@ func resolveImagePullPolicy(cluster *v1alpha1.IdentityServerCluster, node *v1alp
 	if cluster.Spec.ImagePullPolicy != "" {
 		return cluster.Spec.ImagePullPolicy
 	}
-	return corev1.PullIfNotPresent
+	// Tag-aware default, matching the apiserver and the user-container default
+	// (defaultPullPolicy): :latest/untagged → Always, else IfNotPresent.
+	return defaultPullPolicy(buildImage(cluster))
 }
 
 // buildInitContainers appends the user's init containers after the operator's
@@ -814,7 +846,7 @@ const defaultLogImage = "busybox:latest"
 // buildLogSidecars creates sidecar containers that tail Curity log files to stdout.
 // One sidecar per log type (e.g., audit, request, cluster).
 func buildLogSidecars(logging *v1alpha1.LoggingSpec) []corev1.Container {
-	if logging == nil || !logging.Stdout || len(logging.Logs) == 0 {
+	if logging == nil || len(logging.Logs) == 0 {
 		return nil
 	}
 
@@ -1012,30 +1044,36 @@ func buildHPA(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentitySe
 }
 
 // buildPDB constructs the desired PodDisruptionBudget for a runtime node.
-// Caller must verify that resolvePDB(cluster, node) is non-nil and its
-// MinAvailable field is non-nil before invoking this function.
+// Caller must verify that resolvePDB(cluster, node) is non-nil with one of
+// MinAvailable/MaxUnavailable set before invoking this function.
 func buildPDB(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *policyv1.PodDisruptionBudget {
 	pdb := resolvePDB(cluster, node)
+	// CEL guarantees exactly one of minAvailable/maxUnavailable; a PDB must carry
+	// exactly one, so set whichever the user provided.
+	spec := policyv1.PodDisruptionBudgetSpec{
+		Selector: &metav1.LabelSelector{
+			MatchLabels: buildSelectorLabels(cluster, node),
+		},
+	}
+	if pdb.MaxUnavailable != nil {
+		spec.MaxUnavailable = pdb.MaxUnavailable
+	} else {
+		spec.MinAvailable = pdb.MinAvailable
+	}
 	return &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      OwnedResourceName(cluster.Name, node.Name),
 			Namespace: node.Namespace,
 			Labels:    buildLabels(cluster, node),
 		},
-		Spec: policyv1.PodDisruptionBudgetSpec{
-			MinAvailable: pdb.MinAvailable,
-			Selector: &metav1.LabelSelector{
-				MatchLabels: buildSelectorLabels(cluster, node),
-			},
-		},
+		Spec: spec,
 	}
 }
 
-// buildNetworkPolicy constructs the admin-protecting NetworkPolicy: ingress to
-// the admin pods is allowed only from same-cluster runtime pods (config + ds
-// ports), plus optionally from an API-gateway namespace to the admin-UI port.
-// policyTypes and port protocol are set explicitly (apiserver-defaulted → drift).
-// Caller must verify node is admin-type and cluster.Spec.NetworkPolicy is non-nil.
+// buildNetworkPolicy builds the admin-protecting NetworkPolicy: admin ingress is
+// allowed only from same-cluster runtime + genclust pods (plus an optional
+// API-gateway namespace to the UI port). Caller verifies node is admin-type and
+// cluster.Spec.NetworkPolicy is non-nil.
 func buildNetworkPolicy(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) *networkingv1.NetworkPolicy {
 	tcp := corev1.ProtocolTCP
 	ingress := []networkingv1.NetworkPolicyIngressRule{
@@ -1049,6 +1087,19 @@ func buildNetworkPolicy(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.
 			Ports: []networkingv1.NetworkPolicyPort{
 				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(portConfig))},
 				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(portDistributedService))},
+			},
+		},
+		{
+			// The genclust config Job dials admin on portConfig; without this peer an
+			// enforcing CNI denies it and cluster-config generation never completes.
+			From: []networkingv1.NetworkPolicyPeer{{
+				PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+					"curity.io/cluster":   cluster.Name,
+					"curity.io/component": "cluster-config",
+				}},
+			}},
+			Ports: []networkingv1.NetworkPolicyPort{
+				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(portConfig))},
 			},
 		},
 	}
@@ -1078,4 +1129,43 @@ func buildNetworkPolicy(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.
 			Ingress:     ingress,
 		},
 	}
+}
+
+// detectContainerNameConflict scans the built pod's containers (init + regular
+// share one name namespace) for a duplicate, returning a message that names the
+// operator-generated source — the apiserver's bare "Duplicate value" would not.
+func detectContainerNameConflict(deploy *appsv1.Deployment, cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) (string, bool) {
+	spec := deploy.Spec.Template.Spec
+	seen := map[string]bool{}
+	all := make([]corev1.Container, 0, len(spec.InitContainers)+len(spec.Containers))
+	all = append(all, spec.InitContainers...)
+	all = append(all, spec.Containers...)
+	for i := range all {
+		n := all[i].Name
+		if seen[n] {
+			return fmt.Sprintf("container name %q is used more than once; it collides with %s — rename the conflicting initContainers/extraContainers entry",
+				n, containerSourceHint(n, cluster, node)), true
+		}
+		seen[n] = true
+	}
+	return "", false
+}
+
+// containerSourceHint describes which operator-generated container owns a name,
+// for the conflict message.
+func containerSourceHint(name string, cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) string {
+	switch {
+	case name == containerName:
+		return "the main Curity container"
+	case strings.HasPrefix(name, packageFetchContainerNamePrefix):
+		return "an operator package-fetcher init container (spec.packages)"
+	}
+	if logging := resolveLogging(cluster, node); logging != nil {
+		for _, l := range logging.Logs {
+			if l == name {
+				return fmt.Sprintf("the log sidecar generated for spec.logging.logs entry %q", name)
+			}
+		}
+	}
+	return "another container in this node's spec"
 }

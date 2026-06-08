@@ -35,7 +35,7 @@ var _ = Describe("IdentityServerNode customization + NetworkPolicy", Label("smok
 			})
 
 		// Admin node with UI enabled — triggers the cluster-scoped NetworkPolicy
-		// (admin-only) with both ingress rules.
+		// (admin-only).
 		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin-ui.yaml", ns,
 			map[string]interface{}{
 				"name":        adminName,
@@ -56,7 +56,7 @@ var _ = Describe("IdentityServerNode customization + NetworkPolicy", Label("smok
 		utils.WaitForResource(np, e2eTimeout, e2eInterval)
 		Expect(np.Spec.PolicyTypes).To(Equal([]networkingv1.PolicyType{networkingv1.PolicyTypeIngress}))
 		Expect(np.Spec.PodSelector.MatchLabels).To(HaveKeyWithValue("curity.io/owned-by", ownedName(clusterName, adminName)))
-		Expect(np.Spec.Ingress).To(HaveLen(2), "runtime→admin clustering rule + gateway→admin-UI rule")
+		Expect(np.Spec.Ingress).To(HaveLen(3), "runtime→admin + genclust→admin-config + gateway→admin-UI rules")
 		utils.MatchYAMLResource(np, "admin-networkpolicy")
 
 		// Runtime node exercising every pod-customization field.

@@ -43,6 +43,17 @@ spec:
         - protocol: TCP
           port:
             type: 0
+            intval: 6789
+            strval: ""
+      from:
+        - podSelector:
+            matchLabels:
+              curity.io/cluster: custom-cluster
+              curity.io/component: cluster-config
+    - ports:
+        - protocol: TCP
+          port:
+            type: 0
             intval: 6749
             strval: ""
       from:

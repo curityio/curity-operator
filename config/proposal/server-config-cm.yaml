@@ -11,7 +11,7 @@ metadata:
   labels:
     curity.io/managed: "true"
   annotations:
-    curity.io/config-type: "basic"
+    curity.io/config-type: "base"
 data:
   base-config.xml: |
     <?xml version="1.0" encoding="UTF-8"?>

@@ -1,12 +1,18 @@
 package e2e
 
 import (
+	"context"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/curityio/curity-operator/api/v1alpha1"
 	"github.com/curityio/curity-operator/test/utils"
@@ -102,6 +108,91 @@ var _ = Describe("IdentityServerNode customization + NetworkPolicy", Label("smok
 		runtimeNode := &v1alpha1.IdentityServerNode{ObjectMeta: metav1.ObjectMeta{Name: runtimeName, Namespace: ns}}
 		utils.WaitForConditions(runtimeNode, e2eTimeout, e2eInterval)
 		utils.MatchCRDResource(runtimeNode, "runtime-node post-deployment")
+	})
+})
+
+var _ = Describe("IdentityServerNode customization — inheritance, PDB, and guards", Label("smoke"), Ordered, func() {
+	const ns = "e2e-customization-edge"
+
+	BeforeAll(func() { createNS(ns) })
+	AfterAll(func() { deleteNS(ns) })
+
+	It("clears inherited cluster initContainers/tolerations when the node sets empty lists", func() {
+		const clusterName, nodeName = "clr-cluster", "clr-node"
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-inheritance.yaml", ns,
+			map[string]interface{}{"name": clusterName, "namespace": ns})
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime-clearlists.yaml", ns,
+			map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName(clusterName, nodeName), Namespace: ns}}
+		utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+
+		// Empty lists clear the inherited cluster values; the operator's metadata
+		// patch must not let omitempty drop the explicit [] (the bug this guards).
+		Expect(containerNames(deploy.Spec.Template.Spec.InitContainers)).NotTo(ContainElement("cluster-init"))
+		for _, t := range deploy.Spec.Template.Spec.Tolerations {
+			Expect(t.Key).NotTo(Equal("dedicated"))
+		}
+
+		node := &v1alpha1.IdentityServerNode{ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: ns}}
+		utils.WaitForResource(node, e2eTimeout, e2eInterval)
+		Expect(node.Spec.InitContainers).NotTo(BeNil(), "explicit [] must survive the operator write")
+		Expect(node.Spec.InitContainers).To(BeEmpty())
+	})
+
+	It("inherits cluster initContainers/tolerations when the node does not override", func() {
+		const clusterName, nodeName = "inh-cluster", "inh-node"
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster-inheritance.yaml", ns,
+			map[string]interface{}{"name": clusterName, "namespace": ns})
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+			map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName(clusterName, nodeName), Namespace: ns}}
+		utils.WaitForResource(deploy, e2eTimeout, e2eInterval)
+		Expect(containerNames(deploy.Spec.Template.Spec.InitContainers)).To(ContainElement("cluster-init"))
+		var tolKeys []string
+		for _, t := range deploy.Spec.Template.Spec.Tolerations {
+			tolKeys = append(tolKeys, t.Key)
+		}
+		Expect(tolKeys).To(ContainElement("dedicated"))
+	})
+
+	It("creates a PodDisruptionBudget with maxUnavailable", func() {
+		const clusterName, nodeName = "pdb-cluster", "pdb-node"
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+			map[string]interface{}{"name": clusterName, "namespace": ns})
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime-pdb-max.yaml", ns,
+			map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+		pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: ownedName(clusterName, nodeName), Namespace: ns}}
+		utils.WaitForResource(pdb, e2eTimeout, e2eInterval)
+		Expect(pdb.Spec.MaxUnavailable).NotTo(BeNil())
+		Expect(pdb.Spec.MaxUnavailable.IntValue()).To(Equal(1))
+		Expect(pdb.Spec.MinAvailable).To(BeNil(), "maxUnavailable PDB must not also set minAvailable")
+	})
+
+	It("sets Degraded=InvalidSpec and skips the Deployment on a container-name conflict", func() {
+		ctx := context.Background()
+		const clusterName, nodeName = "conf-cluster", "conf-node"
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+			map[string]interface{}{"name": clusterName, "namespace": ns})
+		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime-nameconflict.yaml", ns,
+			map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+		// A user container colliding with the generated "request" log sidecar is
+		// surfaced as InvalidSpec, and the doomed Deployment is never written.
+		Eventually(func(g Gomega) {
+			node := &v1alpha1.IdentityServerNode{}
+			g.Expect(k().Get(ctx, client.ObjectKey{Name: nodeName, Namespace: ns}, node)).To(Succeed())
+			deg := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionDegraded)
+			g.Expect(deg).NotTo(BeNil(), "Degraded condition not set yet")
+			g.Expect(deg.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(deg.Reason).To(Equal(v1alpha1.ReasonInvalidSpec))
+			g.Expect(deg.Message).To(ContainSubstring("request"))
+		}, e2eTimeout, e2eInterval).Should(Succeed())
+
+		err := k().Get(ctx, client.ObjectKey{Name: ownedName(clusterName, nodeName), Namespace: ns}, &appsv1.Deployment{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "conflicting Deployment must not be created")
 	})
 })
 

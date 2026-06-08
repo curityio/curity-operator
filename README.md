@@ -168,8 +168,15 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `logging` | object | Log level, log streams to tail, sidecar config |
 | `resources` | object | Default CPU/memory requests/limits |
 | `probes` | object | Default liveness/readiness probe config |
+| `imagePullPolicy` | enum: `Always`/`Never`/`IfNotPresent` | Pull policy for the main Curity container. Unset → tag-aware default (`Always` for `:latest`/untagged, else `IfNotPresent`) |
+| `terminationGracePeriodSeconds` | int64 (0–3600) | Pod shutdown grace period (default `30`); raise (60–180) for Curity's JVM drain |
+| `securityContext` | object | Pod-level security context; **merged** over the operator's required defaults (`runAsUser 10001`, `runAsGroup`/`fsGroup 10000`) so omitting a field never strips the required UID/GID |
+| `containerSecurityContext` | object | Security context for the main Curity container (privilege, capabilities, etc.) |
+| `initContainers` | list | User init containers, **appended** (never override operator-managed containers); name `curity` reserved; max 16 |
+| `extraContainers` | list | User sidecar containers, **appended** (never override operator-managed containers); same naming rules as `initContainers`; max 16 |
+| `networkPolicy` | object | Operator-managed NetworkPolicy protecting the cluster's admin node (cluster-scoped, opt-in by presence). See note below |
 | `autoscaling` | object | HPA defaults (minReplicas, maxReplicas, targetCPU) |
-| `podDisruptionBudget` | object | PodDisruptionBudget default. `minAvailable` accepts integer (`2`) or percentage (`"50%"`). Runtime nodes only; ignored on admin nodes with a Warning event |
+| `podDisruptionBudget` | object | PodDisruptionBudget default. Set **exactly one** of `minAvailable`/`maxUnavailable`, each an integer (`2`) or percentage (`"50%"`). Runtime nodes only; ignored on admin nodes with a Warning event |
 | `podAnnotations` | map | Applied to all managed pods |
 | `podLabels` | map | Applied to all managed pods |
 | `nodeSelector` | map | Pod scheduling constraints |
@@ -193,14 +200,38 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `resources` | object | Overrides cluster-level resources |
 | `probes` | object | Overrides cluster-level probes |
 | `logging` | object | Overrides cluster-level logging |
+| `imagePullPolicy` | enum: `Always`/`Never`/`IfNotPresent` | Pull policy for the main Curity container; overrides cluster. Unset → tag-aware default (`Always` for `:latest`/untagged, else `IfNotPresent`) |
+| `terminationGracePeriodSeconds` | int64 (0–3600) | Pod shutdown grace period (default `30`); overrides cluster |
+| `securityContext` | object | Pod-level security context; merged over operator defaults (UID/GID preserved); overrides cluster |
+| `containerSecurityContext` | object | Security context for the main Curity container; overrides cluster |
+| `initContainers` | list | User init containers, appended after package fetchers; `curity` reserved; max 16; overrides cluster |
+| `extraContainers` | list | User sidecar containers, appended after log sidecars; `curity` reserved; max 16; overrides cluster |
 | `autoscaling` | object | HPA configuration |
-| `podDisruptionBudget` | object | PodDisruptionBudget; node overrides cluster. `minAvailable` accepts integer or percentage string. Ignored on admin nodes (Warning event `PDBIgnored`) |
+| `podDisruptionBudget` | object | PodDisruptionBudget; node overrides cluster. Set **exactly one** of `minAvailable`/`maxUnavailable` (integer or percentage string). Ignored on admin nodes (Warning event `PDBIgnored`) |
 | `podAnnotations` | map | Merges with cluster-level annotations |
 | `podLabels` | map | Merges with cluster-level labels |
-| `nodeSelector` | map | Overrides cluster-level nodeSelector |
-| `tolerations` | list | Overrides cluster-level tolerations |
-| `topologySpreadConstraints` | list | Overrides cluster-level topology |
+| `nodeSelector` | map | Merges with cluster-level nodeSelector (node keys win) |
+| `tolerations` | list | Overrides cluster-level tolerations (`[]` clears) |
+| `topologySpreadConstraints` | list | Overrides cluster-level topology (`[]` clears) |
 | `affinity` | object | Overrides cluster-level affinity |
+
+> **NetworkPolicy** (`isc.spec.networkPolicy`) is cluster-scoped — there is no `networkPolicy` field on `IdentityServerNode`. Setting it (even as `{}`) makes the operator create and own a NetworkPolicy that restricts ingress to the **admin** node: only same-cluster runtime pods may reach the config and distributed-service ports, plus — when `apiGatewayNamespace` is set and the admin UI is enabled — that namespace may reach the admin-UI port. It is **opt-in by presence** (omit to manage no policy) and only takes effect on a cluster whose CNI enforces NetworkPolicy.
+>
+> **Pod customization** fields (`initContainers`, `extraContainers`, `securityContext`, `containerSecurityContext`, `terminationGracePeriodSeconds`, `imagePullPolicy`) live on both specs. User `initContainers`/`extraContainers` are appended after the operator's own containers (never overriding them). A user container that omits its own `imagePullPolicy` gets the same tag-aware default as the main container (`Always` for `:latest`/untagged, else `IfNotPresent`).
+>
+> Avoid the container names the operator generates: **`curity`** (the main container — rejected at admission), **`package-fetch-<n>`** (one per `spec.packages`), and **one per `spec.logging.logs` entry** (the log sidecars, e.g. `request`). `curity` is blocked by CEL; the dynamic ones (package/log) can't be — a collision is caught at Deployment creation and surfaced as `Degraded=InvalidSpec` with a message naming the conflicting source.
+
+### How nodes inherit cluster settings
+
+Most cluster-level settings apply to every node and can be overridden per node. How a node value combines with the cluster value depends on the field's type:
+
+- **Maps merge** — `nodeSelector`, `podLabels`, `podAnnotations`: cluster and node keys are combined, with the node winning on conflicting keys.
+- **Everything else replaces** — `resources`, `probes`, `logging`, `affinity`, `autoscaling`, `podDisruptionBudget`, `securityContext`, `containerSecurityContext`, `terminationGracePeriodSeconds`, `imagePullPolicy`, `initContainers`, `extraContainers`, `tolerations`, `topologySpreadConstraints`: when a node sets the field it supplies the **whole** value (no field-level merge with the cluster); when a node omits it, the cluster value is inherited.
+- **An explicit empty list clears** — for the list overrides (`initContainers`, `extraContainers`, `tolerations`, `topologySpreadConstraints`), setting `[]` on the node drops the inherited cluster list, whereas omitting the field inherits it.
+
+`securityContext` is replaced like the rest; the operator then applies its required `runAsUser 10001` / `runAsGroup`/`fsGroup 10000` floor to any of those three the value leaves unset, so a node override can't strip the UID/GID the Curity image needs.
+
+Cluster-only fields — `version`, `image`, `imagePullSecret`, `adminCredentials`, `packages`, `networkPolicy` — have no node-level override.
 
 ## Configuration Management
 

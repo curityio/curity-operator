@@ -67,6 +67,31 @@ var _ = Describe("IdentityServerNode Reconciler / PodDisruptionBudget", func() {
 		Expect(pdb.OwnerReferences[0].Name).To(Equal(nodeName))
 	})
 
+	It("creates PDB when node sets maxUnavailable", func() {
+		clusterName := "cluster-pdb-max"
+		nodeName := "node-pdb-max"
+		testCreateCluster(ns, clusterName)
+		max := intstr.FromInt32(1)
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     nodeName + "-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
+				Replicas:                 ptr.To(int32(3)),
+				PodDisruptionBudget:      &v1alpha1.PDBSpec{MaxUnavailable: &max},
+				Service:                  defaultTestService(),
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+		pdb := &policyv1.PodDisruptionBudget{}
+		eventuallyGetResource(ns, ownedName(clusterName, nodeName), pdb)
+		Expect(pdb.Spec.MaxUnavailable).NotTo(BeNil())
+		Expect(pdb.Spec.MaxUnavailable.IntValue()).To(Equal(1))
+		Expect(pdb.Spec.MinAvailable).To(BeNil(), "maxUnavailable PDB must not also set minAvailable")
+	})
+
 	It("creates PDB with percentage minAvailable when set on node", func() {
 		clusterName := "cluster-pdb-pct"
 		nodeName := "node-pdb-pct"

@@ -1,0 +1,66 @@
+
+[IdentityServerNode customization + NetworkPolicy renders an admin NetworkPolicy and pod-customization fields on the runtime Deployment - 1]
+metadata:
+  name: custom-cluster-custom-admin-18772e45
+  namespace: e2e-customization
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    app.kubernetes.io/component: admin
+    app.kubernetes.io/instance: custom-cluster-custom-admin-18772e45
+    app.kubernetes.io/managed-by: curity-operator
+    app.kubernetes.io/name: curity-identity-server
+    app.kubernetes.io/version: "11.0"
+    curity.io/cluster: custom-cluster
+    curity.io/owned-by: custom-cluster-custom-admin-18772e45
+    curity.io/role: admin-ui-role
+  ownerReferences: <Any value>
+  managedFields: <Any value>
+spec:
+  podSelector:
+    matchLabels:
+      curity.io/owned-by: custom-cluster-custom-admin-18772e45
+  ingress:
+    - ports:
+        - protocol: TCP
+          port:
+            type: 0
+            intval: 6789
+            strval: ""
+        - protocol: TCP
+          port:
+            type: 0
+            intval: 6790
+            strval: ""
+      from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: runtime
+              curity.io/cluster: custom-cluster
+    - ports:
+        - protocol: TCP
+          port:
+            type: 0
+            intval: 6789
+            strval: ""
+      from:
+        - podSelector:
+            matchLabels:
+              curity.io/cluster: custom-cluster
+              curity.io/component: cluster-config
+    - ports:
+        - protocol: TCP
+          port:
+            type: 0
+            intval: 6749
+            strval: ""
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: edge-gateway
+  policyTypes:
+    - Ingress
+
+---

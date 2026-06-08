@@ -9,7 +9,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
@@ -1452,6 +1454,53 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		Expect(k8sClient.Create(ctx, obj)).To(Succeed(), "minAvailable=100% is a valid percentage and must be accepted")
 	})
 
+	It("should accept node with PDB maxUnavailable (int and percentage) via unstructured", func() {
+		testCreateCluster(ns, "val-cluster-pdbmax")
+		obj := newUnstructuredNode(ns, "node-pdb-max", "pdb-max-role", "val-cluster-pdbmax")
+		_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+			"maxUnavailable": int64(1),
+		}, "spec", "podDisruptionBudget")
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed(), "maxUnavailable integer must be accepted")
+
+		obj2 := newUnstructuredNode(ns, "node-pdb-maxpct", "pdb-maxpct-role", "val-cluster-pdbmax")
+		_ = unstructured.SetNestedField(obj2.Object, map[string]interface{}{
+			"maxUnavailable": "50%",
+		}, "spec", "podDisruptionBudget")
+		Expect(k8sClient.Create(ctx, obj2)).To(Succeed(), "maxUnavailable percentage must be accepted")
+	})
+
+	It("should reject node with negative PDB maxUnavailable via unstructured", func() {
+		testCreateCluster(ns, "val-cluster-pdbmaxneg")
+		obj := newUnstructuredNode(ns, "node-pdb-maxneg", "pdb-maxneg-role", "val-cluster-pdbmaxneg")
+		_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+			"maxUnavailable": int64(-1),
+		}, "spec", "podDisruptionBudget")
+		err := k8sClient.Create(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("maxUnavailable must be non-negative"))
+	})
+
+	It("should reject PDB with both minAvailable and maxUnavailable (exactly-one CEL)", func() {
+		testCreateCluster(ns, "val-cluster-pdbboth")
+		obj := newUnstructuredNode(ns, "node-pdb-both", "pdb-both-role", "val-cluster-pdbboth")
+		_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
+			"minAvailable":   int64(1),
+			"maxUnavailable": int64(1),
+		}, "spec", "podDisruptionBudget")
+		err := k8sClient.Create(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("exactly one of minAvailable or maxUnavailable"))
+	})
+
+	It("should reject PDB with neither minAvailable nor maxUnavailable (exactly-one CEL)", func() {
+		testCreateCluster(ns, "val-cluster-pdbneither")
+		obj := newUnstructuredNode(ns, "node-pdb-neither", "pdb-neither-role", "val-cluster-pdbneither")
+		_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{}, "spec", "podDisruptionBudget")
+		err := k8sClient.Create(ctx, obj)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("exactly one of minAvailable or maxUnavailable"))
+	})
+
 	It("should reject service block missing type via unstructured", func() {
 		testCreateCluster(ns, "val-cluster-svcnotype")
 		obj := newUnstructuredNode(ns, "node-svc-notype", "svc-notype-role", "val-cluster-svcnotype")
@@ -1497,6 +1546,128 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		err := k8sClient.Create(ctx, obj)
 		Expect(err).To(HaveOccurred(), "autoscaling without enabled should be rejected by Required")
 		Expect(err.Error()).To(ContainSubstring("spec.autoscaling.enabled"))
+	})
+
+	// --- Pod-customization escape hatches + NetworkPolicy validation ---
+	// DryRunAll runs admission (structural + CEL) without persisting, so these
+	// stay pure validation checks with no reconcile side effects. The same
+	// markers are generated identically onto IdentityServerNodeSpec.
+
+	mkCluster := func(name string, mutate func(*v1alpha1.IdentityServerClusterSpec)) *v1alpha1.IdentityServerCluster {
+		c := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       v1alpha1.IdentityServerClusterSpec{Version: "11.0"},
+		}
+		mutate(&c.Spec)
+		return c
+	}
+
+	It("rejects terminationGracePeriodSeconds below 0", func() {
+		err := k8sClient.Create(ctx, mkCluster("tgps-neg", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.TerminationGracePeriodSeconds = ptr.To(int64(-1))
+		}), client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.terminationGracePeriodSeconds"))
+	})
+
+	It("rejects terminationGracePeriodSeconds above 3600", func() {
+		err := k8sClient.Create(ctx, mkCluster("tgps-big", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.TerminationGracePeriodSeconds = ptr.To(int64(3601))
+		}), client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.terminationGracePeriodSeconds"))
+	})
+
+	It("accepts terminationGracePeriodSeconds boundaries 0 and 3600", func() {
+		Expect(k8sClient.Create(ctx, mkCluster("tgps-0", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.TerminationGracePeriodSeconds = ptr.To(int64(0))
+		}), client.DryRunAll)).To(Succeed())
+		Expect(k8sClient.Create(ctx, mkCluster("tgps-3600", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.TerminationGracePeriodSeconds = ptr.To(int64(3600))
+		}), client.DryRunAll)).To(Succeed())
+	})
+
+	It("rejects an invalid imagePullPolicy", func() {
+		err := k8sClient.Create(ctx, mkCluster("ipp-bad", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.ImagePullPolicy = corev1.PullPolicy("Sometimes")
+		}), client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.imagePullPolicy"))
+	})
+
+	It("rejects a bad apiGatewayNamespace pattern", func() {
+		err := k8sClient.Create(ctx, mkCluster("np-badns", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.NetworkPolicy = &v1alpha1.NetworkPolicySpec{APIGatewayNamespace: "Bad_NS!"}
+		}), client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.networkPolicy.apiGatewayNamespace"))
+	})
+
+	It("rejects apiGatewayNamespace exceeding max length", func() {
+		err := k8sClient.Create(ctx, mkCluster("np-longns", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.NetworkPolicy = &v1alpha1.NetworkPolicySpec{APIGatewayNamespace: longString(64)}
+		}), client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.networkPolicy.apiGatewayNamespace"))
+	})
+
+	It("rejects more than 16 initContainers (MaxItems)", func() {
+		cs := make([]corev1.Container, 17)
+		for i := range cs {
+			cs[i] = corev1.Container{Name: fmt.Sprintf("c%d", i), Image: "busybox:1.36"}
+		}
+		err := k8sClient.Create(ctx, mkCluster("init-max", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.InitContainers = cs
+		}), client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("spec.initContainers"))
+	})
+
+	It("rejects an initContainer named 'curity' (reserved-name CEL)", func() {
+		err := k8sClient.Create(ctx, mkCluster("init-curity", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.InitContainers = []corev1.Container{{Name: "curity", Image: "busybox:1.36"}}
+		}), client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("'curity' is reserved"))
+	})
+
+	It("rejects an extraContainer named 'curity' (reserved-name CEL)", func() {
+		err := k8sClient.Create(ctx, mkCluster("extra-curity", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.ExtraContainers = []corev1.Container{{Name: "curity", Image: "busybox:1.36"}}
+		}), client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("'curity' is reserved"))
+	})
+
+	It("accepts exactly 16 initContainers (MaxItems boundary)", func() {
+		cs := make([]corev1.Container, 16)
+		for i := range cs {
+			cs[i] = corev1.Container{Name: fmt.Sprintf("c%d", i), Image: "busybox:1.36"}
+		}
+		Expect(k8sClient.Create(ctx, mkCluster("init-16", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.InitContainers = cs
+		}), client.DryRunAll)).To(Succeed())
+	})
+
+	It("accepts apiGatewayNamespace at exactly 63 chars (MaxLength boundary)", func() {
+		Expect(k8sClient.Create(ctx, mkCluster("np-63", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.NetworkPolicy = &v1alpha1.NetworkPolicySpec{APIGatewayNamespace: "a" + longString(62)}
+		}), client.DryRunAll)).To(Succeed())
+	})
+
+	It("accepts a rich initContainer with probe + lifecycle httpGet (the defaulting shape)", func() {
+		Expect(k8sClient.Create(ctx, mkCluster("init-rich", func(s *v1alpha1.IdentityServerClusterSpec) {
+			s.InitContainers = []corev1.Container{{
+				Name:  "warmup",
+				Image: "busybox:1.36",
+				ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstr.FromInt32(8080)},
+				}},
+				Lifecycle: &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{
+					HTTPGet: &corev1.HTTPGetAction{Path: "/drain", Port: intstr.FromInt32(8080)},
+				}},
+			}}
+		}), client.DryRunAll)).To(Succeed())
 	})
 
 })

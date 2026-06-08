@@ -137,6 +137,72 @@ spec:
     resources: {}
 
   # ------------------------------------------------------------
+  # Pod customization (escape hatches). Each overrides the cluster default when set
+  # (the node value replaces the cluster value entirely — no merge — except
+  # securityContext, which is merged over the operator's required defaults).
+  # ------------------------------------------------------------
+
+  # Image pull policy for the main Identity Server container (default `IfNotPresent`).
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:Enum=Always;Never;IfNotPresent
+  imagePullPolicy: IfNotPresent
+
+  # Pod termination grace period in seconds (default `30`). Raise it (60–180 typical)
+  # so Curity's JVM can drain in-flight requests, close DB pools, and deregister from
+  # cluster membership on shutdown before SIGKILL.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:Minimum=0
+  # +kubebuilder:validation:Maximum=3600
+  terminationGracePeriodSeconds: 120
+
+  # Pod-level security context — accepts the full Kubernetes PodSecurityContext. Unset
+  # fields inherit the operator's required defaults (runAsUser 10001, runAsGroup/fsGroup
+  # 10000), so a partial override never strips the UID/GID the Curity image needs. Set
+  # runAsUser/runAsGroup/fsGroup here only to deliberately override them.
+  # +kubebuilder:validation:Optional
+  securityContext:
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+    # runAsUser: 10001          # override the operator default only if you must
+    # runAsGroup: 10000
+    # fsGroup: 10000
+    # supplementalGroups: [2000]
+    # sysctls: []
+
+  # Security context for the main Identity Server container — accepts the full Kubernetes
+  # container SecurityContext. Example below is a hardened baseline (readOnlyRootFilesystem
+  # stays false because the Identity Server writes to its filesystem).
+  # +kubebuilder:validation:Optional
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+
+  # User-defined init containers, run AFTER the operator's package-fetcher init
+  # containers. Appended, never overriding operator-managed containers; the name
+  # `curity` is reserved and rejected at admission. Standard Kubernetes Container list.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=16
+  # +kubebuilder:validation:XValidation:rule="self.all(c, c.name != 'curity')",message="container name 'curity' is reserved by the operator"
+  initContainers: []
+  #  - name: wait-for-db
+  #    image: busybox:1.36
+  #    command: ["sh", "-c", "until nc -z db 5432; do sleep 2; done"]
+
+  # User-defined sidecar containers, run alongside the Identity Server container and
+  # AFTER the operator's log sidecars. Same naming rules as initContainers.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=16
+  # +kubebuilder:validation:XValidation:rule="self.all(c, c.name != 'curity')",message="container name 'curity' is reserved by the operator"
+  extraContainers: []
+  #  - name: audit-shipper
+  #    image: fluent/fluent-bit:3.0
+
+  # ------------------------------------------------------------
   # Advanced Configurations
   # ------------------------------------------------------------
 
@@ -166,16 +232,24 @@ spec:
     # +kubebuilder:validation:MaxItems=100
     customMetrics: []
 
-  # Limits voluntary disruption of this node’s pods during drains and similar operations. Set `minAvailable` or `maxUnavailable`, not both.
+  # Limits voluntary disruption of this node’s pods during drains and similar operations. Set exactly one of `minAvailable` or `maxUnavailable`.
   # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:XValidation:rule="(has(self.minAvailable) ? 1 : 0) + (has(self.maxUnavailable) ? 1 : 0) == 1",message="exactly one of minAvailable or maxUnavailable must be set"
   podDisruptionBudget:
-    # Minimum pods that must stay available during a disruption (integer or percentage string). Use this or `maxUnavailable`, not both.
+    # Minimum pods that must stay available during a disruption (integer or percentage string). Mutually exclusive with `maxUnavailable`.
     # Must be non-negative.
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:XIntOrString
     # +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
     # +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="minAvailable must be non-negative"
     minAvailable: 1
+    # Maximum pods that may be unavailable during a disruption (integer or percentage string). Mutually exclusive with `minAvailable`.
+    # Must be non-negative.
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:XIntOrString
+    # +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
+    # +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="maxUnavailable must be non-negative"
+    # maxUnavailable: 1
   
   # Restrict this node’s pods to nodes with matching labels.
   # +kubebuilder:validation:Optional

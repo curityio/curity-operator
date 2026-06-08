@@ -9,10 +9,14 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
+	"github.com/curityio/curity-operator/internal/controller"
 )
 
 var _ = Describe("Deployment scheduling", func() {
@@ -68,6 +72,51 @@ var _ = Describe("Deployment scheduling", func() {
 		Expect(deploy.Spec.Template.Spec.Tolerations).To(HaveLen(3))
 		Expect(deploy.Spec.Template.Spec.Affinity).NotTo(BeNil())
 		Expect(deploy.Spec.Template.Spec.Affinity.NodeAffinity).NotTo(BeNil())
+	})
+
+	It("preserves a node's explicit empty list through the operator's finalizer write (clears inheritance)", func() {
+		// Regression: the operator's metadata patch must not drop a node's explicit
+		// empty list. The typed client can't even express [] (omitempty), so create
+		// via unstructured to mirror the real `kubectl apply` path.
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "clear-cluster", Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version: "11.0",
+				InitContainers: []corev1.Container{
+					{Name: "cluster-init", Image: "busybox:1.36", Command: []string{"sh", "-c", "true"}},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+		node := &unstructured.Unstructured{}
+		node.SetGroupVersionKind(schema.GroupVersionKind{Group: "curity.io", Version: "v1alpha1", Kind: "IdentityServerNode"})
+		node.SetName("clear-node")
+		node.SetNamespace(ns)
+		Expect(unstructured.SetNestedField(node.Object, "runtime", "spec", "type")).To(Succeed())
+		Expect(unstructured.SetNestedField(node.Object, "clear-role", "spec", "role")).To(Succeed())
+		Expect(unstructured.SetNestedField(node.Object, "clear-cluster", "spec", "identityServerClusterRef", "name")).To(Succeed())
+		Expect(unstructured.SetNestedField(node.Object, int64(1), "spec", "replicas")).To(Succeed())
+		Expect(unstructured.SetNestedField(node.Object, "ClusterIP", "spec", "service", "type")).To(Succeed())
+		Expect(unstructured.SetNestedField(node.Object, int64(8443), "spec", "service", "port")).To(Succeed())
+		Expect(unstructured.SetNestedSlice(node.Object, []interface{}{}, "spec", "initContainers")).To(Succeed())
+		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+
+		// After the operator stamps its finalizer, the explicit [] must survive.
+		Eventually(func(g Gomega) {
+			var fresh v1alpha1.IdentityServerNode
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "clear-node", Namespace: ns}, &fresh)).To(Succeed())
+			g.Expect(fresh.Finalizers).To(ContainElement(v1alpha1.NodeFinalizer), "operator must have reconciled")
+			g.Expect(fresh.Spec.InitContainers).NotTo(BeNil(), "explicit empty initContainers was dropped by the operator write")
+			g.Expect(fresh.Spec.InitContainers).To(BeEmpty())
+		}, timeout, interval).Should(Succeed())
+
+		// The Deployment must not inherit the cluster's init container.
+		deploy := &appsv1.Deployment{}
+		eventuallyGetResource(ns, ownedName("clear-cluster", "clear-node"), deploy)
+		for _, c := range deploy.Spec.Template.Spec.InitContainers {
+			Expect(c.Name).NotTo(Equal("cluster-init"), "node cleared init containers with [] but cluster value was inherited")
+		}
 	})
 
 	It("should apply node-level scheduling over cluster defaults", func() {
@@ -321,5 +370,42 @@ var _ = Describe("Deployment scheduling", func() {
 			}
 			return *deploy.Spec.Replicas
 		}, 30*time.Second, 250*time.Millisecond).Should(Equal(int32(1)))
+	})
+
+	// Pins hand-defaulting against ground truth: the apiserver defaults the same
+	// container and we assert our output is field-identical, so a future apiserver
+	// version that defaults a new field fails here instead of silently drifting.
+	It("ApplyContainerDefaultsAll matches the apiserver's container defaulting", func() {
+		rich := corev1.Container{
+			Name:  "probe-sidecar",
+			Image: "fluent/fluent-bit:3.0",
+			Ports: []corev1.ContainerPort{{Name: "metrics", ContainerPort: 2020}},
+			ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: "/health", Port: intstr.FromInt32(2020)},
+			}},
+			Lifecycle: &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{
+				HTTPGet: &corev1.HTTPGetAction{Path: "/shutdown", Port: intstr.FromInt32(2020)},
+			}},
+		}
+
+		dep := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "container-parity", Namespace: ns},
+			Spec: appsv1.DeploymentSpec{
+				Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "parity"}},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "parity"}},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{*rich.DeepCopy()}},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, dep)).To(Succeed())
+
+		var stored appsv1.Deployment
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "container-parity", Namespace: ns}, &stored)).To(Succeed())
+		theirs := stored.Spec.Template.Spec.Containers[0]
+		ours := controller.ApplyContainerDefaultsAll([]corev1.Container{rich})[0]
+
+		// Full-container DeepEqual: any field the apiserver sets that we don't is drift.
+		Expect(ours).To(Equal(theirs))
 	})
 })

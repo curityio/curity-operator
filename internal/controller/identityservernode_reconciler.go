@@ -12,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -124,6 +125,7 @@ func (c *hpaUnsatisfiableCache) reap(nodeUID types.UID, current []autoscalingv2.
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups=autoscaling,resources=horizontalpodautoscalers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile handles a single reconciliation loop for an IdentityServerNode.
 func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -143,8 +145,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		if controllerutil.ContainsFinalizer(&node, v1alpha1.NodeFinalizer) {
 			log.Info("deleting IdentityServerNode", "name", node.Name)
 			r.Recorder.Event(&node, corev1.EventTypeNormal, "Deleting", "Node is being deleted")
+			original := node.DeepCopy()
 			controllerutil.RemoveFinalizer(&node, v1alpha1.NodeFinalizer)
-			if err := r.Update(ctx, &node); err != nil {
+			if err := r.Patch(ctx, &node, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
 				if apierrors.IsConflict(err) {
 					return ctrl.Result{Requeue: true}, nil
 				}
@@ -156,6 +159,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 3. Ensure finalizer and cluster label are set (combined to reduce API round trips)
 	clusterRef := node.Spec.IdentityServerClusterRef
+	original := node.DeepCopy()
 	needsUpdate := false
 	if !controllerutil.ContainsFinalizer(&node, v1alpha1.NodeFinalizer) {
 		controllerutil.AddFinalizer(&node, v1alpha1.NodeFinalizer)
@@ -169,7 +173,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		needsUpdate = true
 	}
 	if needsUpdate {
-		if err := r.Update(ctx, &node); err != nil {
+		// Patch, not Update: a full Update round-trips spec and omitempty would drop
+		// an explicit empty list (e.g. initContainers: []). Lock guards finalizers.
+		if err := r.Patch(ctx, &node, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) {
 				return ctrl.Result{Requeue: true}, nil
 			}
@@ -216,8 +222,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Provides cascade-delete safety under Foreground propagation; the
 	// cluster-side finalizer is what actually blocks cluster deletion
 	// until all child nodes are gone.
+	ownerRefOriginal := node.DeepCopy()
 	if changed := ensureClusterOwnerRef(&node, &cluster); changed {
-		if err := r.Update(ctx, &node); err != nil {
+		if err := r.Patch(ctx, &node, client.MergeFromWithOptions(ownerRefOriginal, client.MergeFromWithOptimisticLock{})); err != nil {
 			if apierrors.IsConflict(err) {
 				return ctrl.Result{Requeue: true}, nil
 			}
@@ -424,17 +431,48 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 		// Warn once per spec edit when user podLabels collide with
 		// operator-owned keys; runtime drops the user values silently.
-		if overridden := userPodLabelsOverridden(&cluster, &node); len(overridden) > 0 {
+		if overridden := userPodLabelsOverridden(&cluster, &node); len(overridden) > 0 &&
+			node.Status.ObservedGeneration < node.Generation {
 			log.Info("ignoring operator-owned keys in user podLabels",
 				"node", node.Name, "keys", overridden)
-			if node.Status.ObservedGeneration < node.Generation {
-				r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PodLabelsIgnored",
-					"podLabels keys %v are operator-owned; pods use operator values",
-					overridden)
-			}
+			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PodLabelsIgnored",
+				"podLabels keys %v are operator-owned; pods use operator values",
+				overridden)
 		}
 
 		desiredDeploy := buildDeployment(&cluster, &node, applicableConfigs, fetcherImage)
+
+		// Pre-flight: a user container whose name collides with an operator-
+		// generated one (log sidecar, package fetcher, the main container) would
+		// be rejected by the apiserver with a bare "Duplicate value". Surface the
+		// source here so the message is self-explanatory, and skip the doomed write.
+		if msg, conflict := detectContainerNameConflict(desiredDeploy, &cluster, &node); conflict {
+			degChanged := apimeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionDegraded,
+				Status:             metav1.ConditionTrue,
+				Reason:             v1alpha1.ReasonInvalidSpec,
+				Message:            msg,
+				ObservedGeneration: node.Generation,
+			})
+			apimeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             v1alpha1.ReasonInvalidSpec,
+				Message:            "Deployment is invalid; see Degraded condition",
+				ObservedGeneration: node.Generation,
+			})
+			node.Status.ObservedGeneration = node.Generation
+			if statusErr := r.Status().Update(ctx, &node); statusErr != nil {
+				if apierrors.IsConflict(statusErr) {
+					return ctrl.Result{Requeue: true}, nil
+				}
+				return ctrl.Result{}, fmt.Errorf("updating status after container-name conflict: %w", statusErr)
+			}
+			if degChanged {
+				r.Recorder.Eventf(&node, corev1.EventTypeWarning, v1alpha1.ReasonInvalidSpec, "%s", msg)
+			}
+			return ctrl.Result{}, nil
+		}
 
 		// Inject cluster config hash annotation for rolling restart when Secret changes.
 		// Only inject when config is ready or no admin exists — avoids hashing
@@ -749,14 +787,15 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
-	// 8. Reconcile PodDisruptionBudget (runtime nodes only, when minAvailable is set).
+	// 8. Reconcile PodDisruptionBudget (runtime nodes only). CEL guarantees
+	// exactly one of minAvailable/maxUnavailable is set when the spec is present.
 	pdbSpec := resolvePDB(&cluster, &node)
-	pdbRequested := pdbSpec != nil && pdbSpec.MinAvailable != nil
+	pdbRequested := pdbSpec != nil && (pdbSpec.MinAvailable != nil || pdbSpec.MaxUnavailable != nil)
 
 	// Admin guard: log + event whenever PDB is requested on an admin node, regardless
 	// of whether a stale PDB exists. K8s Event server-side dedup absorbs repeats.
 	if isAdmin && pdbRequested {
-		log.Info("ignoring PDB spec on admin node", "node", node.Name, "minAvailable", pdbSpec.MinAvailable)
+		log.Info("ignoring PDB spec on admin node", "node", node.Name)
 		r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PDBIgnored",
 			"PodDisruptionBudget spec is set but ignored: PDB is not supported on admin nodes")
 	}
@@ -835,6 +874,54 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
+	// 8b. Reconcile NetworkPolicy: admin nodes only, when cluster.Spec.NetworkPolicy
+	// is set. Runtime nodes never own one.
+	var npCollisionName string
+	if isAdmin && cluster.Spec.NetworkPolicy != nil {
+		desiredNP := buildNetworkPolicy(&cluster, &node)
+		existingNP := &networkingv1.NetworkPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: desiredNP.Name, Namespace: desiredNP.Namespace},
+		}
+		result, err = controllerutil.CreateOrUpdate(ctx, r.Client, existingNP, func() error {
+			existingNP.Labels = mergeManagedLabels(existingNP.Labels, desiredNP.Labels)
+			existingNP.Spec = desiredNP.Spec
+			return controllerutil.SetControllerReference(&node, existingNP, r.Scheme)
+		})
+		if err != nil {
+			if res, handled, statusErr := r.handlePermanentWriteError(ctx, &node, err); handled {
+				return res, statusErr
+			}
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile NetworkPolicy: %w", err)
+		}
+		if result != controllerutil.OperationResultNone {
+			log.Info("NetworkPolicy reconciled", "operation", result, "name", existingNP.Name)
+			r.Recorder.Eventf(&node, corev1.EventTypeNormal, "NetworkPolicyReconciled",
+				"NetworkPolicy %q %s", existingNP.Name, result)
+		}
+	} else {
+		// Delete a stale operator-owned NetworkPolicy (networkPolicy cleared, or the
+		// node flipped admin→runtime). Refuse to delete one we don't own; surface
+		// that collision as Degraded.
+		var existingNP networkingv1.NetworkPolicy
+		err := r.Get(ctx, client.ObjectKey{Name: OwnedResourceName(cluster.Name, node.Name), Namespace: node.Namespace}, &existingNP)
+		if err == nil {
+			if !metav1.IsControlledBy(&existingNP, &node) {
+				log.Info("skipping NetworkPolicy deletion, not owned by this node", "name", existingNP.Name)
+				r.Recorder.Eventf(&node, corev1.EventTypeWarning, "NetworkPolicyNotOwned",
+					"NetworkPolicy %q exists but is not managed by this node; skipping deletion", existingNP.Name)
+				npCollisionName = existingNP.Name
+			} else if delErr := r.Delete(ctx, &existingNP); delErr != nil && !apierrors.IsNotFound(delErr) {
+				return ctrl.Result{}, fmt.Errorf("failed to delete NetworkPolicy: %w", delErr)
+			} else {
+				log.Info("NetworkPolicy deleted", "name", existingNP.Name)
+				r.Recorder.Eventf(&node, corev1.EventTypeNormal, "NetworkPolicyDeleted",
+					"NetworkPolicy %q deleted", existingNP.Name)
+			}
+		} else if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("failed to get NetworkPolicy: %w", err)
+		}
+	}
+
 	// 9. Compute status from Deployment.
 	// Capture PackagesReady (which lives outside the K8s-Deployment-mirror
 	// set) BEFORE computeNodeConditions rebuilds the slice — otherwise it
@@ -899,6 +986,36 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			"PDBNotOwned",
 			fmt.Sprintf("A PodDisruptionBudget named %q exists but is not owned by this node", pdbCollisionName),
 			node.Generation)
+	}
+
+	if npCollisionName != "" {
+		setCondition(&node.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
+			"NetworkPolicyNotOwned",
+			fmt.Sprintf("A NetworkPolicy named %q exists but is not owned by this node", npCollisionName),
+			node.Generation)
+	}
+
+	// Pod-failure overlay: surface a stuck rollout's cause (bad image, crashloop,
+	// config error) that computeNodeConditions hides behind Ready=True off the old
+	// pod. Skipped when a collision overlay already set Degraded — those are more
+	// actionable, don't clobber them.
+	collisionActive := hpaCollisionName != "" || len(hpaMissingRequestResources) > 0 ||
+		pdbCollisionName != "" || npCollisionName != ""
+	if !collisionActive {
+		if pods, listErr := r.listOwnedPods(ctx, cluster.Name, node.Name, node.Namespace); listErr != nil {
+			log.Error(listErr, "failed to list pods for pod-failure overlay")
+		} else if pf := translatePodFailure(pods); pf.failing {
+			changed := apimeta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
+				Type:               v1alpha1.ConditionDegraded,
+				Status:             metav1.ConditionTrue,
+				Reason:             "PodUnhealthy",
+				Message:            pf.message,
+				ObservedGeneration: node.Generation,
+			})
+			if changed {
+				r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PodUnhealthy", "%s", pf.message)
+			}
+		}
 	}
 
 	// PackagesReady overlay (translator leg). When packages are configured,
@@ -1018,6 +1135,7 @@ func (r *IdentityServerNodeReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Owns(&corev1.Service{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Watches(
 			&v1alpha1.IdentityServerCluster{},
 			handler.EnqueueRequestsFromMapFunc(r.findNodesForCluster),
@@ -1487,6 +1605,16 @@ func (r *IdentityServerNodeReconciler) cleanupOrphanChildren(
 	}
 	for i := range pdbs.Items {
 		if err := deleteIfOrphan(&pdbs.Items[i], "PodDisruptionBudget"); err != nil {
+			return err
+		}
+	}
+
+	var nps networkingv1.NetworkPolicyList
+	if err := r.List(ctx, &nps, listOpts...); err != nil {
+		return fmt.Errorf("list NetworkPolicies for orphan cleanup: %w", err)
+	}
+	for i := range nps.Items {
+		if err := deleteIfOrphan(&nps.Items[i], "NetworkPolicy"); err != nil {
 			return err
 		}
 	}

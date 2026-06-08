@@ -270,17 +270,30 @@ type AutoscalingSpec struct {
 // PDBSpec configures a PodDisruptionBudget for runtime pods.
 // Admin nodes do not participate in PDB reconciliation; if set there, the
 // field is ignored and a Warning event is emitted (see the node reconciler).
+// A PodDisruptionBudget accepts exactly one of minAvailable/maxUnavailable.
+// +kubebuilder:validation:XValidation:rule="(has(self.minAvailable) ? 1 : 0) + (has(self.maxUnavailable) ? 1 : 0) == 1",message="exactly one of minAvailable or maxUnavailable must be set"
 type PDBSpec struct {
 	// MinAvailable is the minimum number of pods that must remain available
 	// during voluntary disruption. Accepts an integer (e.g., 2) or a
 	// percentage string (e.g., "50%"). Matches upstream
-	// policy/v1.PodDisruptionBudgetSpec.MinAvailable.
+	// policy/v1.PodDisruptionBudgetSpec.MinAvailable. Mutually exclusive with
+	// maxUnavailable (set exactly one).
 	// Pattern catches invalid string forms; CEL catches negative integers
 	// (Pattern does not apply to the int variant of x-kubernetes-int-or-string).
 	// +kubebuilder:validation:XIntOrString
 	// +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
 	// +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="minAvailable must be non-negative"
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+
+	// MaxUnavailable is the maximum number of pods that may be unavailable
+	// during voluntary disruption. Accepts an integer (e.g., 1) or a
+	// percentage string (e.g., "50%"). Matches upstream
+	// policy/v1.PodDisruptionBudgetSpec.MaxUnavailable. Mutually exclusive with
+	// minAvailable (set exactly one).
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
+	// +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="maxUnavailable must be non-negative"
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
 // AppliedManagedResource describes a managed ConfigMap or Secret
@@ -508,4 +521,18 @@ type PackageBasicAuthSelector struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	PasswordKey string `json:"passwordKey"`
+}
+
+// NetworkPolicySpec configures the operator-managed NetworkPolicy that
+// restricts ingress to the cluster's admin node. Mirrors the upstream Helm
+// chart's release-level policy: ingress is allowed from same-cluster runtime
+// pods on the config and distributed-service ports, plus optionally from an
+// API-gateway namespace to the admin-UI port. Setting this field (even empty)
+// enables the policy; leaving it nil disables it.
+type NetworkPolicySpec struct {
+	// APIGatewayNamespace, when set and the admin UI is enabled, allows ingress
+	// to the admin-UI port from pods in this namespace. Omit to skip the UI rule.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	APIGatewayNamespace string `json:"apiGatewayNamespace,omitempty"`
 }

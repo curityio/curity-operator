@@ -260,7 +260,45 @@ func buildContainerArgs(node *v1alpha1.IdentityServerNode) []string {
 	}
 }
 
-// buildContainerPorts returns the container ports based on node type.
+// resolveHTTPPort returns the runtime http Service port: service.port when set,
+// otherwise the default.
+func resolveHTTPPort(node *v1alpha1.IdentityServerNode) int32 {
+	if node.Spec.Service != nil && node.Spec.Service.Port != 0 {
+		return node.Spec.Service.Port
+	}
+	return portHTTP
+}
+
+// resolveConfigPort returns the admin config-service port (service.port, or the
+// default). Also fed to genclust so cluster.xml matches.
+func resolveConfigPort(node *v1alpha1.IdentityServerNode) int32 {
+	if node.Spec.Service != nil && node.Spec.Service.Port != 0 {
+		return node.Spec.Service.Port
+	}
+	return portConfig
+}
+
+// resolveDistributedServicePort returns the admin distributed-service port:
+// service.distributedServicePort when set, otherwise the default.
+func resolveDistributedServicePort(node *v1alpha1.IdentityServerNode) int32 {
+	if node.Spec.Service != nil && node.Spec.Service.DistributedServicePort != 0 {
+		return node.Spec.Service.DistributedServicePort
+	}
+	return portDistributedService
+}
+
+// adminUIExposed reports whether the admin-ui port should be added to the
+// Service and pod. The UI must be enabled AND the user must opt in by setting
+// service.uiPort — ui.enabled alone runs the UI without surfacing it (the
+// operator never auto-exposes it).
+func adminUIExposed(node *v1alpha1.IdentityServerNode) bool {
+	return node.Spec.UI != nil && node.Spec.UI.Enabled &&
+		node.Spec.Service != nil && node.Spec.Service.UIPort != 0
+}
+
+// buildContainerPorts returns the container ports based on node type. Every
+// role port is declared at its default (overridable via the service block);
+// the admin-ui port is added only when the UI is enabled and uiPort is set.
 func buildContainerPorts(node *v1alpha1.IdentityServerNode) []corev1.ContainerPort {
 	ports := []corev1.ContainerPort{
 		{Name: "health-check", ContainerPort: portHealthCheck, Protocol: corev1.ProtocolTCP},
@@ -269,15 +307,15 @@ func buildContainerPorts(node *v1alpha1.IdentityServerNode) []corev1.ContainerPo
 
 	if node.Spec.Type == v1alpha1.NodeTypeAdmin {
 		ports = append(ports,
-			corev1.ContainerPort{Name: "config", ContainerPort: portConfig, Protocol: corev1.ProtocolTCP},
-			corev1.ContainerPort{Name: "ds-port", ContainerPort: portDistributedService, Protocol: corev1.ProtocolTCP},
+			corev1.ContainerPort{Name: "config", ContainerPort: resolveConfigPort(node), Protocol: corev1.ProtocolTCP},
+			corev1.ContainerPort{Name: "ds-port", ContainerPort: resolveDistributedServicePort(node), Protocol: corev1.ProtocolTCP},
 		)
-		if node.Spec.UI != nil && node.Spec.UI.Enabled {
-			ports = append(ports, corev1.ContainerPort{Name: "admin-ui", ContainerPort: portAdminUI, Protocol: corev1.ProtocolTCP})
+		if adminUIExposed(node) {
+			ports = append(ports, corev1.ContainerPort{Name: "admin-ui", ContainerPort: node.Spec.Service.UIPort, Protocol: corev1.ProtocolTCP})
 		}
 	} else {
 		ports = append(ports,
-			corev1.ContainerPort{Name: "http", ContainerPort: portHTTP, Protocol: corev1.ProtocolTCP},
+			corev1.ContainerPort{Name: "http", ContainerPort: resolveHTTPPort(node), Protocol: corev1.ProtocolTCP},
 		)
 	}
 
@@ -286,6 +324,10 @@ func buildContainerPorts(node *v1alpha1.IdentityServerNode) []corev1.ContainerPo
 
 // buildServicePorts returns the service ports based on node type. Protocol
 // is set explicitly on every port (apiserver-default; see buildDeployment).
+// Each role port defaults and is overridable via the service block; the
+// admin-ui port is exposed only when the UI is enabled and uiPort is set. The
+// targetPort is the named container port, so the Service port and its target
+// stay in lockstep.
 func buildServicePorts(node *v1alpha1.IdentityServerNode) []corev1.ServicePort {
 	ports := []corev1.ServicePort{
 		{Name: "health-check", Port: portHealthCheck, TargetPort: intstr.FromString("health-check"), Protocol: corev1.ProtocolTCP},
@@ -294,15 +336,15 @@ func buildServicePorts(node *v1alpha1.IdentityServerNode) []corev1.ServicePort {
 
 	if node.Spec.Type == v1alpha1.NodeTypeAdmin {
 		ports = append(ports,
-			corev1.ServicePort{Name: "config", Port: portConfig, TargetPort: intstr.FromString("config"), Protocol: corev1.ProtocolTCP},
-			corev1.ServicePort{Name: "ds-port", Port: portDistributedService, TargetPort: intstr.FromString("ds-port"), Protocol: corev1.ProtocolTCP},
+			corev1.ServicePort{Name: "config", Port: resolveConfigPort(node), TargetPort: intstr.FromString("config"), Protocol: corev1.ProtocolTCP},
+			corev1.ServicePort{Name: "ds-port", Port: resolveDistributedServicePort(node), TargetPort: intstr.FromString("ds-port"), Protocol: corev1.ProtocolTCP},
 		)
-		if node.Spec.UI != nil && node.Spec.UI.Enabled {
-			ports = append(ports, corev1.ServicePort{Name: "admin-ui", Port: portAdminUI, TargetPort: intstr.FromString("admin-ui"), Protocol: corev1.ProtocolTCP})
+		if adminUIExposed(node) {
+			ports = append(ports, corev1.ServicePort{Name: "admin-ui", Port: node.Spec.Service.UIPort, TargetPort: intstr.FromString("admin-ui"), Protocol: corev1.ProtocolTCP})
 		}
 	} else {
 		ports = append(ports,
-			corev1.ServicePort{Name: "http", Port: node.Spec.Service.Port, TargetPort: intstr.FromString("http"), Protocol: corev1.ProtocolTCP},
+			corev1.ServicePort{Name: "http", Port: resolveHTTPPort(node), TargetPort: intstr.FromString("http"), Protocol: corev1.ProtocolTCP},
 		)
 	}
 
@@ -688,10 +730,13 @@ func buildLogSidecars(logging *v1alpha1.LoggingSpec) []corev1.Container {
 	return sidecars
 }
 
-// resolveServiceType returns the service type from the node spec. Service is
-// Required at admission, so the field is always populated.
+// resolveServiceType returns the node's Service type, defaulting to ClusterIP
+// when the optional service block is omitted.
 func resolveServiceType(node *v1alpha1.IdentityServerNode) corev1.ServiceType {
-	return node.Spec.Service.Type
+	if node.Spec.Service != nil && node.Spec.Service.Type != "" {
+		return node.Spec.Service.Type
+	}
+	return corev1.ServiceTypeClusterIP
 }
 
 // buildLivenessProbe constructs the liveness probe with configurable or default values.

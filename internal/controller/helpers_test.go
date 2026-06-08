@@ -34,11 +34,12 @@ func testCreateCluster(ns, name string) {
 	Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 }
 
-// defaultTestService returns a minimal valid ServiceSpec for tests that don't
-// care about the specific Type/Port — keeps individual test sites free of the
-// magic 8443 literal.
-func defaultTestService() v1alpha1.ServiceSpec {
-	return v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443}
+// defaultTestService returns a minimal valid Service (type only); every role
+// port then defaults (admin config 6789, runtime http 8443). Don't pin a port
+// here — on admin nodes service.port is the config port, so a runtime value
+// like 8443 would mis-set it and trigger a genclust regen.
+func defaultTestService() *v1alpha1.ServiceSpec {
+	return &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP}
 }
 
 func testCreateNode(ns, name string, nodeType v1alpha1.NodeType, clusterName string) {

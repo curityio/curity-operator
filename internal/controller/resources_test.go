@@ -35,7 +35,7 @@ func newTestNode(nodeType v1alpha1.NodeType) *v1alpha1.IdentityServerNode {
 			Role:                     "test-role",
 			IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-1"},
 			Replicas:                 ptr.To(int32(1)),
-			Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443},
+			Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP},
 		},
 	}
 }
@@ -69,6 +69,7 @@ func TestBuildDeployment_AdminPorts(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
+	node.Spec.Service.UIPort = portAdminUI // opt in to exposing the UI
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
@@ -467,6 +468,7 @@ func TestBuildDeployment_UIEnabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(false)}
+	node.Spec.Service.UIPort = portAdminUI // opt in to exposing the UI
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	ports := deploy.Spec.Template.Spec.Containers[0].Ports
@@ -745,6 +747,7 @@ func TestBuildService_AdminPorts(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
+	node.Spec.Service.UIPort = portAdminUI // opt in to exposing the UI
 
 	svc := buildService(cluster, node)
 
@@ -768,7 +771,7 @@ func TestBuildService_RuntimePorts(t *testing.T) {
 func TestBuildService_CustomPort(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Service = v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 9443}
+	node.Spec.Service = &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 9443}
 
 	svc := buildService(cluster, node)
 
@@ -778,13 +781,168 @@ func TestBuildService_CustomPort(t *testing.T) {
 func TestBuildService_LoadBalancerType(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Service = v1alpha1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer, Port: 8443}
+	node.Spec.Service = &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer, Port: 8443}
 
 	svc := buildService(cluster, node)
 
 	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
 		t.Errorf("expected LoadBalancer type, got %s", svc.Spec.Type)
 	}
+}
+
+func TestBuildService_NilServiceDefaults(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Service = nil
+
+	svc := buildService(cluster, node)
+
+	if svc.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Errorf("expected ClusterIP when service omitted, got %s", svc.Spec.Type)
+	}
+	// service omitted -> http defaults to 8443
+	assertServicePortExists(t, svc.Spec.Ports, "http", portHTTP)
+	assertServicePortExists(t, svc.Spec.Ports, "health-check", portHealthCheck)
+}
+
+func TestBuildService_RuntimeHTTPFromServicePort(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Service = &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 7000}
+
+	svc := buildService(cluster, node)
+
+	assertServicePortExists(t, svc.Spec.Ports, "http", 7000)
+}
+
+func TestBuildService_AdminDefaults(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.Service = nil
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
+
+	svc := buildService(cluster, node)
+
+	if svc.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Errorf("expected ClusterIP when service omitted, got %s", svc.Spec.Type)
+	}
+	// ui.enabled but no service.uiPort -> UI runs but is NOT exposed on the Service
+	assertServicePortExists(t, svc.Spec.Ports, "config", portConfig)
+	assertServicePortExists(t, svc.Spec.Ports, "ds-port", portDistributedService)
+	assertServicePortNotExists(t, svc.Spec.Ports, "admin-ui")
+}
+
+func TestBuildService_UIPortOverride(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
+	node.Spec.Service = &v1alpha1.ServiceSpec{UIPort: 7749}
+
+	svc := buildService(cluster, node)
+
+	assertServicePortExists(t, svc.Spec.Ports, "admin-ui", 7749)
+}
+
+func TestBuildService_DistributedServicePortOverride(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.Service = &v1alpha1.ServiceSpec{DistributedServicePort: 7790}
+
+	svc := buildService(cluster, node)
+
+	assertServicePortExists(t, svc.Spec.Ports, "ds-port", 7790)
+	// config stays fixed regardless
+	assertServicePortExists(t, svc.Spec.Ports, "config", portConfig)
+}
+
+func TestBuildService_RuntimeHTTPDefaultsWhenBlockSetWithoutPort(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	// block present (only type) but port unset -> http still defaults to 8443
+	node.Spec.Service = &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer}
+
+	svc := buildService(cluster, node)
+
+	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		t.Errorf("expected LoadBalancer type, got %s", svc.Spec.Type)
+	}
+	assertServicePortExists(t, svc.Spec.Ports, "http", portHTTP)
+}
+
+func TestBuildService_AdminPortsDefaultWhenBlockSetWithoutPorts(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)}
+	// block present (only type) but ds/ui ports unset -> ds defaults, ui NOT exposed
+	node.Spec.Service = &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeLoadBalancer}
+
+	svc := buildService(cluster, node)
+
+	assertServicePortExists(t, svc.Spec.Ports, "config", portConfig)
+	assertServicePortExists(t, svc.Spec.Ports, "ds-port", portDistributedService)
+	// uiPort not set -> admin-ui not exposed even though ui.enabled
+	assertServicePortNotExists(t, svc.Spec.Ports, "admin-ui")
+}
+
+func TestBuildService_AdminConfigPortOverride(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	// on admin, service.port is the config port
+	node.Spec.Service = &v1alpha1.ServiceSpec{Port: 7789}
+
+	svc := buildService(cluster, node)
+
+	assertServicePortExists(t, svc.Spec.Ports, "config", 7789)
+	// the other admin ports keep their defaults
+	assertServicePortExists(t, svc.Spec.Ports, "ds-port", portDistributedService)
+}
+
+func TestFindAdminConfigPort(t *testing.T) {
+	withAdmin := []v1alpha1.IdentityServerNode{
+		{Spec: v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeRuntime}},
+		{Spec: v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeAdmin, Service: &v1alpha1.ServiceSpec{Port: 7789}}},
+	}
+	if got := findAdminConfigPort(withAdmin); got != 7789 {
+		t.Errorf("expected 7789, got %d", got)
+	}
+	if got := findAdminConfigPort(nil); got != portConfig {
+		t.Errorf("no admin -> default %d, got %d", portConfig, got)
+	}
+	adminNoSvc := []v1alpha1.IdentityServerNode{{Spec: v1alpha1.IdentityServerNodeSpec{Type: v1alpha1.NodeTypeAdmin}}}
+	if got := findAdminConfigPort(adminNoSvc); got != portConfig {
+		t.Errorf("admin without service -> default %d, got %d", portConfig, got)
+	}
+}
+
+func TestBuildClusterConfigJob_ConfigPortEnv(t *testing.T) {
+	cluster := newTestCluster()
+	// default (no port arg) -> 6789
+	def := buildClusterConfigJob(cluster, "admin-1", "", portConfig)
+	assertEnvVar(t, def.Spec.Template.Spec.Containers[0].Env, "CONFIG_SERVICE_PORT", "6789")
+	// override -> the configured port
+	over := buildClusterConfigJob(cluster, "admin-1", "", 7789)
+	assertEnvVar(t, over.Spec.Template.Spec.Containers[0].Env, "CONFIG_SERVICE_PORT", "7789")
+}
+
+func TestComputeClusterConfigHash_ConfigPort(t *testing.T) {
+	c := newTestCluster()
+	// a non-default config port changes the hash -> triggers cluster.xml regen;
+	// the default (portConfig) appends nothing, so existing clusters don't regen.
+	if computeClusterConfigHash(c, "admin-1", portConfig) == computeClusterConfigHash(c, "admin-1", 7789) {
+		t.Error("non-default config port must change the hash")
+	}
+}
+
+func TestBuildService_AdminUINotExposedWhenUIDisabled(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: false, Secure: ptr.To(true)}
+	node.Spec.Service = &v1alpha1.ServiceSpec{UIPort: 7749}
+
+	svc := buildService(cluster, node)
+
+	// uiPort set but UI off -> no admin-ui port (nothing to expose)
+	assertServicePortNotExists(t, svc.Spec.Ports, "admin-ui")
 }
 
 func TestBuildService_SameName(t *testing.T) {
@@ -1298,7 +1456,7 @@ func TestBuildClusterConfigSecret_WithData(t *testing.T) {
 
 func TestBuildClusterConfigJob_BasicSpec(t *testing.T) {
 	cluster := newTestCluster()
-	job := buildClusterConfigJob(cluster, "admin-1", "")
+	job := buildClusterConfigJob(cluster, "admin-1", "", portConfig)
 
 	if job.Name != "cluster-1-cluster-config-job" {
 		t.Errorf("expected job name 'cluster-1-cluster-config-job', got %q", job.Name)
@@ -1348,7 +1506,7 @@ func TestBuildClusterConfigJob_BasicSpec(t *testing.T) {
 func TestBuildClusterConfigJob_HostUsesPrefixedNameWithHyphens(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Name = "prod-east"
-	job := buildClusterConfigJob(cluster, "primary-admin", "")
+	job := buildClusterConfigJob(cluster, "primary-admin", "", portConfig)
 
 	container := job.Spec.Template.Spec.Containers[0]
 	assertEnvVar(t, container.Env, "CONFIG_SERVICE_HOST", OwnedResourceName("prod-east", "primary-admin"))
@@ -1370,7 +1528,7 @@ func TestBuildClusterConfigJob_HostUsesPrefixedNameWithHyphens(t *testing.T) {
 func TestBuildClusterConfigJob_ImagePullSecret(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.ImagePullSecret = "my-registry-secret"
-	job := buildClusterConfigJob(cluster, "admin-1", "")
+	job := buildClusterConfigJob(cluster, "admin-1", "", portConfig)
 
 	if len(job.Spec.Template.Spec.ImagePullSecrets) != 1 {
 		t.Fatalf("expected 1 imagePullSecret, got %d", len(job.Spec.Template.Spec.ImagePullSecrets))
@@ -1382,7 +1540,7 @@ func TestBuildClusterConfigJob_ImagePullSecret(t *testing.T) {
 
 func TestBuildClusterConfigJob_NoImagePullSecret(t *testing.T) {
 	cluster := newTestCluster()
-	job := buildClusterConfigJob(cluster, "admin-1", "")
+	job := buildClusterConfigJob(cluster, "admin-1", "", portConfig)
 
 	if len(job.Spec.Template.Spec.ImagePullSecrets) != 0 {
 		t.Errorf("expected 0 imagePullSecrets, got %d", len(job.Spec.Template.Spec.ImagePullSecrets))
@@ -1399,7 +1557,7 @@ func TestBuildClusterConfigJob_EncryptionKey(t *testing.T) {
 			},
 		},
 	}
-	job := buildClusterConfigJob(cluster, "admin-1", "")
+	job := buildClusterConfigJob(cluster, "admin-1", "", portConfig)
 
 	container := job.Spec.Template.Spec.Containers[0]
 	found := false
@@ -1425,7 +1583,7 @@ func TestBuildClusterConfigJob_SchedulingConstraints(t *testing.T) {
 		{Key: "special", Operator: corev1.TolerationOpExists},
 	}
 
-	job := buildClusterConfigJob(cluster, "admin-1", "")
+	job := buildClusterConfigJob(cluster, "admin-1", "", portConfig)
 
 	if job.Spec.Template.Spec.NodeSelector["disk"] != "ssd" {
 		t.Error("expected nodeSelector to be inherited")
@@ -1438,7 +1596,7 @@ func TestBuildClusterConfigJob_SchedulingConstraints(t *testing.T) {
 func TestBuildClusterConfigJob_CustomImage(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.Image = "myregistry.io/curity:custom"
-	job := buildClusterConfigJob(cluster, "admin-1", "")
+	job := buildClusterConfigJob(cluster, "admin-1", "", portConfig)
 
 	if job.Spec.Template.Spec.Containers[0].Image != "myregistry.io/curity:custom" {
 		t.Errorf("expected custom image, got %q", job.Spec.Template.Spec.Containers[0].Image)
@@ -1447,7 +1605,7 @@ func TestBuildClusterConfigJob_CustomImage(t *testing.T) {
 
 func TestBuildClusterConfigJob_Labels(t *testing.T) {
 	cluster := newTestCluster()
-	job := buildClusterConfigJob(cluster, "admin-1", "")
+	job := buildClusterConfigJob(cluster, "admin-1", "", portConfig)
 
 	if job.Labels["curity.io/cluster"] != "cluster-1" {
 		t.Error("expected curity.io/cluster label")
@@ -1538,6 +1696,16 @@ func assertServicePortExists(t *testing.T, ports []corev1.ServicePort, name stri
 		}
 	}
 	t.Errorf("expected service port %s:%d to exist", name, port)
+}
+
+func assertServicePortNotExists(t *testing.T, ports []corev1.ServicePort, name string) {
+	t.Helper()
+	for _, p := range ports {
+		if p.Name == name {
+			t.Errorf("expected service port %s not to exist", name)
+			return
+		}
+	}
 }
 
 func assertEnvVar(t *testing.T, envVars []corev1.EnvVar, name, value string) {
@@ -1828,7 +1996,7 @@ func TestBuildClusterConfigJob_TopologySpreadConstraints(t *testing.T) {
 		WhenUnsatisfiable: corev1.ScheduleAnyway,
 	}}
 
-	job := buildClusterConfigJob(cluster, "admin-1", "")
+	job := buildClusterConfigJob(cluster, "admin-1", "", portConfig)
 
 	tsc := job.Spec.Template.Spec.TopologySpreadConstraints
 	if len(tsc) != 1 || tsc[0].TopologyKey != "topology.kubernetes.io/zone" {
@@ -2590,7 +2758,7 @@ func TestBuildPDB_Selector(t *testing.T) {
 // Bridges for the external controller_test package; not part of the public API.
 
 func ComputeClusterConfigHashForTest(cluster *v1alpha1.IdentityServerCluster, adminNodeName string) string {
-	return computeClusterConfigHash(cluster, adminNodeName)
+	return computeClusterConfigHash(cluster, adminNodeName, portConfig)
 }
 
 func EncryptionKeyHashForTest(key []byte) string {
@@ -2604,9 +2772,9 @@ func EncryptionKeyHashForTest(key []byte) string {
 // P1: same inputs always yield the same hash.
 func TestComputeClusterConfigHash_Deterministic(t *testing.T) {
 	cluster := newTestCluster()
-	first := computeClusterConfigHash(cluster, "admin-1")
+	first := computeClusterConfigHash(cluster, "admin-1", portConfig)
 	for i := 0; i < 100; i++ {
-		got := computeClusterConfigHash(cluster, "admin-1")
+		got := computeClusterConfigHash(cluster, "admin-1", portConfig)
 		if got != first {
 			t.Fatalf("hash drifted on iteration %d: got %q, want %q", i, got, first)
 		}
@@ -2616,7 +2784,7 @@ func TestComputeClusterConfigHash_Deterministic(t *testing.T) {
 // P2: changing any single input changes the hash.
 func TestComputeClusterConfigHash_DiffersPerInput(t *testing.T) {
 	base := newTestCluster()
-	baseHash := computeClusterConfigHash(base, "admin-1")
+	baseHash := computeClusterConfigHash(base, "admin-1", portConfig)
 
 	tests := []struct {
 		name         string
@@ -2723,7 +2891,7 @@ func TestComputeClusterConfigHash_DiffersPerInput(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c, admin := tt.mutate()
-			got := computeClusterConfigHash(c, admin)
+			got := computeClusterConfigHash(c, admin, portConfig)
 			if (got != baseHash) != tt.shouldDiffer {
 				t.Errorf("hash differs = %v, want %v (base=%q, got=%q)",
 					got != baseHash, tt.shouldDiffer, baseHash, got)
@@ -2783,7 +2951,7 @@ func TestComputeClusterConfigHash_NonEmptyForEmptyInputs(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "c"},
 		Spec:       v1alpha1.IdentityServerClusterSpec{},
 	}
-	got := computeClusterConfigHash(c, "")
+	got := computeClusterConfigHash(c, "", portConfig)
 	if got == "" {
 		t.Fatal("hash must be non-empty even for empty inputs")
 	}
@@ -2802,7 +2970,7 @@ func TestComputeClusterConfigHash_DistinctFieldsDistinctHashes(t *testing.T) {
 	b.Spec.Image = "abcd"
 	b.Spec.ImagePullSecret = ""
 
-	if computeClusterConfigHash(a, "admin") == computeClusterConfigHash(b, "admin") {
+	if computeClusterConfigHash(a, "admin", portConfig) == computeClusterConfigHash(b, "admin", portConfig) {
 		t.Error("distinct field assignments must produce distinct hashes")
 	}
 }
@@ -2813,7 +2981,7 @@ func TestComputeClusterConfigHash_AllOptionalFieldsEmpty(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "c"},
 		Spec:       v1alpha1.IdentityServerClusterSpec{Version: "11.0"},
 	}
-	got := computeClusterConfigHash(c, "admin-1")
+	got := computeClusterConfigHash(c, "admin-1", portConfig)
 	if got == "" {
 		t.Fatal("hash must be non-empty when only Version + adminNodeName are set")
 	}
@@ -2823,7 +2991,7 @@ func TestComputeClusterConfigHash_AllOptionalFieldsEmpty(t *testing.T) {
 func TestComputeClusterConfigHash_LongCombinedNames(t *testing.T) {
 	c := newTestCluster()
 	c.Name = strings.Repeat("a", 200)
-	got := computeClusterConfigHash(c, strings.Repeat("b", 200))
+	got := computeClusterConfigHash(c, strings.Repeat("b", 200), portConfig)
 	if got == "" {
 		t.Fatal("hash must be non-empty for long names")
 	}

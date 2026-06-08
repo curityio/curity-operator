@@ -58,7 +58,7 @@ var _ = Describe("podLabels reserved-key CEL", func() {
 					Type:                     v1alpha1.NodeTypeRuntime,
 					Role:                     "runtime-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "any-cluster"},
-					Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443},
+					Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443},
 					PodLabels:                map[string]string{reserved: "user-attempted-hijack"},
 				},
 			}

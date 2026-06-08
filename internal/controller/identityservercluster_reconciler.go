@@ -418,6 +418,18 @@ func findAdminNodeName(nodes []v1alpha1.IdentityServerNode) string {
 	return ""
 }
 
+// findAdminConfigPort returns the admin node's resolved config-service port, or
+// the default when there's no admin node. Threaded into genclust so cluster.xml
+// (and the runtime nodes that read it) agree with the admin Service's config port.
+func findAdminConfigPort(nodes []v1alpha1.IdentityServerNode) int32 {
+	for i := range nodes {
+		if nodes[i].Spec.Type == v1alpha1.NodeTypeAdmin {
+			return resolveConfigPort(&nodes[i])
+		}
+	}
+	return portConfig
+}
+
 // isClusterConfigReady returns true if the Secret contains real cluster.xml data.
 func isClusterConfigReady(secret *corev1.Secret) bool {
 	data, ok := secret.Data[clusterConfigKey]
@@ -443,15 +455,12 @@ func (r *IdentityServerClusterReconciler) computeEncryptionKeyHash(ctx context.C
 	return hex.EncodeToString(h[:])
 }
 
-// computeClusterConfigHash hashes the spec inputs that should trigger a
-// genclust Job re-run when changed: image, imagePullSecret, admin node name,
-// and packages (when non-empty). The encryption key is intentionally NOT
-// included: a stale credentials-Secret cache on first reconcile would cause
-// every cluster to spuriously regen — see Branch A in ensureClusterConfig.
-// Packages are appended only when non-empty so clusters without packages keep
-// the same hash bytes on upgrade and don't see a one-shot regen window.
-// The "v1\x00" prefix versions the hash shape; bump on any input change.
-func computeClusterConfigHash(cluster *v1alpha1.IdentityServerCluster, adminNodeName string) string {
+// computeClusterConfigHash hashes the inputs that trigger a genclust re-run:
+// image, imagePullSecret, admin node name, packages, and a non-default config
+// port. Packages/config-port append only when non-default, so existing clusters
+// keep the same hash (no upgrade regen). The encryption key is omitted — a
+// first-reconcile cache miss would spuriously regen (Branch A).
+func computeClusterConfigHash(cluster *v1alpha1.IdentityServerCluster, adminNodeName string, configPort int32) string {
 	var b strings.Builder
 	const sep = "\x00"
 	b.WriteString("v1")
@@ -464,6 +473,10 @@ func computeClusterConfigHash(cluster *v1alpha1.IdentityServerCluster, adminNode
 	if pkgHash := computePackagesHash(cluster.Spec.Packages); pkgHash != "" {
 		b.WriteString(sep)
 		b.WriteString(pkgHash)
+	}
+	if configPort != portConfig {
+		b.WriteString(sep)
+		b.WriteString(fmt.Sprintf("cfgport=%d", configPort))
 	}
 	h := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(h[:])
@@ -544,7 +557,7 @@ func jobCompletionTime(job *batchv1.Job) *metav1.Time {
 // buildClusterConfigJob creates the Job that runs genclust to generate cluster.xml.
 // configHash is stamped as an annotation so step 4 of ensureClusterConfig can
 // detect input drift (spec change while a Job is in flight) and recreate.
-func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeName, configHash string) *batchv1.Job {
+func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeName, configHash string, configPort int32) *batchv1.Job {
 	backoff := jobBackoffLimit
 	annotations := map[string]string{}
 	if configHash != "" {
@@ -588,7 +601,7 @@ func buildClusterConfigJob(cluster *v1alpha1.IdentityServerCluster, adminNodeNam
 							},
 							Env: []corev1.EnvVar{
 								{Name: "CONFIG_SERVICE_HOST", Value: OwnedResourceName(cluster.Name, adminNodeName)},
-								{Name: "CONFIG_SERVICE_PORT", Value: fmt.Sprintf("%d", portConfig)},
+								{Name: "CONFIG_SERVICE_PORT", Value: fmt.Sprintf("%d", configPort)},
 							},
 						},
 					},
@@ -676,6 +689,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 			"No admin node found for this cluster", cluster.Generation)
 		return nil
 	}
+	adminConfigPort := findAdminConfigPort(childNodes)
 
 	// 2. Check if Secret exists and is ready
 	var configSecret corev1.Secret
@@ -684,7 +698,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 		secretExists = true
 		if isClusterConfigReady(&configSecret) {
 			currentKeyHash := r.computeEncryptionKeyHash(ctx, cluster)
-			currentConfigHash := computeClusterConfigHash(cluster, adminNodeName)
+			currentConfigHash := computeClusterConfigHash(cluster, adminNodeName, adminConfigPort)
 			storedConfigHash := configSecret.Annotations["curity.io/cluster-config-hash"]
 			storedAdmin := configSecret.Annotations["curity.io/admin-node"]
 
@@ -742,7 +756,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 			// Branch B: cheap admin-rename. Contains-guard prevents
 			// strings.Replace from silently no-oping on malformed XML.
 			if storedConfigHash != "" && storedAdmin != "" && storedAdmin != adminNodeName {
-				hashWithOldAdmin := computeClusterConfigHash(cluster, storedAdmin)
+				hashWithOldAdmin := computeClusterConfigHash(cluster, storedAdmin, adminConfigPort)
 				if storedConfigHash == hashWithOldAdmin {
 					oldHost := OwnedResourceName(cluster.Name, storedAdmin)
 					newHost := OwnedResourceName(cluster.Name, adminNodeName)
@@ -815,7 +829,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 	// 3. Ensure placeholder Secret exists
 	if !secretExists {
 		keyHash := r.computeEncryptionKeyHash(ctx, cluster)
-		placeholder := buildClusterConfigSecret(cluster, nil, adminNodeName, keyHash, computeClusterConfigHash(cluster, adminNodeName))
+		placeholder := buildClusterConfigSecret(cluster, nil, adminNodeName, keyHash, computeClusterConfigHash(cluster, adminNodeName, adminConfigPort))
 		if err := r.Create(ctx, placeholder); err != nil {
 			if !apierrors.IsAlreadyExists(err) {
 				return fmt.Errorf("failed to create placeholder cluster config secret: %w", err)
@@ -835,7 +849,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 		// so we never populate the Secret with cluster.xml from stale inputs
 		// (e.g. wrong admin host baked into <host>).
 		jobConfigHash := job.Annotations["curity.io/cluster-config-hash"]
-		currentConfigHash := computeClusterConfigHash(cluster, adminNodeName)
+		currentConfigHash := computeClusterConfigHash(cluster, adminNodeName, adminConfigPort)
 		if jobConfigHash != "" && jobConfigHash != currentConfigHash {
 			log.Info("input drift detected on in-flight Job, deleting to recreate with current spec",
 				"jobHash", jobConfigHash, "currentHash", currentConfigHash)
@@ -889,7 +903,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 
 				// Update Secret with real data
 				keyHash := r.computeEncryptionKeyHash(ctx, cluster)
-				updatedSecret := buildClusterConfigSecret(cluster, clusterXML, adminNodeName, keyHash, computeClusterConfigHash(cluster, adminNodeName))
+				updatedSecret := buildClusterConfigSecret(cluster, clusterXML, adminNodeName, keyHash, computeClusterConfigHash(cluster, adminNodeName, adminConfigPort))
 				var existing corev1.Secret
 				if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: cluster.Namespace}, &existing); err != nil {
 					return fmt.Errorf("failed to get cluster config secret for update: %w", err)
@@ -978,7 +992,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 	// cluster-config Secret intentionally does NOT — it outlives cluster
 	// deletion so a recreated cluster can re-use the existing keystore.
 	{
-		newJob := buildClusterConfigJob(cluster, adminNodeName, computeClusterConfigHash(cluster, adminNodeName))
+		newJob := buildClusterConfigJob(cluster, adminNodeName, computeClusterConfigHash(cluster, adminNodeName, adminConfigPort), adminConfigPort)
 		if err := controllerutil.SetControllerReference(cluster, newJob, r.Scheme); err != nil {
 			return fmt.Errorf("failed to set owner ref on genclust Job: %w", err)
 		}

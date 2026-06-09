@@ -485,7 +485,7 @@ func computeClusterConfigHash(cluster *v1alpha1.IdentityServerCluster, adminNode
 	}
 	if configPort != portConfig {
 		b.WriteString(sep)
-		b.WriteString(fmt.Sprintf("cfgport=%d", configPort))
+		fmt.Fprintf(&b, "cfgport=%d", configPort)
 	}
 	h := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(h[:])

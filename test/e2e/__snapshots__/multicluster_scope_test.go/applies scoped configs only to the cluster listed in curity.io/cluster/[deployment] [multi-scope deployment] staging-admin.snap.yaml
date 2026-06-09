@@ -68,9 +68,6 @@ spec:
             - name: ds-port
               containerPort: 6790
               protocol: TCP
-            - name: admin-ui
-              containerPort: 6749
-              protocol: TCP
           env:
             - name: STATUS_CMD_PORT
               value: "4465"

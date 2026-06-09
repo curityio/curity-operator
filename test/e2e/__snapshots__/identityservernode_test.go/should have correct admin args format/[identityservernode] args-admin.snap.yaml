@@ -20,7 +20,6 @@ spec:
     name: args-cluster
   service:
     type: ClusterIP
-    port: 8443
 status:
   conditions:
     - type: Ready

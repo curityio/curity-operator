@@ -1,0 +1,28 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerNode
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  type: runtime
+  role: {{ .role }}
+  identityServerClusterRef:
+    name: {{ .clusterName }}
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8443
+  terminationGracePeriodSeconds: 120
+  imagePullPolicy: Always
+  securityContext:
+    fsGroupChangePolicy: OnRootMismatch
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+  initContainers:
+    - name: wait-for-db
+      image: busybox:1.36
+      command: ["sh", "-c", "true"]
+  extraContainers:
+    - name: audit-shipper
+      image: fluent/fluent-bit:3.0

@@ -1,0 +1,74 @@
+
+[IdentityServerNode customization + NetworkPolicy renders an admin NetworkPolicy and pod-customization fields on the runtime Deployment - 1]
+metadata:
+  name: custom-runtime
+  namespace: e2e-customization
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: custom-cluster
+  ownerReferences: <Any value>
+  finalizers:
+    - curity.io/node-protection
+  managedFields: <Any value>
+spec:
+  type: runtime
+  role: default
+  identityServerClusterRef:
+    name: custom-cluster
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8443
+  initContainers:
+    - name: wait-for-db
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - "true"
+  extraContainers:
+    - name: audit-shipper
+      image: fluent/fluent-bit:3.0
+  securityContext:
+    fsGroupChangePolicy: OnRootMismatch
+  containerSecurityContext:
+    readOnlyRootFilesystem: false
+    allowPrivilegeEscalation: false
+  terminationGracePeriodSeconds: 120
+  imagePullPolicy: Always
+status:
+  conditions:
+    - type: Ready
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Available
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Progressing
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: Degraded
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+    - type: ClusterReady
+      status: ""
+      lastTransitionTime: "0001-01-01T00:00:00Z"
+      reason: ""
+      message: ""
+  observedGeneration: <Any value>
+  replicas: 1
+  deploymentName: custom-cluster-custom-runtime-6e9e343b
+  serviceName: custom-cluster-custom-runtime-6e9e343b
+
+---

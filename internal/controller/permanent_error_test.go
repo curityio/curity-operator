@@ -1511,3 +1511,116 @@ func TestLatestJobFailedCreateMessage(t *testing.T) {
 		}
 	})
 }
+
+func clusterWithCredsName(name string) *v1alpha1.IdentityServerCluster {
+	c := freshTestCluster()
+	c.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{Name: name},
+		},
+	}
+	return c
+}
+
+func TestIsValidSecretName(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"valid-secret-name", true},
+		{"acme-admin-creds", true},
+		{"a", true},
+		{"bad..secret..name", false},
+		{"UpperCase", false},
+		{"-leading-dash", false},
+		{"trailing-dash-", false},
+		{"under_score", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isValidSecretName(tc.name); got != tc.want {
+			t.Errorf("isValidSecretName(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestClusterHandleAdminCredsSecretMissing_SetsBothConditions(t *testing.T) {
+	ctx := context.Background()
+	cluster := clusterWithCredsName("managed-creds")
+	r, rec := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	res, handled, err := r.handleAdminCredsSecretMissing(ctx, cluster, errAdminCredsSecretMissing)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if res != (ctrl.Result{}) {
+		t.Errorf("expected zero Result (no requeue), got %+v", res)
+	}
+
+	deg := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionDegraded)
+	if deg == nil || deg.Status != metav1.ConditionTrue || deg.Reason != v1alpha1.ReasonAdminCredsSecretMissing {
+		t.Errorf("Degraded condition wrong: %+v", deg)
+	}
+	if deg != nil && !strings.Contains(deg.Message, "managed-creds") {
+		t.Errorf("Degraded message should name the Secret; got %q", deg.Message)
+	}
+	if deg != nil && deg.ObservedGeneration != 5 {
+		t.Errorf("Degraded ObservedGeneration = %d, want 5", deg.ObservedGeneration)
+	}
+
+	ready := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != v1alpha1.ReasonAdminCredsSecretMissing {
+		t.Errorf("Ready condition wrong: %+v", ready)
+	}
+
+	select {
+	case ev := <-rec.Events:
+		if !strings.Contains(ev, "Warning "+v1alpha1.ReasonAdminCredsSecretMissing) {
+			t.Errorf("unexpected event: %q", ev)
+		}
+	default:
+		t.Error("expected one Warning event, got none")
+	}
+}
+
+func TestClusterHandleAdminCredsSecretMissing_UnrelatedError_NotHandled(t *testing.T) {
+	ctx := context.Background()
+	cluster := clusterWithCredsName("managed-creds")
+	r, _ := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	_, handled, err := r.handleAdminCredsSecretMissing(ctx, cluster, errors.New("boom"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if handled {
+		t.Error("expected handled=false for an unrelated error")
+	}
+	if c := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionDegraded); c != nil {
+		t.Errorf("must not write Degraded for unrelated error; got %+v", c)
+	}
+}
+
+func TestClusterHandleAdminCredsSecretMissing_NoChange_SkipsEvent(t *testing.T) {
+	ctx := context.Background()
+	cluster := clusterWithCredsName("managed-creds")
+	r, rec := newClusterReconcilerForHelperTest(t, cluster, nil)
+
+	// First call sets the conditions and emits one event.
+	if _, handled, _ := r.handleAdminCredsSecretMissing(ctx, cluster, errAdminCredsSecretMissing); !handled {
+		t.Fatal("first call: expected handled=true")
+	}
+	<-rec.Events // drain the first event
+
+	// Second call with conditions already set must emit no further event.
+	if _, handled, _ := r.handleAdminCredsSecretMissing(ctx, cluster, errAdminCredsSecretMissing); !handled {
+		t.Fatal("second call: expected handled=true")
+	}
+	select {
+	case ev := <-rec.Events:
+		t.Errorf("changed-bool gate leaked an event on no-op: %q", ev)
+	default:
+	}
+}

@@ -1,0 +1,16 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerNode
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  type: runtime
+  role: clear-role
+  identityServerClusterRef:
+    name: {{ .clusterName }}
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8443
+  initContainers: []
+  tolerations: []

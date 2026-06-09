@@ -60,6 +60,10 @@ const (
 	// (apierrors.IsInvalid). Only a CR spec edit can resolve this; the
 	// reconciler does not requeue.
 	ReasonInvalidSpec = "InvalidSpec"
+
+	// ReasonAdminCredsSecretMissing is set on Degraded=True and Ready=False when a
+	// user-provided adminCredentials Secret name points at a Secret that does not exist.
+	ReasonAdminCredsSecretMissing = "AdminCredsSecretMissing"
 )
 
 // Reason values for ConditionPackagesReady (set by the pre-check leg or the
@@ -158,9 +162,8 @@ type KeyToPath struct {
 }
 
 // SecretKeyRefSource references the admin-credentials Secret. Items must
-// contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY,
-// and KEYSTORE_PASSWORD — these specific keys are what the operator projects
-// into Curity pods.
+// contain exactly one entry each for ADMIN_PASSWORD and CONFIG_ENCRYPTION_KEY —
+// these specific keys are what the operator projects into Curity pods.
 type SecretKeyRefSource struct {
 	// Name must be a valid DNS-1123 subdomain Secret name.
 	// +kubebuilder:validation:Required
@@ -169,9 +172,9 @@ type SecretKeyRefSource struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
-	// +kubebuilder:validation:MinItems=3
-	// +kubebuilder:validation:MaxItems=3
-	// +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY') && self.exists_one(i, i.key == 'KEYSTORE_PASSWORD')",message="items must contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD"
+	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=2
+	// +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY')",message="items must contain exactly one entry each for ADMIN_PASSWORD and CONFIG_ENCRYPTION_KEY"
 	Items []KeyToPath `json:"items"`
 }
 
@@ -289,17 +292,30 @@ type AutoscalingSpec struct {
 // PDBSpec configures a PodDisruptionBudget for runtime pods.
 // Admin nodes do not participate in PDB reconciliation; if set there, the
 // field is ignored and a Warning event is emitted (see the node reconciler).
+// A PodDisruptionBudget accepts exactly one of minAvailable/maxUnavailable.
+// +kubebuilder:validation:XValidation:rule="(has(self.minAvailable) ? 1 : 0) + (has(self.maxUnavailable) ? 1 : 0) == 1",message="exactly one of minAvailable or maxUnavailable must be set"
 type PDBSpec struct {
 	// MinAvailable is the minimum number of pods that must remain available
 	// during voluntary disruption. Accepts an integer (e.g., 2) or a
 	// percentage string (e.g., "50%"). Matches upstream
-	// policy/v1.PodDisruptionBudgetSpec.MinAvailable.
+	// policy/v1.PodDisruptionBudgetSpec.MinAvailable. Mutually exclusive with
+	// maxUnavailable (set exactly one).
 	// Pattern catches invalid string forms; CEL catches negative integers
 	// (Pattern does not apply to the int variant of x-kubernetes-int-or-string).
 	// +kubebuilder:validation:XIntOrString
 	// +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
 	// +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="minAvailable must be non-negative"
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+
+	// MaxUnavailable is the maximum number of pods that may be unavailable
+	// during voluntary disruption. Accepts an integer (e.g., 1) or a
+	// percentage string (e.g., "50%"). Matches upstream
+	// policy/v1.PodDisruptionBudgetSpec.MaxUnavailable. Mutually exclusive with
+	// minAvailable (set exactly one).
+	// +kubebuilder:validation:XIntOrString
+	// +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
+	// +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="maxUnavailable must be non-negative"
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
 // AppliedManagedResource describes a managed ConfigMap or Secret
@@ -313,8 +329,8 @@ type AppliedManagedResource struct {
 	// +kubebuilder:validation:Enum=ConfigMap;Secret
 	Kind string `json:"kind"`
 
-	// ConfigType is the curity.io/config-type annotation value ("base", "license", or "logging").
-	// +kubebuilder:validation:Enum=base;license;logging
+	// ConfigType is the curity.io/config-type annotation value ("base", "license", "logging", or "postCommitScript").
+	// +kubebuilder:validation:Enum=base;license;logging;postCommitScript
 	ConfigType string `json:"configType"`
 }
 
@@ -352,13 +368,8 @@ type LoggingSpec struct {
 	// +kubebuilder:validation:Enum=ERROR;WARN;INFO;DEBUG;TRACE;OFF
 	Level string `json:"level,omitempty"`
 
-	// Stdout enables sidecar containers that tail Curity log files
-	// to stdout, making them accessible via kubectl logs.
-	// Sidecars are suppressed when Level is OFF, even if Stdout is true.
-	// +kubebuilder:default=false
-	Stdout bool `json:"stdout,omitempty"`
-
-	// Logs is the list of Curity log files to stream when stdout is enabled.
+	// Logs are the Curity log files to tail to stdout via sidecar containers (one
+	// per stream); a non-empty list enables them, empty/omitted or Level: OFF disables.
 	// Allowed values: audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts.
 	// +kubebuilder:validation:MaxItems=32
 	// +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts
@@ -532,4 +543,18 @@ type PackageBasicAuthSelector struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	PasswordKey string `json:"passwordKey"`
+}
+
+// NetworkPolicySpec configures the operator-managed NetworkPolicy that
+// restricts ingress to the cluster's admin node. Mirrors the upstream Helm
+// chart's release-level policy: ingress is allowed from same-cluster runtime
+// pods on the config and distributed-service ports, plus optionally from an
+// API-gateway namespace to the admin-UI port. Setting this field (even empty)
+// enables the policy; leaving it nil disables it.
+type NetworkPolicySpec struct {
+	// APIGatewayNamespace, when set and the admin UI is enabled, allows ingress
+	// to the admin-UI port from pods in this namespace. Omit to skip the UI rule.
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	APIGatewayNamespace string `json:"apiGatewayNamespace,omitempty"`
 }

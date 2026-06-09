@@ -396,7 +396,7 @@ func TestEnsureManagedConfigDiscovery_ScopeScanFailure_ReturnsError(t *testing.T
 		Recorder: rec,
 	}
 
-	err := r.ensureManagedConfigDiscovery(ctx, cluster)
+	err := r.ensureManagedConfigDiscovery(ctx, cluster, false)
 	if err == nil {
 		t.Fatalf("expected error when scope scan fails; got nil")
 	}
@@ -472,7 +472,7 @@ func TestEnsureManagedConfigDiscovery_DoesNotWriteAnnotation_NoEvent_NoIssue(t *
 		Recorder: rec,
 	}
 
-	if err := r.ensureManagedConfigDiscovery(ctx, cluster); err != nil {
+	if err := r.ensureManagedConfigDiscovery(ctx, cluster, false); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -582,7 +582,7 @@ func runDiscoveryWithObjs(t *testing.T, clusterName string, objs ...client.Objec
 		Scheme:   s,
 		Recorder: &capturingRecorder{},
 	}
-	if err := r.ensureManagedConfigDiscovery(ctx, cluster); err != nil {
+	if err := r.ensureManagedConfigDiscovery(ctx, cluster, false); err != nil {
 		t.Fatalf("ensureManagedConfigDiscovery: %v", err)
 	}
 	return cluster.Status.ManagedResourceIssues, cluster.Status.ManagedResourceIssueCount
@@ -614,6 +614,82 @@ func managedSecret(name, ns string, ann map[string]string, data map[string][]byt
 		s.Data = data
 	}
 	return s
+}
+
+func TestEnsureManagedConfigDiscovery_PostCommitScriptNoAdmin(t *testing.T) {
+	ctx := context.Background()
+	s := newScheme(t)
+	if err := v1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("adding v1alpha1 to scheme: %v", err)
+	}
+	// Two applicable postCommitScript resources — one ConfigMap, one Secret —
+	// to prove one event PER config and that the Secret-kind branch is exercised.
+	cm := managedCM("hooks-cm", "ns",
+		map[string]string{AnnotationConfigType: ConfigTypePostCommitScript},
+		map[string]string{"notify.sh": "#!/bin/sh\n"})
+	sec := managedSecret("hooks-sec", "ns",
+		map[string]string{AnnotationConfigType: ConfigTypePostCommitScript},
+		map[string][]byte{"rotate.sh": []byte("#!/bin/sh\n")})
+
+	run := func(adminExists bool) (*v1alpha1.IdentityServerCluster, []capturedEvent) {
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(s).
+			WithObjects(cluster, cm, sec).
+			WithStatusSubresource(&v1alpha1.IdentityServerCluster{}).
+			Build()
+		rec := &capturingRecorder{}
+		r := &IdentityServerClusterReconciler{Client: c, Scheme: s, Recorder: rec}
+		if err := r.ensureManagedConfigDiscovery(ctx, cluster, adminExists); err != nil {
+			t.Fatalf("ensureManagedConfigDiscovery(adminExists=%v): %v", adminExists, err)
+		}
+		return cluster, rec.events
+	}
+
+	// No admin → one PostCommitScriptNoAdmin Warning PER applicable resource, on
+	// the cluster CR, naming the right kind/name; NO managedResourceIssue (the
+	// warning is Event-only).
+	cluster, events := run(false)
+	count := 0
+	gotKind := map[string]string{}
+	for _, e := range events {
+		if e.reason != EventReasonPostCommitScriptNoAdmin {
+			continue
+		}
+		count++
+		if e.eventtype != corev1.EventTypeWarning {
+			t.Errorf("expected Warning event, got %q", e.eventtype)
+		}
+		if _, ok := e.object.(*v1alpha1.IdentityServerCluster); !ok {
+			t.Errorf("expected event on the IdentityServerCluster, got %T", e.object)
+		}
+		if strings.Contains(e.message, "ConfigMap/hooks-cm") {
+			gotKind["hooks-cm"] = "ConfigMap"
+		}
+		if strings.Contains(e.message, "Secret/hooks-sec") {
+			gotKind["hooks-sec"] = "Secret"
+		}
+	}
+	if count != 2 {
+		t.Errorf("expected one event per applicable resource (2), got %d: %+v", count, events)
+	}
+	if gotKind["hooks-cm"] != "ConfigMap" || gotKind["hooks-sec"] != "Secret" {
+		t.Errorf("expected events naming ConfigMap/hooks-cm and Secret/hooks-sec; got %+v", gotKind)
+	}
+	if len(cluster.Status.ManagedResourceIssues) != 0 {
+		t.Errorf("no-admin warning must be Event-only; got managedResourceIssues=%+v", cluster.Status.ManagedResourceIssues)
+	}
+
+	// Admin exists → no such event.
+	if _, evs := run(true); len(evs) > 0 {
+		for _, e := range evs {
+			if e.reason == EventReasonPostCommitScriptNoAdmin {
+				t.Errorf("did not expect PostCommitScriptNoAdmin when an admin exists; got %+v", e)
+			}
+		}
+	}
 }
 
 func TestManagedResourceIssues_NoIssues_EmptyAndZeroCount(t *testing.T) {
@@ -855,13 +931,13 @@ func TestManagedResourceIssues_Idempotent_TwoReconcilesSameOutput(t *testing.T) 
 		Recorder: &capturingRecorder{},
 	}
 
-	if err := r.ensureManagedConfigDiscovery(ctx, cluster); err != nil {
+	if err := r.ensureManagedConfigDiscovery(ctx, cluster, false); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
 	first := append([]v1alpha1.ManagedResourceIssue(nil), cluster.Status.ManagedResourceIssues...)
 	firstCount := cluster.Status.ManagedResourceIssueCount
 
-	if err := r.ensureManagedConfigDiscovery(ctx, cluster); err != nil {
+	if err := r.ensureManagedConfigDiscovery(ctx, cluster, false); err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
 	second := cluster.Status.ManagedResourceIssues
@@ -918,7 +994,7 @@ func TestManagedResourceIssues_ClearedWhenAllResourcesFixed(t *testing.T) {
 		Recorder: &capturingRecorder{},
 	}
 
-	if err := r.ensureManagedConfigDiscovery(ctx, cluster); err != nil {
+	if err := r.ensureManagedConfigDiscovery(ctx, cluster, false); err != nil {
 		t.Fatalf("first pass: %v", err)
 	}
 	if cluster.Status.ManagedResourceIssueCount != 1 {
@@ -935,7 +1011,7 @@ func TestManagedResourceIssues_ClearedWhenAllResourcesFixed(t *testing.T) {
 		t.Fatalf("update CM: %v", err)
 	}
 
-	if err := r.ensureManagedConfigDiscovery(ctx, cluster); err != nil {
+	if err := r.ensureManagedConfigDiscovery(ctx, cluster, false); err != nil {
 		t.Fatalf("second pass: %v", err)
 	}
 	if cluster.Status.ManagedResourceIssueCount != 0 {
@@ -981,7 +1057,7 @@ func TestEnsureManagedConfigDiscovery_ListFailure_EmitsScanFailedOnCluster(t *te
 	rec := &capturingRecorder{}
 	r := &IdentityServerClusterReconciler{Client: c, Scheme: s, Recorder: rec}
 
-	err := r.ensureManagedConfigDiscovery(ctx, cluster)
+	err := r.ensureManagedConfigDiscovery(ctx, cluster, false)
 	if err == nil {
 		t.Fatalf("expected error from List failure, got nil")
 	}

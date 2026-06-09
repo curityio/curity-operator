@@ -8,6 +8,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -49,11 +50,45 @@ func testCreateNode(ns, name string, nodeType v1alpha1.NodeType, clusterName str
 			Type:                     nodeType,
 			Role:                     name + "-role",
 			IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
-			Replicas:                 ptr.To(int32(1)),
 			Service:                  defaultTestService(),
 		},
 	}
+	// Admin nodes reject replicas at admission; runtime defaults to 1 anyway.
+	if nodeType != v1alpha1.NodeTypeAdmin {
+		node.Spec.Replicas = ptr.To(int32(1))
+	}
 	Expect(k8sClient.Create(ctx, node)).To(Succeed())
+}
+
+// userAdminCreds builds a CredentialsSource referencing a user-provided Secret
+// name with the conventional key→path items (mirrors defaultAdminCredentials).
+func userAdminCreds(name string) *v1alpha1.CredentialsSource {
+	return &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: name,
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+}
+
+// createOpaqueCredsSecret pre-creates an admin-credentials Secret with the
+// expected keys — for tests that exercise paths past the "Secret exists" gate
+// (e.g. encryption-key rotation) now that the operator no longer auto-creates a
+// user-provided Secret.
+func createOpaqueCredsSecret(ns, name string) {
+	Expect(k8sClient.Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		Type:       corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"ADMIN_PASSWORD":        []byte("test-password"),
+			"CONFIG_ENCRYPTION_KEY": []byte("test-encryption-key"),
+		},
+	})).To(Succeed())
 }
 
 func hasCondition(conditions []metav1.Condition, condType string, status metav1.ConditionStatus) bool {
@@ -121,9 +156,8 @@ func newUnstructuredNode(ns, name, role, clusterRef string) *unstructured.Unstru
 				"namespace": ns,
 			},
 			"spec": map[string]interface{}{
-				"type":     "runtime",
-				"role":     role,
-				"replicas": int64(1),
+				"type": "runtime",
+				"role": role,
 				"identityServerClusterRef": map[string]interface{}{
 					"name": clusterRef,
 				},
@@ -307,4 +341,19 @@ func countCfgVolumes(deploy *appsv1.Deployment) int {
 		}
 	}
 	return count
+}
+
+// markJobFailed drives a Job to Failed via the status subresource (envtest has no
+// Job controller), setting the StartTime + FailureTarget fields newer apiservers
+// require alongside Failed so specs survive an ENVTEST_K8S_VERSION bump past ~1.33.
+func markJobFailed(job *batchv1.Job, message string) {
+	now := metav1.Now()
+	if job.Status.StartTime == nil {
+		job.Status.StartTime = &now
+	}
+	job.Status.Conditions = []batchv1.JobCondition{
+		{Type: batchv1.JobFailureTarget, Status: corev1.ConditionTrue, Reason: "PodFailurePolicy", Message: message, LastTransitionTime: now},
+		{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "PodFailurePolicy", Message: message, LastTransitionTime: now},
+	}
+	Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
 }

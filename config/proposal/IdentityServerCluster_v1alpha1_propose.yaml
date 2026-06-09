@@ -34,23 +34,23 @@ spec:
     # +kubebuilder:validation:Required
     valueFrom:
       secretKeyRef:
-        # Secret must contain three data keys with these exact names: ADMIN_PASSWORD,
-        # CONFIG_ENCRYPTION_KEY, KEYSTORE_PASSWORD. The operator reads these keys
-        # directly in several reconciler paths (Secret bootstrap, encryption-key
-        # hashing, genclust Job, admin-UI password projection), so the names are
-        # load-bearing and not user-configurable. Only items[].path (the env var
-        # name projected into the container) is user-configurable below.
+        # Secret must contain two data keys with these exact names: ADMIN_PASSWORD,
+        # CONFIG_ENCRYPTION_KEY. The operator reads these keys directly in several
+        # reconciler paths (Secret bootstrap, encryption-key hashing, genclust Job,
+        # admin-UI password projection), so the names are load-bearing and not
+        # user-configurable. Only items[].path (the env var name projected into the
+        # container) is user-configurable below.
         # +kubebuilder:validation:Required
         # +kubebuilder:validation:MinLength=1
         # +kubebuilder:validation:MaxLength=253
         # +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
         name: curity-admin-secret
-        # The items slice projects three specific Secret keys into Curity pods.
-        # Must contain exactly one entry each for ADMIN_PASSWORD,
-        # CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD.
-        # +kubebuilder:validation:MinItems=3
-        # +kubebuilder:validation:MaxItems=3
-        # +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY') && self.exists_one(i, i.key == 'KEYSTORE_PASSWORD')",message="items must contain exactly one entry each for ADMIN_PASSWORD, CONFIG_ENCRYPTION_KEY, and KEYSTORE_PASSWORD"
+        # The items slice projects two specific Secret keys into Curity pods.
+        # Must contain exactly one entry each for ADMIN_PASSWORD and
+        # CONFIG_ENCRYPTION_KEY.
+        # +kubebuilder:validation:MinItems=2
+        # +kubebuilder:validation:MaxItems=2
+        # +kubebuilder:validation:XValidation:rule="self.exists_one(i, i.key == 'ADMIN_PASSWORD') && self.exists_one(i, i.key == 'CONFIG_ENCRYPTION_KEY')",message="items must contain exactly one entry each for ADMIN_PASSWORD and CONFIG_ENCRYPTION_KEY"
         # items[].path is the env var NAME projected into the Curity container.
         # Must be a valid POSIX env var identifier — starts with letter or
         # underscore, then alphanumerics or underscore.
@@ -63,8 +63,6 @@ spec:
             path: ADMIN_PASSWORD
           - key: CONFIG_ENCRYPTION_KEY
             path: CONFIG_ENCRYPTION_KEY
-          - key: KEYSTORE_PASSWORD
-            path: KEYSTORE_PASSWORD
 
   # Remote packages (ZIP archives) to download and unpack into each node's container at startup.
   # Supports public URLs, private GitHub releases, and any HTTP(S) endpoint requiring TLS customisation or credentials.
@@ -166,7 +164,7 @@ spec:
 # ------------------------------------------------------------
 
   # Default logging options for nodes unless overridden per IdentityServerNode.
-  # When `stdout` is true, the operator adds sidecar containers that tail files under `var/log` for each name in `logs` and stream them to the pod’s stdout.
+  # When `logs` is non-empty, the operator adds sidecar containers that tail files under `var/log` for each named stream to the pod’s stdout. An empty or omitted `logs` disables the sidecars.
   # The `resources` field under `logging` applies only to those sidecars, not the main Identity Server container.
   # +kubebuilder:validation:Optional
   logging:
@@ -178,10 +176,7 @@ spec:
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:MaxLength=512
     image: busybox:latest
-    # When true, deploy sidecars that tail additional log files listed in `logs` from `var/log` to stdout.
-    # +kubebuilder:validation:Optional
-    stdout: false
-    # Names of extra log streams to tail when `stdout` is true (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts).
+    # Names of log streams to tail from `var/log` to stdout (for example audit, request, cluster, confsvc, confsvc-internal, post-commit-scripts). A non-empty list deploys one sidecar per stream; empty disables them.
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:MaxItems=32
     # +kubebuilder:validation:items:Enum=audit;request;cluster;confsvc;confsvc-internal;post-commit-scripts
@@ -219,6 +214,73 @@ spec:
     readiness: {}
 
   # ------------------------------------------------------------
+  # Pod customization (escape hatches). Nodes inherit these unless overridden on
+  # IdentityServerNode (the node value replaces the cluster value entirely — no
+  # merge — except securityContext, which the operator merges over its required
+  # defaults).
+  # ------------------------------------------------------------
+
+  # Default image pull policy for the main Identity Server container (default `IfNotPresent`).
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:Enum=Always;Never;IfNotPresent
+  imagePullPolicy: IfNotPresent
+
+  # Default pod termination grace period in seconds (default `30`). Raise it (60–180
+  # typical) so Curity's JVM can drain in-flight OAuth/OIDC requests, close DB pools,
+  # and deregister from cluster membership on shutdown before SIGKILL.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:Minimum=0
+  # +kubebuilder:validation:Maximum=3600
+  terminationGracePeriodSeconds: 120
+
+  # Default pod-level security context — accepts the full Kubernetes PodSecurityContext.
+  # Unset fields inherit the operator's required defaults (runAsUser 10001,
+  # runAsGroup/fsGroup 10000), so a partial override never strips the UID/GID the Curity
+  # image needs. Set runAsUser/runAsGroup/fsGroup here only to deliberately override them.
+  # +kubebuilder:validation:Optional
+  securityContext:
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+    # runAsUser: 10001          # override the operator default only if you must
+    # runAsGroup: 10000
+    # fsGroup: 10000
+    # supplementalGroups: [2000]
+    # sysctls: []
+
+  # Default security context for the main Identity Server container — accepts the full
+  # Kubernetes container SecurityContext. Example below is a hardened baseline
+  # (readOnlyRootFilesystem stays false because the Identity Server writes to its filesystem).
+  # +kubebuilder:validation:Optional
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    runAsNonRoot: true
+    capabilities:
+      drop:
+        - ALL
+
+  # User-defined init containers, run AFTER the operator's package-fetcher init
+  # containers. Appended, never overriding operator-managed containers; the name
+  # `curity` is reserved and rejected at admission. Standard Kubernetes Container list.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=16
+  # +kubebuilder:validation:XValidation:rule="self.all(c, c.name != 'curity')",message="container name 'curity' is reserved by the operator"
+  initContainers: []
+  #  - name: wait-for-db
+  #    image: busybox:1.36
+  #    command: ["sh", "-c", "until nc -z db 5432; do sleep 2; done"]
+
+  # User-defined sidecar containers, run alongside the Identity Server container and
+  # AFTER the operator's log sidecars. Same naming rules as initContainers.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=16
+  # +kubebuilder:validation:XValidation:rule="self.all(c, c.name != 'curity')",message="container name 'curity' is reserved by the operator"
+  extraContainers: []
+  #  - name: audit-shipper
+  #    image: fluent/fluent-bit:3.0
+
+  # ------------------------------------------------------------
   # Advanced Configurations
   # ------------------------------------------------------------
 
@@ -251,16 +313,24 @@ spec:
     customMetrics: []
 
   # Cluster-wide PodDisruptionBudget defaults. Nodes inherit these unless overridden on IdentityServerNode.
-  # During voluntary disruptions (drains, rolling updates), Kubernetes uses this to cap how many pods may be unavailable at once. Set either `minAvailable` or `maxUnavailable`, not both.
+  # During voluntary disruptions (drains, rolling updates), Kubernetes uses this to cap how many pods may be unavailable at once. Set exactly one of `minAvailable` or `maxUnavailable`.
   # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:XValidation:rule="(has(self.minAvailable) ? 1 : 0) + (has(self.maxUnavailable) ? 1 : 0) == 1",message="exactly one of minAvailable or maxUnavailable must be set"
   podDisruptionBudget:
-    # Minimum number of pods that must remain available after eviction (integer or percentage string). Use this or `maxUnavailable`, not both.
+    # Minimum number of pods that must remain available after eviction (integer or percentage string). Mutually exclusive with `maxUnavailable`.
     # Must be non-negative.
     # +kubebuilder:validation:Optional
     # +kubebuilder:validation:XIntOrString
     # +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
     # +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="minAvailable must be non-negative"
     minAvailable: 1
+    # Maximum number of pods that may be unavailable during eviction (integer or percentage string). Mutually exclusive with `minAvailable`.
+    # Must be non-negative.
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:XIntOrString
+    # +kubebuilder:validation:Pattern=`^([0-9]+|[0-9]+%)$`
+    # +kubebuilder:validation:XValidation:rule="!(type(self) == int && self < 0)",message="maxUnavailable must be non-negative"
+    # maxUnavailable: 1
   
   # Cluster-wide node selector: pods run only on nodes whose labels match these key/value pairs.
   # +kubebuilder:validation:Optional
@@ -278,3 +348,18 @@ spec:
   # Cluster-wide affinity: control which nodes pods may use and how pods relate to other pods.
   # +kubebuilder:validation:Optional
   affinity: {}
+
+  # Operator-managed NetworkPolicy protecting this cluster's admin node. Cluster-scoped —
+  # there is no networkPolicy field on IdentityServerNode. When set (even as an empty
+  # object) the operator creates a NetworkPolicy allowing ingress to the admin pods only
+  # from same-cluster runtime pods (on the config and distributed-service ports), plus
+  # optionally from an API-gateway namespace to the admin-UI port. Omit to manage no
+  # policy. Note: a NetworkPolicy only takes effect on a cluster whose CNI enforces it.
+  # +kubebuilder:validation:Optional
+  networkPolicy:
+    # When set and the admin UI is enabled, also allow ingress to the admin-UI port from
+    # pods in this namespace. Omit to skip the UI rule.
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:MaxLength=63
+    # +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+    apiGatewayNamespace: edge-gateway

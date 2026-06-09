@@ -7,12 +7,13 @@ import (
 
 // IdentityServerNodeSpec defines the desired state of IdentityServerNode.
 // Each node creates a Deployment and Service for a Curity Identity Server instance.
-// Admin nodes are single-active by Curity design: replicas must be 1 and
+// Admin nodes are single-active by Curity design: replicas cannot be set and
 // autoscaling must not be enabled — both enforced at admission.
 // +kubebuilder:object:generate=true
-// +kubebuilder:validation:XValidation:rule="self.type != 'admin' || self.replicas <= 1",message="replicas must be 1 for admin-type nodes (Curity admin is single-active)"
+// +kubebuilder:validation:XValidation:rule="self.type != 'admin' || !has(self.replicas)",message="replicas cannot be set on admin-type nodes (Curity admin is always single-active with 1 replica)"
 // +kubebuilder:validation:XValidation:rule="self.type != 'admin' || !has(self.autoscaling) || !self.autoscaling.enabled",message="autoscaling cannot be enabled on admin-type nodes (Curity admin is single-active)"
 // +kubebuilder:validation:XValidation:rule="self.type == 'admin' || !has(self.service) || (!has(self.service.distributedServicePort) && !has(self.service.uiPort))",message="service.distributedServicePort and service.uiPort are only valid on admin-type nodes"
+// +kubebuilder:validation:XValidation:rule="self.type == 'admin' || !has(self.skipInstall)",message="skipInstall can only be set on admin-type nodes"
 type IdentityServerNodeSpec struct {
 	// Type determines whether this is an admin or runtime node.
 	// Only one admin node is allowed per cluster.
@@ -30,14 +31,17 @@ type IdentityServerNodeSpec struct {
 	// UI configures the admin UI. Only applicable for admin-type nodes.
 	UI *UISpec `json:"ui,omitempty"`
 
+	// SkipInstall passes SKIP_INSTALL=1 to the admin container so it boots
+	// without running first-run setup. Admin-only (CEL-enforced).
+	SkipInstall *bool `json:"skipInstall,omitempty"`
+
 	// IdentityServerClusterRef references the IdentityServerCluster managing this node.
 	// +kubebuilder:validation:Required
 	IdentityServerClusterRef ObjectReference `json:"identityServerClusterRef"`
 
-	// Replicas is the number of pods (Deployment replicas) for this node.
-	// Admin-type nodes are restricted to replicas=1 by the CEL rule on
-	// IdentityServerNodeSpec (Curity admin is single-active).
-	// +kubebuilder:default=1
+	// Replicas is the number of pods (Deployment replicas) for runtime nodes.
+	// Must not be set on admin nodes; the admin is always 1 (CEL-enforced).
+	// Omitted runtime nodes default to 1 in the reconciler.
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10000
 	Replicas *int32 `json:"replicas,omitempty"`
@@ -95,6 +99,42 @@ type IdentityServerNodeSpec struct {
 
 	// Affinity defines scheduling constraints for pods.
 	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// InitContainers are user-defined init containers run after the operator's
+	// package-fetcher init containers. They cannot override operator-managed
+	// containers; a name colliding with an operator container is rejected.
+	// Overrides the cluster-level value when set; set to [] to inherit none.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(c, c.name != 'curity')",message="container name 'curity' is reserved by the operator"
+	InitContainers []corev1.Container `json:"initContainers,omitempty"`
+
+	// ExtraContainers are user-defined sidecar containers run alongside the
+	// Curity container and after the operator's log sidecars. Same naming
+	// rules as initContainers. Overrides the cluster value when set; [] to inherit none.
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:XValidation:rule="self.all(c, c.name != 'curity')",message="container name 'curity' is reserved by the operator"
+	ExtraContainers []corev1.Container `json:"extraContainers,omitempty"`
+
+	// SecurityContext overrides the pod-level security context. Unset fields
+	// inherit the operator defaults (runAsUser 10001, runAsGroup/fsGroup 10000).
+	// Overrides cluster-level value entirely when set.
+	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
+
+	// ContainerSecurityContext sets the security context of the main Curity
+	// container. Overrides cluster-level value entirely when set.
+	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
+
+	// TerminationGracePeriodSeconds overrides the pod termination grace period
+	// (default 30). Raise it (60-180 typical) for Curity's JVM shutdown under load.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3600
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
+	// ImagePullPolicy overrides the pull policy of the main Curity container.
+	// When unset it defaults like Kubernetes: Always for a :latest or untagged
+	// image, otherwise IfNotPresent.
+	// +kubebuilder:validation:Enum=Always;Never;IfNotPresent
+	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 }
 
 // IdentityServerNodeStatus defines the observed state of IdentityServerNode.

@@ -7,9 +7,12 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -568,7 +571,7 @@ func TestBuildDeployment_LoggingLevelOff(t *testing.T) {
 func TestBuildDeployment_LoggingOffSuppressesSidecars(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF", Stdout: true, Logs: []string{"audit"}}
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF", Logs: []string{"audit"}}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
@@ -582,14 +585,44 @@ func TestBuildDeployment_LoggingOffSuppressesSidecars(t *testing.T) {
 	}
 }
 
-func TestBuildDeployment_LoggingOffClusterNodeStdoutOverride(t *testing.T) {
-	// Regression: cluster sets OFF, node overrides only Stdout/Logs (not Level).
+func TestBuildDeployment_SidecarImagePullPolicyDefaulted(t *testing.T) {
+	// Log sidecars are operator-generated; every container the operator emits must
+	// carry the apiserver-defaulted fields (e.g. ImagePullPolicy) or it drifts.
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "INFO", Logs: []string{"audit", "request"}}
+
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+
+	containers := deploy.Spec.Template.Spec.Containers
+	if len(containers) != 3 {
+		t.Fatalf("expected main + 2 sidecars, got %d containers", len(containers))
+	}
+	for _, c := range containers {
+		if c.ImagePullPolicy == "" {
+			t.Errorf("container %q missing ImagePullPolicy (apiserver defaults it → drift)", c.Name)
+		}
+		if c.TerminationMessagePath == "" || c.TerminationMessagePolicy == "" {
+			t.Errorf("container %q missing terminationMessage defaults", c.Name)
+		}
+	}
+	for _, c := range containers {
+		if c.Name == "audit" || c.Name == "request" {
+			if c.ImagePullPolicy != corev1.PullAlways {
+				t.Errorf("sidecar %q: want Always (busybox:latest), got %q", c.Name, c.ImagePullPolicy)
+			}
+		}
+	}
+}
+
+func TestBuildDeployment_LoggingOffClusterNodeLogsOverride(t *testing.T) {
+	// Regression: cluster sets OFF, node overrides only Logs (not Level).
 	// resolveLogging returns node spec (Level:""), resolveLoggingLevel returns "OFF".
 	// Sidecars and log-volume must still be suppressed.
 	cluster := newTestCluster()
 	cluster.Spec.Logging = &v1alpha1.LoggingSpec{Level: "OFF"}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{"audit"}}
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Logs: []string{"audit"}}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
@@ -604,10 +637,10 @@ func TestBuildDeployment_LoggingOffClusterNodeStdoutOverride(t *testing.T) {
 	}
 }
 
-func TestBuildDeployment_LoggingStdoutDisabled(t *testing.T) {
+func TestBuildDeployment_LoggingUnsetDisabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	// stdout=false (default) → no log volume, no sidecars
+	// logging unset → no log volume, no sidecars
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
@@ -615,27 +648,23 @@ func TestBuildDeployment_LoggingStdoutDisabled(t *testing.T) {
 	}
 	for _, v := range deploy.Spec.Template.Spec.Volumes {
 		if v.Name == "log-volume" {
-			t.Errorf("log-volume should not exist when stdout=false")
+			t.Errorf("log-volume should not exist when logging is unset")
 		}
 	}
 }
 
-func TestBuildDeployment_LoggingStdoutEnabledNoLogs(t *testing.T) {
+func TestBuildDeployment_LoggingEmptyLogsDisabled(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
-	node.Spec.Logging = &v1alpha1.LoggingSpec{Stdout: true, Logs: []string{}}
+	// empty logs list → disabled: no log volume, no sidecars
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Logs: []string{}}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 
-	// Volume should exist (stdout=true) but no sidecars (logs=[])
-	foundLogVol := false
 	for _, v := range deploy.Spec.Template.Spec.Volumes {
 		if v.Name == "log-volume" {
-			foundLogVol = true
+			t.Errorf("log-volume should not exist when logs is empty")
 		}
-	}
-	if !foundLogVol {
-		t.Errorf("log-volume should exist when stdout=true")
 	}
 	if len(deploy.Spec.Template.Spec.Containers) != 1 {
 		t.Errorf("expected 1 container (no sidecars for empty logs), got %d", len(deploy.Spec.Template.Spec.Containers))
@@ -646,8 +675,7 @@ func TestBuildDeployment_LoggingSidecars(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit", "request"},
+		Logs: []string{"audit", "request"},
 	}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
@@ -687,9 +715,8 @@ func TestBuildDeployment_LoggingCustomImage(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit"},
-		Image:  "alpine:3.19",
+		Logs:  []string{"audit"},
+		Image: "alpine:3.19",
 	}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
@@ -703,8 +730,7 @@ func TestBuildDeployment_LoggingResources(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit"},
+		Logs: []string{"audit"},
 		Resources: &corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU: resource.MustParse("10m"),
@@ -723,13 +749,11 @@ func TestBuildDeployment_LoggingResources(t *testing.T) {
 func TestBuildDeployment_LoggingNodeOverridesCluster(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"audit", "request"},
+		Logs: []string{"audit", "request"},
 	}
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
 	node.Spec.Logging = &v1alpha1.LoggingSpec{
-		Stdout: true,
-		Logs:   []string{"cluster"},
+		Logs: []string{"cluster"},
 	}
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
@@ -1108,7 +1132,7 @@ func TestBuildDeployment_AdminCredentialsEnvVarUsesPath(t *testing.T) {
 			},
 		},
 	}
-	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
@@ -1126,7 +1150,6 @@ func TestBuildDeployment_AdminCredentialsMultipleItems(t *testing.T) {
 				Items: []v1alpha1.KeyToPath{
 					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-					{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 				},
 			},
 		},
@@ -1138,7 +1161,6 @@ func TestBuildDeployment_AdminCredentialsMultipleItems(t *testing.T) {
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
 	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "admin-secret", "CONFIG_ENCRYPTION_KEY")
-	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "admin-secret", "KEYSTORE_PASSWORD")
 }
 
 func TestBuildDeployment_AdminCredentialsNoSpecialMapping(t *testing.T) {
@@ -1154,13 +1176,104 @@ func TestBuildDeployment_AdminCredentialsNoSpecialMapping(t *testing.T) {
 			},
 		},
 	}
-	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
 	// Should use Path as-is, not rename to PASSWORD
 	assertEnvVarFromSecret(t, envVars, "MY_CUSTOM_NAME", "admin-secret", "ADMIN_PASSWORD")
+}
+
+func TestBuildDeployment_RuntimeOmitsAdminPassword(t *testing.T) {
+	// The admin password is the installer trigger and must not reach runtime
+	// nodes; other credential keys still project there.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertNoEnvVar(t, envVars, "PASSWORD")
+	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "admin-secret", "CONFIG_ENCRYPTION_KEY")
+}
+
+func TestBuildDeployment_RuntimeOmitsAdminPasswordCustomName(t *testing.T) {
+	// Gating keys off the ADMIN_PASSWORD secret key, not its projected name, so
+	// any custom env name is still dropped on runtime.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "MY_CUSTOM_NAME"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertNoEnvVar(t, envVars, "MY_CUSTOM_NAME")
+}
+
+func TestBuildDeployment_SkipInstallAdmin(t *testing.T) {
+	// skipInstall passes SKIP_INSTALL=1; the password is still projected on the
+	// admin (the image skips first-run setup whenever SKIP_INSTALL is set).
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+					{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.SkipInstall = ptr.To(true)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVar(t, envVars, "SKIP_INSTALL", "1")
+	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
+	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "admin-secret", "CONFIG_ENCRYPTION_KEY")
+}
+
+func TestBuildDeployment_SkipInstallUnsetAdminKeepsPassword(t *testing.T) {
+	// Without skipInstall, the admin keeps the password and gets no SKIP_INSTALL.
+	cluster := newTestCluster()
+	cluster.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+		ValueFrom: v1alpha1.CredentialsValueFrom{
+			SecretKeyRef: v1alpha1.SecretKeyRefSource{
+				Name: "admin-secret",
+				Items: []v1alpha1.KeyToPath{
+					{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
+				},
+			},
+		},
+	}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+
+	envVars := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0].Env
+
+	assertEnvVarFromSecret(t, envVars, "PASSWORD", "admin-secret", "ADMIN_PASSWORD")
+	assertNoEnvVar(t, envVars, "SKIP_INSTALL")
 }
 
 // --- Admin UI PASSWORD auto-injection tests ---
@@ -1301,13 +1414,12 @@ func TestDefaultAdminCredentials_SecretName(t *testing.T) {
 func TestDefaultAdminCredentials_Items(t *testing.T) {
 	creds := defaultAdminCredentials("test")
 	items := creds.ValueFrom.SecretKeyRef.Items
-	if len(items) != 3 {
-		t.Fatalf("expected 3 items, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
 	}
 	expected := []v1alpha1.KeyToPath{
 		{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 		{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-		{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 	}
 	for i, item := range items {
 		if item.Key != expected[i].Key || item.Path != expected[i].Path {
@@ -1328,11 +1440,12 @@ func TestBuildDeployment_DefaultedCredentials_InjectsEnvVars(t *testing.T) {
 
 	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
 	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "cluster-1-admin-creds", "CONFIG_ENCRYPTION_KEY")
-	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "cluster-1-admin-creds", "KEYSTORE_PASSWORD")
+	assertNoEnvVar(t, envVars, "KEYSTORE_PASSWORD")
 }
 
 func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
-	// Runtime nodes get all credential env vars from items mapping.
+	// Runtime nodes get the encryption key but not the admin password — the
+	// password is the installer trigger and belongs only on the admin.
 	cluster := newTestCluster()
 	cluster.Spec.AdminCredentials = defaultAdminCredentials(cluster.Name)
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
@@ -1340,9 +1453,9 @@ func TestBuildDeployment_DefaultedCredentials_RuntimeNode(t *testing.T) {
 	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
 	envVars := deploy.Spec.Template.Spec.Containers[0].Env
 
-	assertEnvVarFromSecret(t, envVars, "PASSWORD", "cluster-1-admin-creds", "ADMIN_PASSWORD")
+	assertNoEnvVar(t, envVars, "PASSWORD")
 	assertEnvVarFromSecret(t, envVars, "CONFIG_ENCRYPTION_KEY", "cluster-1-admin-creds", "CONFIG_ENCRYPTION_KEY")
-	assertEnvVarFromSecret(t, envVars, "KEYSTORE_PASSWORD", "cluster-1-admin-creds", "KEYSTORE_PASSWORD")
+	assertNoEnvVar(t, envVars, "KEYSTORE_PASSWORD")
 }
 
 // --- Cluster Config Builder Tests ---
@@ -1497,6 +1610,150 @@ func TestBuildClusterConfigJob_BasicSpec(t *testing.T) {
 	// Restart policy
 	if job.Spec.Template.Spec.RestartPolicy != corev1.RestartPolicyNever {
 		t.Errorf("expected RestartPolicyNever")
+	}
+}
+
+func TestBuildClusterConfigJob_PodFailurePolicyAndTerminationMessage(t *testing.T) {
+	job := buildClusterConfigJob(newTestCluster(), "admin-1", "", portConfig)
+
+	if got := job.Spec.Template.Spec.Containers[0].TerminationMessagePolicy; got != corev1.TerminationMessageFallbackToLogsOnError {
+		t.Errorf("expected terminationMessagePolicy FallbackToLogsOnError, got %q", got)
+	}
+
+	pfp := job.Spec.PodFailurePolicy
+	if pfp == nil || len(pfp.Rules) != 2 {
+		t.Fatalf("expected 2 podFailurePolicy rules, got %+v", pfp)
+	}
+	// Rule 0: Ignore infra disruptions (DisruptionTarget).
+	if pfp.Rules[0].Action != batchv1.PodFailurePolicyActionIgnore ||
+		len(pfp.Rules[0].OnPodConditions) != 1 ||
+		pfp.Rules[0].OnPodConditions[0].Type != corev1.DisruptionTarget {
+		t.Errorf("rule 0: expected Ignore on DisruptionTarget, got %+v", pfp.Rules[0])
+	}
+	// Rule 1: FailJob on genclust exit code 1.
+	r1 := pfp.Rules[1]
+	if r1.Action != batchv1.PodFailurePolicyActionFailJob || r1.OnExitCodes == nil ||
+		r1.OnExitCodes.ContainerName == nil || *r1.OnExitCodes.ContainerName != "genclust" ||
+		r1.OnExitCodes.Operator != batchv1.PodFailurePolicyOnExitCodesOpIn ||
+		len(r1.OnExitCodes.Values) != 1 || r1.OnExitCodes.Values[0] != 1 {
+		t.Errorf("rule 1: expected FailJob on genclust exit 1, got %+v", r1)
+	}
+}
+
+func TestExtractGenclustFailureMessage(t *testing.T) {
+	pod := func(csName string, exit int32, msg, reason string) corev1.Pod {
+		return corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "p"},
+			Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  csName,
+				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: exit, Message: msg, Reason: reason}},
+			}}},
+		}
+	}
+	podAt := func(name string, ts int64, msg string) corev1.Pod {
+		p := pod("genclust", 1, msg, "Error")
+		p.Name = name
+		p.CreationTimestamp = metav1.NewTime(time.Unix(ts, 0))
+		return p
+	}
+	multiContainer := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "mc"},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: "log-sidecar", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+			{Name: "genclust", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Message: "boom"}}},
+		}},
+	}
+	stackTail := "\t... 14 more\nCaused by: com.google.common.io.BaseEncoding$DecodingException: Invalid input length 65\n\tat com.google.Foo.bar(Foo.java:1)\n\t... 3 more"
+	tests := []struct {
+		name string
+		pods []corev1.Pod
+		want string
+	}{
+		{"exception line from stack tail", []corev1.Pod{pod("genclust", 1, stackTail, "Error")},
+			"Invalid input length 65"},
+		{"empty message falls back to reason", []corev1.Pod{pod("genclust", 1, "", "OOMKilled")}, "OOMKilled"},
+		{"exit 0 ignored", []corev1.Pod{pod("genclust", 0, "x", "Completed")}, ""},
+		{"non-genclust container ignored", []corev1.Pod{pod("other", 1, "boom Exception", "Error")}, ""},
+		{"newest failed pod wins", []corev1.Pod{podAt("old", 100, "older cause"), podAt("new", 200, "newer cause")}, "newer cause"},
+		{"skips non-genclust container in same pod", []corev1.Pod{multiContainer}, "boom"},
+		{"no pods", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := extractGenclustFailureMessage(tt.pods); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSummarizeTerminationMessage(t *testing.T) {
+	if got := summarizeTerminationMessage("plain first line\n\tat x\nboom Exception: bad key"); got != "boom Exception: bad key" {
+		t.Errorf("exception line: got %q", got)
+	}
+	if got := summarizeTerminationMessage("just a plain message\n\tat frame(F.java:1)"); got != "just a plain message" {
+		t.Errorf("fallback first non-frame line: got %q", got)
+	}
+	if got := summarizeTerminationMessage(strings.Repeat("x", 300)); len([]rune(got)) != 257 || !strings.HasSuffix(got, "…") {
+		t.Errorf("truncation (fallback line): runes=%d suffixOK=%v", len([]rune(got)), strings.HasSuffix(got, "…"))
+	}
+	// Java root cause: the last "Caused by:" wins over the outer exception line,
+	// and the "Caused by:" + fully-qualified class prefix is stripped.
+	root := "Exception in thread \"main\" java.lang.IllegalArgumentException: wrapper\n\tat a.B(C.java:1)\nCaused by: com.x.RootException: the real reason\n\t... 9 more"
+	if got := summarizeTerminationMessage(root); got != "the real reason" {
+		t.Errorf("caused-by preference: got %q", got)
+	}
+	// Truncation also applies on the matched exception-line path (not just fallback).
+	if got := summarizeTerminationMessage("RootException: " + strings.Repeat("y", 300)); len([]rune(got)) != 257 || !strings.HasSuffix(got, "…") {
+		t.Errorf("truncation (matched line): runes=%d suffixOK=%v", len([]rune(got)), strings.HasSuffix(got, "…"))
+	}
+}
+
+func TestHumanizeJavaMessage(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"caused-by + fqcn", "Caused by: com.google.common.io.BaseEncoding$DecodingException: Invalid input length 65", "Invalid input length 65"},
+		{"keeps inner colon", "Caused by: com.x.BaseEncoding$DecodingException: Unrecognized character: Z", "Unrecognized character: Z"},
+		{"fqcn without caused-by", "com.x.RootException: the real reason", "the real reason"},
+		{"bare fqcn, no message", "java.lang.NullPointerException", "NullPointerException"},
+		{"package-less class not stripped", "RootException: x", "RootException: x"},
+		{"spaced head not stripped", "boom Exception: bad key", "boom Exception: bad key"},
+		{"dotted non-throwable not stripped", "config.yaml: bad", "config.yaml: bad"},
+		{"plain message untouched", "Invalid input length 65", "Invalid input length 65"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := humanizeJavaMessage(tt.in); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestChooseJobFailedMessage(t *testing.T) {
+	jobFailed := func(msg string) *metav1.Condition {
+		return &metav1.Condition{Type: "ClusterConfigReady", Status: metav1.ConditionFalse, Reason: "JobFailed", Message: msg}
+	}
+	tests := []struct {
+		name       string
+		podCause   string
+		existing   *metav1.Condition
+		jobCondMsg string
+		want       string
+	}{
+		{"fresh pod cause wins", "Invalid input length 65", jobFailed("genclust failed: stale"), "backoff", "genclust failed: Invalid input length 65"},
+		{"pod GC'd: preserve captured cause (no regress, no re-event)", "", jobFailed("genclust failed: Invalid input length 65"), "backoff", "genclust failed: Invalid input length 65"},
+		{"first failure, no pod: generic", "", nil, "Job has reached the specified backoff limit", "genclust Job failed: Job has reached the specified backoff limit"},
+		{"prior condition not JobFailed: generic", "", &metav1.Condition{Type: "ClusterConfigReady", Status: metav1.ConditionFalse, Reason: "JobRunning", Message: "running"}, "boom", "genclust Job failed: boom"},
+		{"upgrade generic->cause when pod reappears", "real cause", jobFailed("genclust Job failed: backoff"), "backoff", "genclust failed: real cause"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := chooseJobFailedMessage(tt.podCause, tt.existing, tt.jobCondMsg); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1658,6 +1915,14 @@ func assertContains(t *testing.T, slice []string, item string) {
 	t.Errorf("expected slice to contain %q, got %v", item, slice)
 }
 
+func containerNames(cs []corev1.Container) []string {
+	names := make([]string, len(cs))
+	for i, c := range cs {
+		names[i] = c.Name
+	}
+	return names
+}
+
 func assertNotContains(t *testing.T, slice []string, item string) {
 	t.Helper()
 	for _, s := range slice {
@@ -1739,6 +2004,16 @@ func assertEnvVarFromSecret(t *testing.T, envVars []corev1.EnvVar, envName, secr
 		}
 	}
 	t.Errorf("expected env var %s to exist", envName)
+}
+
+func assertNoEnvVar(t *testing.T, envVars []corev1.EnvVar, name string) {
+	t.Helper()
+	for _, e := range envVars {
+		if e.Name == name {
+			t.Errorf("expected env var %s to be absent", name)
+			return
+		}
+	}
 }
 
 // --- Scheduling tests ---
@@ -2030,6 +2305,100 @@ func TestBuildVolumes_BaseConfigMap(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected mount at %s", wantPath)
+	}
+}
+
+func TestVolumeDefaultMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		configType string
+		isSecret   bool
+		want       int32
+	}{
+		{"postCommitScript ConfigMap → 0755 (other-exec)", ConfigTypePostCommitScript, false, 0o755},
+		{"postCommitScript Secret → 0555 (other-exec, no write)", ConfigTypePostCommitScript, true, 0o555},
+		{"base ConfigMap keeps apiserver default", ConfigTypeBase, false, corev1.ConfigMapVolumeSourceDefaultMode},
+		{"base Secret keeps apiserver default", ConfigTypeBase, true, corev1.SecretVolumeSourceDefaultMode},
+		{"logging ConfigMap keeps apiserver default", ConfigTypeLogging, false, corev1.ConfigMapVolumeSourceDefaultMode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := volumeDefaultMode(tc.configType, tc.isSecret)
+			if got == nil || *got != tc.want {
+				t.Errorf("volumeDefaultMode(%q, secret=%v) = %v, want %o", tc.configType, tc.isSecret, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildVolumes_PostCommitScriptConfigMapIsExecutableDirMount(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "hooks", IsSecret: false, ConfigType: ConfigTypePostCommitScript,
+			Data: map[string][]byte{"notify.sh": []byte("#!/bin/sh\n")}},
+		// Regression guard: a base ConfigMap in the same call must keep 0644.
+		{Name: "base-cm", IsSecret: false, ConfigType: ConfigTypeBase,
+			Data: map[string][]byte{"config.xml": []byte("<c/>")}},
+	}
+	volumes, mounts := buildVolumes("cluster-1", configs)
+
+	var scriptVol, baseVol *corev1.Volume
+	for i := range volumes {
+		switch volumes[i].Name {
+		case configVolumeName(false, "hooks"):
+			scriptVol = &volumes[i]
+		case configVolumeName(false, "base-cm"):
+			baseVol = &volumes[i]
+		}
+	}
+	if scriptVol == nil || scriptVol.ConfigMap == nil {
+		t.Fatalf("expected ConfigMap volume for postCommitScript; volumes=%v", volumes)
+	}
+	if scriptVol.ConfigMap.DefaultMode == nil || *scriptVol.ConfigMap.DefaultMode != 0o755 {
+		t.Errorf("expected postCommitScript volume DefaultMode 0755, got %v", scriptVol.ConfigMap.DefaultMode)
+	}
+	// Regression: the per-type mode helper must not disturb base config.
+	if baseVol == nil || baseVol.ConfigMap == nil ||
+		baseVol.ConfigMap.DefaultMode == nil || *baseVol.ConfigMap.DefaultMode != corev1.ConfigMapVolumeSourceDefaultMode {
+		t.Errorf("base ConfigMap DefaultMode must stay apiserver default, got %v", baseVol.ConfigMap.DefaultMode)
+	}
+
+	// Directory mount: per-key mangled filename under the post-commit-scripts dir.
+	wantPath := MountPathPostCommitScript + mountFilename(false, "hooks", "notify.sh")
+	var m *corev1.VolumeMount
+	for i := range mounts {
+		if mounts[i].MountPath == wantPath {
+			m = &mounts[i]
+			break
+		}
+	}
+	if m == nil {
+		t.Fatalf("expected mount at %s; mounts=%v", wantPath, mounts)
+	}
+	if m.SubPath != "notify.sh" {
+		t.Errorf("expected SubPath notify.sh, got %q", m.SubPath)
+	}
+	if !m.ReadOnly {
+		t.Error("expected ReadOnly mount")
+	}
+}
+
+func TestBuildVolumes_PostCommitScriptSecretIs0555(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "sec-hooks", IsSecret: true, ConfigType: ConfigTypePostCommitScript,
+			Data: map[string][]byte{"run.sh": []byte("#!/bin/sh\n")}},
+	}
+	volumes, _ := buildVolumes("cluster-1", configs)
+	var vol *corev1.Volume
+	for i := range volumes {
+		if volumes[i].Name == configVolumeName(true, "sec-hooks") {
+			vol = &volumes[i]
+		}
+	}
+	if vol == nil || vol.Secret == nil {
+		t.Fatalf("expected Secret volume for postCommitScript; volumes=%v", volumes)
+	}
+	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o555 {
+		t.Errorf("expected postCommitScript Secret DefaultMode 0555, got %v", vol.Secret.DefaultMode)
 	}
 }
 
@@ -2706,6 +3075,21 @@ func TestBuildPDB_MinAvailable_Percentage(t *testing.T) {
 	}
 }
 
+func TestBuildPDB_MaxUnavailable(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	max := intstr.FromInt32(1)
+	node.Spec.PodDisruptionBudget = &v1alpha1.PDBSpec{MaxUnavailable: &max}
+
+	pdb := buildPDB(cluster, node)
+	if pdb.Spec.MaxUnavailable == nil || pdb.Spec.MaxUnavailable.IntValue() != 1 {
+		t.Fatalf("expected MaxUnavailable=1, got %+v", pdb.Spec.MaxUnavailable)
+	}
+	if pdb.Spec.MinAvailable != nil {
+		t.Errorf("MinAvailable must be unset when maxUnavailable is used, got %+v", pdb.Spec.MinAvailable)
+	}
+}
+
 func TestBuildPDB_Labels(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeRuntime)
@@ -2930,6 +3314,15 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 		"Tolerations":               true,
 		"TopologySpreadConstraints": true,
 		"Affinity":                  true,
+		// Pod-shape escape hatches + NetworkPolicy: none affect cluster.xml
+		// generation, so they must not trigger a genclust Job re-run.
+		"InitContainers":                true,
+		"ExtraContainers":               true,
+		"SecurityContext":               true,
+		"ContainerSecurityContext":      true,
+		"TerminationGracePeriodSeconds": true,
+		"ImagePullPolicy":               true,
+		"NetworkPolicy":                 true,
 	}
 
 	specType := reflect.TypeOf(v1alpha1.IdentityServerClusterSpec{})
@@ -3325,4 +3718,478 @@ func TestMergeDefaultTolerations(t *testing.T) {
 			}
 		}
 	})
+}
+
+// --- Pod-customization escape hatches + NetworkPolicy ---
+
+func TestResolveImagePullPolicy(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	if got := resolveImagePullPolicy(cluster, node); got != corev1.PullIfNotPresent {
+		t.Errorf("default: want IfNotPresent, got %q", got)
+	}
+	cluster.Spec.ImagePullPolicy = corev1.PullNever
+	if got := resolveImagePullPolicy(cluster, node); got != corev1.PullNever {
+		t.Errorf("cluster value: want Never, got %q", got)
+	}
+	node.Spec.ImagePullPolicy = corev1.PullAlways
+	if got := resolveImagePullPolicy(cluster, node); got != corev1.PullAlways {
+		t.Errorf("node overrides cluster: want Always, got %q", got)
+	}
+
+	// Unset policy is tag-aware on the resolved image (matches the apiserver
+	// and the user-container default), not a flat IfNotPresent.
+	latest := newTestCluster()
+	latest.Spec.Image = "myreg/idsvr:latest"
+	if got := resolveImagePullPolicy(latest, newTestNode(v1alpha1.NodeTypeRuntime)); got != corev1.PullAlways {
+		t.Errorf(":latest image, unset policy: want Always, got %q", got)
+	}
+	pinned := newTestCluster()
+	pinned.Spec.Image = "myreg/idsvr:1.2.3"
+	if got := resolveImagePullPolicy(pinned, newTestNode(v1alpha1.NodeTypeRuntime)); got != corev1.PullIfNotPresent {
+		t.Errorf("pinned image, unset policy: want IfNotPresent, got %q", got)
+	}
+}
+
+func TestResolveTerminationGracePeriodSeconds(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	if got := resolveTerminationGracePeriodSeconds(cluster, node); got == nil || *got != 30 {
+		t.Errorf("default: want 30, got %v", got)
+	}
+	cluster.Spec.TerminationGracePeriodSeconds = ptr.To(int64(90))
+	if got := resolveTerminationGracePeriodSeconds(cluster, node); *got != 90 {
+		t.Errorf("cluster value: want 90, got %d", *got)
+	}
+	node.Spec.TerminationGracePeriodSeconds = ptr.To(int64(120))
+	if got := resolveTerminationGracePeriodSeconds(cluster, node); *got != 120 {
+		t.Errorf("node overrides cluster: want 120, got %d", *got)
+	}
+}
+
+func TestResolveContainers_NodeOverridesCluster(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	cluster.Spec.InitContainers = []corev1.Container{{Name: "init-cluster"}}
+	cluster.Spec.ExtraContainers = []corev1.Container{{Name: "sc-cluster"}}
+
+	if got := resolveInitContainers(cluster, node); len(got) != 1 || got[0].Name != "init-cluster" {
+		t.Errorf("init unset: want cluster value, got %v", got)
+	}
+	if got := resolveExtraContainers(cluster, node); len(got) != 1 || got[0].Name != "sc-cluster" {
+		t.Errorf("extra unset: want cluster value, got %v", got)
+	}
+	node.Spec.InitContainers = []corev1.Container{{Name: "init-node"}}
+	node.Spec.ExtraContainers = []corev1.Container{{Name: "sc-node"}}
+	if got := resolveInitContainers(cluster, node); len(got) != 1 || got[0].Name != "init-node" {
+		t.Errorf("init set: want node value, got %v", got)
+	}
+	if got := resolveExtraContainers(cluster, node); len(got) != 1 || got[0].Name != "sc-node" {
+		t.Errorf("extra set: want node value, got %v", got)
+	}
+}
+
+func TestMergePodSecurityContext(t *testing.T) {
+	base := mergePodSecurityContext(nil)
+	if *base.RunAsUser != 10001 || *base.RunAsGroup != 10000 || *base.FSGroup != 10000 {
+		t.Fatalf("nil user: want 10001/10000/10000, got %+v", base)
+	}
+
+	policy := corev1.FSGroupChangeOnRootMismatch
+	merged := mergePodSecurityContext(&corev1.PodSecurityContext{FSGroupChangePolicy: &policy})
+	if *merged.RunAsUser != 10001 || *merged.RunAsGroup != 10000 || *merged.FSGroup != 10000 {
+		t.Errorf("partial override dropped base UID/GID: %+v", merged)
+	}
+	if merged.FSGroupChangePolicy == nil || *merged.FSGroupChangePolicy != policy {
+		t.Errorf("partial override dropped the user field")
+	}
+
+	over := mergePodSecurityContext(&corev1.PodSecurityContext{RunAsUser: ptr.To(int64(2000))})
+	if *over.RunAsUser != 2000 {
+		t.Errorf("explicit override: want runAsUser 2000, got %d", *over.RunAsUser)
+	}
+	if *over.RunAsGroup != 10000 || *over.FSGroup != 10000 {
+		t.Errorf("explicit override dropped other base fields: %+v", over)
+	}
+}
+
+func TestApplyContainerDefaults(t *testing.T) {
+	c := &corev1.Container{
+		Name:  "bare",
+		Image: "busybox:1.36",
+		Ports: []corev1.ContainerPort{{ContainerPort: 9000}},
+		LivenessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(8080)},
+		}},
+		Lifecycle: &corev1.Lifecycle{PreStop: &corev1.LifecycleHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/drain", Port: intstr.FromInt32(8080)},
+		}},
+	}
+	applyContainerDefaults(c)
+
+	if c.TerminationMessagePath != corev1.TerminationMessagePathDefault {
+		t.Errorf("terminationMessagePath not defaulted")
+	}
+	if c.TerminationMessagePolicy != corev1.TerminationMessageReadFile {
+		t.Errorf("terminationMessagePolicy not defaulted")
+	}
+	if c.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Errorf("tagged image: want IfNotPresent, got %q", c.ImagePullPolicy)
+	}
+	if c.Ports[0].Protocol != corev1.ProtocolTCP {
+		t.Errorf("port protocol not defaulted to TCP")
+	}
+	if c.LivenessProbe.HTTPGet.Scheme != corev1.URISchemeHTTP {
+		t.Errorf("probe httpGet scheme not defaulted to HTTP")
+	}
+	// The apiserver fills these probe fields, so the builder must too or it drifts.
+	p := c.LivenessProbe
+	if p.TimeoutSeconds != 1 || p.PeriodSeconds != 10 || p.SuccessThreshold != 1 || p.FailureThreshold != 3 {
+		t.Errorf("probe threshold/period not defaulted: timeout=%d period=%d success=%d failure=%d",
+			p.TimeoutSeconds, p.PeriodSeconds, p.SuccessThreshold, p.FailureThreshold)
+	}
+	if c.Lifecycle.PreStop.HTTPGet.Scheme != corev1.URISchemeHTTP {
+		t.Errorf("lifecycle preStop httpGet scheme not defaulted to HTTP")
+	}
+}
+
+func TestApplyContainerDefaultsAll_DoesNotMutateInput(t *testing.T) {
+	in := []corev1.Container{{Name: "x", Image: "busybox:1.36"}}
+	_ = ApplyContainerDefaultsAll(in)
+	if in[0].TerminationMessagePath != "" || in[0].ImagePullPolicy != "" {
+		t.Errorf("ApplyContainerDefaultsAll mutated the input (must deep-copy the CR spec)")
+	}
+}
+
+func TestDefaultPullPolicy(t *testing.T) {
+	cases := map[string]corev1.PullPolicy{
+		"busybox:1.36":            corev1.PullIfNotPresent,
+		"redis:latest":            corev1.PullAlways,
+		"alpine":                  corev1.PullAlways,
+		"registry.io:5000/app:v1": corev1.PullIfNotPresent,
+		"registry.io:5000/app":    corev1.PullAlways,
+		"repo@sha256:abc123":      corev1.PullAlways,
+	}
+	for img, want := range cases {
+		if got := defaultPullPolicy(img); got != want {
+			t.Errorf("defaultPullPolicy(%q): want %q, got %q", img, want, got)
+		}
+	}
+}
+
+func TestBuildDeployment_UserExtraContainersDefaultedAndAppended(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.ExtraContainers = []corev1.Container{{Name: "sidecar", Image: "fluent/fluent-bit:3.0"}}
+
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+	containers := deploy.Spec.Template.Spec.Containers
+
+	if containers[0].Name != containerName {
+		t.Fatalf("main container displaced from index 0: %q", containers[0].Name)
+	}
+	last := containers[len(containers)-1]
+	if last.Name != "sidecar" {
+		t.Errorf("extra container not appended last: %q", last.Name)
+	}
+	if last.TerminationMessagePath != corev1.TerminationMessagePathDefault {
+		t.Errorf("extra container not defaulted (terminationMessagePath)")
+	}
+	if last.ImagePullPolicy != corev1.PullIfNotPresent {
+		t.Errorf("extra container pull policy: want IfNotPresent for tagged image, got %q", last.ImagePullPolicy)
+	}
+}
+
+func TestBuildDeployment_UserInitContainersDefaulted(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.InitContainers = []corev1.Container{{Name: "wait-for-db", Image: "busybox:1.36"}}
+
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+	inits := deploy.Spec.Template.Spec.InitContainers
+	if len(inits) == 0 || inits[len(inits)-1].Name != "wait-for-db" {
+		t.Fatalf("user init container not present/last: %+v", inits)
+	}
+	if inits[len(inits)-1].TerminationMessagePath != corev1.TerminationMessagePathDefault {
+		t.Errorf("user init container not defaulted")
+	}
+}
+
+func TestBuildDeployment_ContainerSecurityContextAndPullPolicy(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.ContainerSecurityContext = &corev1.SecurityContext{RunAsNonRoot: ptr.To(true)}
+	node.Spec.ImagePullPolicy = corev1.PullAlways
+
+	main := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.Containers[0]
+	if main.SecurityContext == nil || main.SecurityContext.RunAsNonRoot == nil || !*main.SecurityContext.RunAsNonRoot {
+		t.Errorf("container securityContext not applied to main container")
+	}
+	if main.ImagePullPolicy != corev1.PullAlways {
+		t.Errorf("imagePullPolicy override not applied: %q", main.ImagePullPolicy)
+	}
+}
+
+func TestBuildDeployment_PodSecurityContextMergePreservesBase(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	policy := corev1.FSGroupChangeOnRootMismatch
+	node.Spec.SecurityContext = &corev1.PodSecurityContext{FSGroupChangePolicy: &policy}
+
+	sc := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.SecurityContext
+	if *sc.RunAsUser != 10001 || *sc.FSGroup != 10000 {
+		t.Errorf("merge dropped required base UID/GID: %+v", sc)
+	}
+	if sc.FSGroupChangePolicy == nil || *sc.FSGroupChangePolicy != policy {
+		t.Errorf("user securityContext field not merged")
+	}
+}
+
+func TestBuildDeployment_TerminationGracePeriodOverride(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.TerminationGracePeriodSeconds = ptr.To(int64(120))
+
+	got := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.TerminationGracePeriodSeconds
+	if got == nil || *got != 120 {
+		t.Errorf("terminationGracePeriodSeconds override not applied: %v", got)
+	}
+}
+
+func TestBuildDeployment_ClusterLevelEscapeHatchesApply(t *testing.T) {
+	// Escape hatches set on the cluster must apply to a node that overrides none
+	// of them — the other tests only exercise the node-level path.
+	cluster := newTestCluster()
+	cluster.Spec.InitContainers = []corev1.Container{{Name: "cluster-init", Image: "busybox:1.36"}}
+	cluster.Spec.ExtraContainers = []corev1.Container{{Name: "cluster-sidecar", Image: "busybox:1.36"}}
+	cluster.Spec.SecurityContext = &corev1.PodSecurityContext{FSGroup: ptr.To(int64(2000))}
+	cluster.Spec.ContainerSecurityContext = &corev1.SecurityContext{RunAsNonRoot: ptr.To(true)}
+	cluster.Spec.TerminationGracePeriodSeconds = ptr.To(int64(90))
+	cluster.Spec.ImagePullPolicy = corev1.PullAlways
+
+	node := newTestNode(v1alpha1.NodeTypeRuntime) // overrides none of the above
+
+	spec := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec
+	assertContains(t, containerNames(spec.InitContainers), "cluster-init")
+	assertContains(t, containerNames(spec.Containers), "cluster-sidecar")
+	if spec.SecurityContext == nil || spec.SecurityContext.FSGroup == nil || *spec.SecurityContext.FSGroup != 2000 {
+		t.Errorf("cluster securityContext FSGroup not applied: %+v", spec.SecurityContext)
+	}
+	if sc := spec.Containers[0].SecurityContext; sc == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+		t.Errorf("cluster containerSecurityContext not applied to main container")
+	}
+	if spec.TerminationGracePeriodSeconds == nil || *spec.TerminationGracePeriodSeconds != 90 {
+		t.Errorf("cluster terminationGracePeriodSeconds not applied: %v", spec.TerminationGracePeriodSeconds)
+	}
+	if spec.Containers[0].ImagePullPolicy != corev1.PullAlways {
+		t.Errorf("cluster imagePullPolicy not applied: %q", spec.Containers[0].ImagePullPolicy)
+	}
+}
+
+func TestBuildDeployment_NodeOverridesClusterEscapeHatches(t *testing.T) {
+	// When both levels set a field, the node wins entirely (no field-level merge
+	// across levels — the documented "node overrides cluster when set" contract).
+	cluster := newTestCluster()
+	cluster.Spec.InitContainers = []corev1.Container{{Name: "cluster-init", Image: "busybox:1.36"}}
+	cluster.Spec.TerminationGracePeriodSeconds = ptr.To(int64(90))
+	cluster.Spec.ImagePullPolicy = corev1.PullNever
+
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.InitContainers = []corev1.Container{{Name: "node-init", Image: "busybox:1.36"}}
+	node.Spec.TerminationGracePeriodSeconds = ptr.To(int64(45))
+	node.Spec.ImagePullPolicy = corev1.PullAlways
+
+	spec := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec
+	names := containerNames(spec.InitContainers)
+	assertContains(t, names, "node-init")
+	assertNotContains(t, names, "cluster-init")
+	if *spec.TerminationGracePeriodSeconds != 45 {
+		t.Errorf("node TGPS should win: got %d", *spec.TerminationGracePeriodSeconds)
+	}
+	if spec.Containers[0].ImagePullPolicy != corev1.PullAlways {
+		t.Errorf("node imagePullPolicy should win: got %q", spec.Containers[0].ImagePullPolicy)
+	}
+}
+
+func TestResolveContainers_NodeEmptyListClearsClusterValue(t *testing.T) {
+	// nil node list inherits the cluster's; an explicit [] clears it. The
+	// apiserver preserves the empty array, so the two are distinguishable.
+	cluster := newTestCluster()
+	cluster.Spec.InitContainers = []corev1.Container{{Name: "cluster-init", Image: "busybox:1.36"}}
+	cluster.Spec.ExtraContainers = []corev1.Container{{Name: "cluster-sidecar", Image: "busybox:1.36"}}
+
+	inherit := newTestNode(v1alpha1.NodeTypeRuntime) // both lists nil
+	if got := resolveInitContainers(cluster, inherit); len(got) != 1 || got[0].Name != "cluster-init" {
+		t.Errorf("nil node initContainers must inherit cluster's: %v", containerNames(got))
+	}
+
+	clear := newTestNode(v1alpha1.NodeTypeRuntime)
+	clear.Spec.InitContainers = []corev1.Container{}
+	clear.Spec.ExtraContainers = []corev1.Container{}
+	if got := resolveInitContainers(cluster, clear); len(got) != 0 {
+		t.Errorf("explicit [] node initContainers must clear cluster's, got %v", containerNames(got))
+	}
+	if got := resolveExtraContainers(cluster, clear); len(got) != 0 {
+		t.Errorf("explicit [] node extraContainers must clear cluster's, got %v", containerNames(got))
+	}
+}
+
+func TestResolveSchedulingSlices_NodeEmptyListClearsClusterValue(t *testing.T) {
+	// tolerations + topologySpreadConstraints use the same nil-inherits / []-clears
+	// contract as init/extra containers.
+	cluster := newTestCluster()
+	cluster.Spec.Tolerations = []corev1.Toleration{{Key: "k"}}
+	cluster.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{TopologyKey: "zone"}}
+
+	inherit := newTestNode(v1alpha1.NodeTypeRuntime)
+	if len(resolveTolerations(cluster, inherit)) != 1 || len(resolveTopologySpreadConstraints(cluster, inherit)) != 1 {
+		t.Errorf("nil node lists must inherit cluster's")
+	}
+
+	clear := newTestNode(v1alpha1.NodeTypeRuntime)
+	clear.Spec.Tolerations = []corev1.Toleration{}
+	clear.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{}
+	if got := resolveTolerations(cluster, clear); len(got) != 0 {
+		t.Errorf("explicit [] node tolerations must clear cluster's, got %v", got)
+	}
+	if got := resolveTopologySpreadConstraints(cluster, clear); len(got) != 0 {
+		t.Errorf("explicit [] node topologySpreadConstraints must clear cluster's, got %v", got)
+	}
+}
+
+func TestDetectContainerNameConflict(t *testing.T) {
+	cluster := newTestCluster()
+
+	// User extraContainer named after a log stream collides with the log sidecar.
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.Logging = &v1alpha1.LoggingSpec{Level: "INFO", Logs: []string{"request"}}
+	node.Spec.ExtraContainers = []corev1.Container{{Name: "request", Image: "busybox:1.36"}}
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+	msg, conflict := detectContainerNameConflict(deploy, cluster, node)
+	if !conflict {
+		t.Fatal("expected a container-name conflict")
+	}
+	if !strings.Contains(msg, `"request"`) || !strings.Contains(msg, "log sidecar") {
+		t.Errorf("message should name the request log sidecar source: %q", msg)
+	}
+
+	// Distinct names: no conflict.
+	clean := newTestNode(v1alpha1.NodeTypeRuntime)
+	clean.Spec.ExtraContainers = []corev1.Container{{Name: "audit-shipper", Image: "busybox:1.36"}}
+	if _, c := detectContainerNameConflict(buildDeployment(cluster, clean, nil, DefaultPackageFetcherImage), cluster, clean); c {
+		t.Errorf("distinct container names must not conflict")
+	}
+}
+
+func TestBuildDeployment_InitContainerOrdering(t *testing.T) {
+	// Package fetchers must run BEFORE user init containers — the operator's
+	// download-and-unpack has to finish before any user-supplied setup runs.
+	cluster := newTestCluster()
+	cluster.Spec.Packages = []v1alpha1.PackageSpec{
+		{Source: v1alpha1.PackageSource{URL: "https://example.test/p.zip"}, MountPath: "/opt/idsvr/plugins/p1"},
+	}
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	node.Spec.InitContainers = []corev1.Container{{Name: "user-init", Image: "busybox:1.36"}}
+
+	inits := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Spec.InitContainers
+	if len(inits) != 2 {
+		t.Fatalf("want 2 init containers (1 fetcher + 1 user), got %d: %v", len(inits), containerNames(inits))
+	}
+	if inits[len(inits)-1].Name != "user-init" {
+		t.Errorf("user init must be last (after fetchers); order: %v", containerNames(inits))
+	}
+	if !strings.HasPrefix(inits[0].Name, packageFetchContainerNamePrefix) {
+		t.Errorf("first init container must be a package fetcher, got %q", inits[0].Name)
+	}
+}
+
+func TestBuildNetworkPolicy_Structure(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.NetworkPolicy = &v1alpha1.NetworkPolicySpec{}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+
+	np := buildNetworkPolicy(cluster, node)
+
+	if np.Spec.PodSelector.MatchLabels["curity.io/owned-by"] != OwnedResourceName(cluster.Name, node.Name) {
+		t.Errorf("podSelector is not the private owned-by key: %v", np.Spec.PodSelector.MatchLabels)
+	}
+	if len(np.Spec.PolicyTypes) != 1 || np.Spec.PolicyTypes[0] != networkingv1.PolicyTypeIngress {
+		t.Errorf("policyTypes not [Ingress] (drift): %v", np.Spec.PolicyTypes)
+	}
+	if len(np.Spec.Ingress) != 2 {
+		t.Fatalf("UI off: want 2 ingress rules (runtime + genclust), got %d", len(np.Spec.Ingress))
+	}
+	from := np.Spec.Ingress[0].From[0].PodSelector.MatchLabels
+	if from["curity.io/cluster"] != cluster.Name || from["app.kubernetes.io/component"] != string(v1alpha1.NodeTypeRuntime) {
+		t.Errorf("ingress from-selector wrong: %v", from)
+	}
+	ports := np.Spec.Ingress[0].Ports
+	if len(ports) != 2 {
+		t.Fatalf("want 2 ports (config+ds), got %d", len(ports))
+	}
+	for _, p := range ports {
+		if p.Protocol == nil || *p.Protocol != corev1.ProtocolTCP {
+			t.Errorf("port protocol not explicit TCP (drift): %+v", p)
+		}
+	}
+	// genclust rule: the config Job must be an allowed peer on the config port.
+	gc := np.Spec.Ingress[1].From[0].PodSelector.MatchLabels
+	if gc["curity.io/cluster"] != cluster.Name || gc["curity.io/component"] != "cluster-config" {
+		t.Errorf("genclust from-selector wrong: %v", gc)
+	}
+	if gcPorts := np.Spec.Ingress[1].Ports; len(gcPorts) != 1 || gcPorts[0].Port.IntValue() != portConfig {
+		t.Errorf("genclust rule must allow only the config port, got %+v", gcPorts)
+	}
+}
+
+func TestBuildNetworkPolicy_UIRuleConditional(t *testing.T) {
+	cluster := newTestCluster()
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+
+	// Base rules (runtime + genclust) are always present; the UI rule is the +1.
+	cluster.Spec.NetworkPolicy = &v1alpha1.NetworkPolicySpec{APIGatewayNamespace: "edge"}
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+	if np := buildNetworkPolicy(cluster, node); len(np.Spec.Ingress) != 3 {
+		t.Errorf("UI on + gateway ns: want 3 ingress rules (runtime + genclust + UI), got %d", len(np.Spec.Ingress))
+	}
+
+	cluster.Spec.NetworkPolicy = &v1alpha1.NetworkPolicySpec{}
+	if np := buildNetworkPolicy(cluster, node); len(np.Spec.Ingress) != 2 {
+		t.Errorf("UI on, no gateway ns: want 2 ingress rules (runtime + genclust), got %d", len(np.Spec.Ingress))
+	}
+
+	cluster.Spec.NetworkPolicy = &v1alpha1.NetworkPolicySpec{APIGatewayNamespace: "edge"}
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: false}
+	if np := buildNetworkPolicy(cluster, node); len(np.Spec.Ingress) != 2 {
+		t.Errorf("UI off: want 2 ingress rules (runtime + genclust), got %d", len(np.Spec.Ingress))
+	}
+}
+
+func TestBuildNetworkPolicy_SelectorsMatchRealPodLabels(t *testing.T) {
+	// Cross-check the NP selectors against the labels pods actually carry: if
+	// buildNetworkPolicy and buildDeployment diverge, a real CNI silently blocks
+	// runtime→admin traffic (invisible in Kind/envtest, which don't enforce).
+	cluster := newTestCluster()
+	cluster.Spec.NetworkPolicy = &v1alpha1.NetworkPolicySpec{}
+	admin := newTestNode(v1alpha1.NodeTypeAdmin)
+
+	np := buildNetworkPolicy(cluster, admin)
+
+	runtime := newTestNode(v1alpha1.NodeTypeRuntime)
+	runtime.Name = "runtime-1"
+	runtimePodLabels := buildDeployment(cluster, runtime, nil, DefaultPackageFetcherImage).Spec.Template.Labels
+	for k, v := range np.Spec.Ingress[0].From[0].PodSelector.MatchLabels {
+		if got := runtimePodLabels[k]; got != v {
+			t.Errorf("ingress selector %s=%q unmatched by runtime pod label (got %q) — CNI would block runtime→admin", k, v, got)
+		}
+	}
+
+	adminPodLabels := buildDeployment(cluster, admin, nil, DefaultPackageFetcherImage).Spec.Template.Labels
+	for k, v := range np.Spec.PodSelector.MatchLabels {
+		if got := adminPodLabels[k]; got != v {
+			t.Errorf("NP podSelector %s=%q does not match admin pod label (got %q) — policy applies to no pod", k, v, got)
+		}
+	}
 }

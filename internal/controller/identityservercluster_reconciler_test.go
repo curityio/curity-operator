@@ -91,35 +91,84 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 	})
 
 	Context("Admin credentials", func() {
-		It("should create secret if it does not exist", func() {
+		It("leaves a pre-existing user-provided Secret untouched", func() {
+			createOpaqueCredsSecret(ns, "preexisting-creds")
 			cluster := &v1alpha1.IdentityServerCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: "cluster-creds", Namespace: ns},
 				Spec: v1alpha1.IdentityServerClusterSpec{
-					Version: "11.0",
-					AdminCredentials: &v1alpha1.CredentialsSource{
-						ValueFrom: v1alpha1.CredentialsValueFrom{
-							SecretKeyRef: v1alpha1.SecretKeyRefSource{
-								Name: "test-admin-secret",
-								Items: []v1alpha1.KeyToPath{
-									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
-									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
-								},
-							},
-						},
-					},
+					Version:          "11.0",
+					AdminCredentials: userAdminCreds("preexisting-creds"),
 				},
 			}
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
-			secret := &corev1.Secret{}
-			eventuallyGetResource(ns, "test-admin-secret", secret)
-			Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
-			Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
-			Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
+			// The operator must not overwrite the user's data.
+			Consistently(func() []byte {
+				s := &corev1.Secret{}
+				_ = k8sClient.Get(ctx, types.NamespacedName{Name: "preexisting-creds", Namespace: ns}, s)
+				return s.Data["ADMIN_PASSWORD"]
+			}, 2*time.Second, interval).Should(Equal([]byte("test-password")))
+		})
 
-			// Verify no OwnerReference (survives cluster deletion)
-			Expect(secret.OwnerReferences).To(BeEmpty())
+		It("waits with Degraded=AdminCredsSecretMissing for a missing user-provided Secret (no fabrication)", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-missing-creds", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version:          "11.0",
+					AdminCredentials: userAdminCreds("managed-creds"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+			Eventually(func(g Gomega) {
+				fresh := &v1alpha1.IdentityServerCluster{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-missing-creds", Namespace: ns}, fresh)).To(Succeed())
+				deg := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionDegraded)
+				g.Expect(deg).NotTo(BeNil())
+				g.Expect(deg.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(deg.Reason).To(Equal(v1alpha1.ReasonAdminCredsSecretMissing))
+				g.Expect(deg.Message).To(ContainSubstring("managed-creds"))
+				ready := apimeta.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionReady)
+				g.Expect(ready).NotTo(BeNil())
+				g.Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(ready.Reason).To(Equal(v1alpha1.ReasonAdminCredsSecretMissing))
+			}, timeout, interval).Should(Succeed())
+
+			// The operator must NOT have fabricated the Secret (this fails on main).
+			Consistently(func() bool {
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: "managed-creds", Namespace: ns}, &corev1.Secret{})
+				return apierrors.IsNotFound(err)
+			}, 2*time.Second, interval).Should(BeTrue(), "operator must not auto-create a user-named Secret")
+		})
+
+		It("recovers when the user-provided Secret is created externally", func() {
+			cluster := &v1alpha1.IdentityServerCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: "cluster-recover-creds", Namespace: ns},
+				Spec: v1alpha1.IdentityServerClusterSpec{
+					Version:          "11.0",
+					AdminCredentials: userAdminCreds("late-creds"),
+				},
+			}
+			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
+
+			Eventually(func() string {
+				fresh := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-recover-creds", Namespace: ns}, fresh); err != nil {
+					return ""
+				}
+				return conditionReason(fresh.Status.Conditions, v1alpha1.ConditionDegraded)
+			}, timeout, interval).Should(Equal(v1alpha1.ReasonAdminCredsSecretMissing))
+
+			// External system creates the Secret — the Secret-watch must wake us.
+			createOpaqueCredsSecret(ns, "late-creds")
+
+			Eventually(func() string {
+				fresh := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "cluster-recover-creds", Namespace: ns}, fresh); err != nil {
+					return ""
+				}
+				return conditionReason(fresh.Status.Conditions, v1alpha1.ConditionDegraded)
+			}, timeout, interval).ShouldNot(Equal(v1alpha1.ReasonAdminCredsSecretMissing))
 		})
 
 		It("should default admin credentials when not specified", func() {
@@ -130,7 +179,8 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			eventuallyGetResource(ns, "cluster-no-creds-admin-creds", secret)
 			Expect(secret.Data).To(HaveKey("ADMIN_PASSWORD"))
 			Expect(secret.Data).To(HaveKey("CONFIG_ENCRYPTION_KEY"))
-			Expect(secret.Data).To(HaveKey("KEYSTORE_PASSWORD"))
+			Expect(secret.Data).NotTo(HaveKey("KEYSTORE_PASSWORD"))
+			Expect(secret.Data).To(HaveLen(2))
 			Expect(secret.Labels["app.kubernetes.io/managed-by"]).To(Equal("curity-operator"))
 			Expect(secret.Labels["curity.io/cluster"]).To(Equal("cluster-no-creds"))
 			Expect(secret.OwnerReferences).To(BeEmpty())
@@ -144,7 +194,6 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Type:                     v1alpha1.NodeTypeAdmin,
 					Role:                     "admin",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cluster-default-env"},
-					Replicas:                 ptr.To(int32(1)),
 					Service:                  defaultTestService(),
 					UI:                       &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)},
 				},
@@ -158,7 +207,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			envVars := deploy.Spec.Template.Spec.Containers[0].Env
 			Expect(hasEnvFromSecret(envVars, "PASSWORD", "cluster-default-env-admin-creds", "ADMIN_PASSWORD")).To(BeTrue())
 			Expect(hasEnvFromSecret(envVars, "CONFIG_ENCRYPTION_KEY", "cluster-default-env-admin-creds", "CONFIG_ENCRYPTION_KEY")).To(BeTrue())
-			Expect(hasEnvFromSecret(envVars, "KEYSTORE_PASSWORD", "cluster-default-env-admin-creds", "KEYSTORE_PASSWORD")).To(BeTrue())
+			Expect(envVars).NotTo(ContainElement(HaveField("Name", "KEYSTORE_PASSWORD")))
 		})
 	})
 
@@ -175,7 +224,6 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 					Type:                     v1alpha1.NodeTypeAdmin,
 					Role:                     "cc-admin-role",
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "cc-cluster"},
-					Replicas:                 ptr.To(int32(1)),
 					Service:                  defaultTestService(),
 				},
 			}
@@ -244,7 +292,7 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Job should not be created when Secret is already populated")
 		})
 
-		It("should delete failed Job and create a new one", func() {
+		It("keeps a failed Job and reports JobFailed without recreating", func() {
 			testCreateCluster(ns, "fail-cluster")
 			testCreateNode(ns, "fail-admin", v1alpha1.NodeTypeAdmin, "fail-cluster")
 
@@ -252,18 +300,9 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			eventuallyGetResource(ns, "fail-cluster-cluster-config-job", job)
 			origUID := job.UID
 
-			// Manually set Job as Failed (envtest has no Job controller)
-			job.Status.Conditions = []batchv1.JobCondition{
-				{
-					Type:    batchv1.JobFailed,
-					Status:  corev1.ConditionTrue,
-					Message: "ImagePullBackOff",
-				},
-			}
-			Expect(k8sClient.Status().Update(ctx, job)).To(Succeed())
+			// Drive the Job to Failed (envtest has no Job controller).
+			markJobFailed(job, "ImagePullBackOff")
 
-			// Assert via Event (persists), not condition (operator flips
-			// JobFailed → JobCreated within ms when it recreates the Job).
 			Eventually(func() bool {
 				events := &corev1.EventList{}
 				if err := k8sClient.List(ctx, events, client.InNamespace(ns)); err != nil {
@@ -280,13 +319,49 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 				return false
 			}, timeout, interval).Should(BeTrue(), "expected Warning ClusterConfigJobFailed event")
 
-			Eventually(func() bool {
-				newJob := &batchv1.Job{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster-cluster-config-job", Namespace: ns}, newJob); err != nil {
+			// ClusterConfigReady settles on JobFailed (no flip to JobCreated).
+			Eventually(func() string {
+				c := &v1alpha1.IdentityServerCluster{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster", Namespace: ns}, c); err != nil {
+					return ""
+				}
+				return conditionReason(c.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+			}, timeout, interval).Should(Equal("JobFailed"))
+
+			// chooseJobFailedMessage is wired: the condition carries the failure
+			// message (the generic fallback here — envtest has no pod to read a cause).
+			c := &v1alpha1.IdentityServerCluster{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster", Namespace: ns}, c)).To(Succeed())
+			cond := apimeta.FindStatusCondition(c.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Message).To(HavePrefix("genclust Job failed:"))
+
+			// Storm-suppression: the Warning fires exactly once and is not re-emitted
+			// across repeated reconciles (the changed-gate holds).
+			Consistently(func() int32 {
+				evs := &corev1.EventList{}
+				if err := k8sClient.List(ctx, evs, client.InNamespace(ns)); err != nil {
+					return -1
+				}
+				var total int32
+				for i := range evs.Items {
+					e := &evs.Items[i]
+					if e.InvolvedObject.Name == "fail-cluster" && e.Reason == "ClusterConfigJobFailed" {
+						total += e.Count
+					}
+				}
+				return total
+			}, 3*time.Second, interval).Should(Equal(int32(1)), "ClusterConfigJobFailed must fire exactly once")
+
+			// The failed Job is NOT deleted/recreated — same UID (regression guard:
+			// the old behavior deleted + recreated it, causing a JobRunning⇄JobFailed storm).
+			Consistently(func() bool {
+				cur := &batchv1.Job{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: "fail-cluster-cluster-config-job", Namespace: ns}, cur); err != nil {
 					return false
 				}
-				return newJob.UID != origUID
-			}, timeout, interval).Should(BeTrue())
+				return cur.UID == origUID
+			}, 3*time.Second, interval).Should(BeTrue(), "failed Job must persist (no recreate storm)")
 		})
 
 		It("should not create duplicate Job on concurrent reconcile", func() {
@@ -442,13 +517,15 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 								Items: []v1alpha1.KeyToPath{
 									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 								},
 							},
 						},
 					},
 				},
 			}
+			// User-provided creds Secret must pre-exist — the operator no longer
+			// fabricates a user-named Secret (it waits instead).
+			createOpaqueCredsSecret(ns, "enckey-creds")
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			credSecret := &corev1.Secret{}
@@ -519,7 +596,6 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 								Items: []v1alpha1.KeyToPath{
 									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 								},
 							},
 						},
@@ -815,13 +891,14 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 								Items: []v1alpha1.KeyToPath{
 									{Key: "ADMIN_PASSWORD", Path: "PASSWORD"},
 									{Key: "CONFIG_ENCRYPTION_KEY", Path: "CONFIG_ENCRYPTION_KEY"},
-									{Key: "KEYSTORE_PASSWORD", Path: "KEYSTORE_PASSWORD"},
 								},
 							},
 						},
 					},
 				},
 			}
+			// User-provided creds Secret must pre-exist (operator no longer fabricates).
+			createOpaqueCredsSecret(ns, "wf-enckey-creds")
 			Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 
 			credSecret := &corev1.Secret{}

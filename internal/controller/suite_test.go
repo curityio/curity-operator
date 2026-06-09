@@ -10,6 +10,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -59,6 +60,7 @@ var _ = BeforeSuite(func() {
 	Expect(batchv1.AddToScheme(scheme)).To(Succeed())
 	Expect(autoscalingv2.AddToScheme(scheme)).To(Succeed())
 	Expect(policyv1.AddToScheme(scheme)).To(Succeed())
+	Expect(networkingv1.AddToScheme(scheme)).To(Succeed())
 	Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})

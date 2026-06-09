@@ -1,28 +1,29 @@
 
-[IdentityServerNode credentials Admin credentials auto-generation should create secret with random values when it does not exist - 1]
+[IdentityServerNode customization + NetworkPolicy renders an admin NetworkPolicy and pod-customization fields on the runtime Deployment - 1]
 metadata:
-  name: creds-cluster
-  namespace: e2e-creds
+  name: custom-admin
+  namespace: e2e-customization
   uid: <Any value>
   resourceVersion: <Any value>
   generation: <Any value>
   creationTimestamp: <Any value>
+  labels:
+    curity.io/cluster: custom-cluster
+  ownerReferences: <Any value>
   finalizers:
-    - curity.io/cluster-protection
+    - curity.io/node-protection
   managedFields: <Any value>
 spec:
-  version: "11.0"
-  adminCredentials:
-    valueFrom:
-      secretKeyRef:
-        name: auto-gen-secret
-        items:
-          - key: ADMIN_PASSWORD
-            path: PASSWORD
-          - key: CONFIG_ENCRYPTION_KEY
-            path: CONFIG_ENCRYPTION_KEY
-          - key: KEYSTORE_PASSWORD
-            path: KEYSTORE_PASSWORD
+  type: admin
+  role: admin-ui-role
+  ui:
+    enabled: true
+    secure: true
+  identityServerClusterRef:
+    name: custom-cluster
+  service:
+    type: ClusterIP
+    port: 6789
 status:
   conditions:
     - type: Ready
@@ -45,12 +46,14 @@ status:
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
-    - type: ClusterConfigReady
+    - type: ClusterReady
       status: ""
       lastTransitionTime: "0001-01-01T00:00:00Z"
       reason: ""
       message: ""
   observedGeneration: <Any value>
-  version: "11.0"
+  replicas: 1
+  deploymentName: custom-cluster-custom-admin-18772e45
+  serviceName: custom-cluster-custom-admin-18772e45
 
 ---

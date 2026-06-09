@@ -1,0 +1,16 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  version: "11.0"
+  initContainers:
+    - name: cluster-init
+      image: busybox:1.36
+      command: ["sh", "-c", "true"]
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: curity
+      effect: NoSchedule

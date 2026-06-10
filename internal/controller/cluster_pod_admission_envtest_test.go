@@ -56,7 +56,7 @@ var _ = Describe("IdentityServerCluster pod-admission visibility", func() {
 				Type:                     v1alpha1.NodeTypeAdmin,
 				Role:                     "admin-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
-				Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 6789},
+				Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 6789},
 			},
 		}
 		Expect(k8sClient.Create(ctx, admin)).To(Succeed())

@@ -54,11 +54,11 @@ func ownedName(clusterName, nodeName string) string {
 	return controller.OwnedResourceName(clusterName, nodeName)
 }
 
-// defaultTestService returns a minimal valid ServiceSpec for tests that don't
-// care about the specific Type/Port — keeps individual test sites free of the
-// magic 8443 literal.
-func defaultTestService() v1alpha1.ServiceSpec {
-	return v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443}
+// defaultTestService returns a minimal valid Service (type only); every role
+// port then defaults (admin config 6789, runtime http 8443). Don't pin a port
+// here — on admin nodes service.port is the config port.
+func defaultTestService() *v1alpha1.ServiceSpec {
+	return &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP}
 }
 
 // e2eHasCfgVolume checks if a Deployment has a volume with the given prefix.
@@ -2523,7 +2523,7 @@ var _ = Describe("IdentityServerNode", func() {
 					map[string]interface{}{"name": "ui-cluster", "namespace": ns})
 				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin-ui.yaml", ns,
 					map[string]interface{}{"name": "ui-admin", "namespace": ns, "clusterName": "ui-cluster",
-						"uiEnabled": true, "uiSecure": false})
+						"uiEnabled": true, "uiSecure": false, "uiPort": 6749})
 				utils.SimulateClusterConfigReady(ns, "ui-cluster", e2eTimeout, e2eInterval)
 
 				deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: ownedName("ui-cluster", "ui-admin"), Namespace: ns}}
@@ -2550,6 +2550,146 @@ var _ = Describe("IdentityServerNode", func() {
 				node := &v1alpha1.IdentityServerNode{ObjectMeta: metav1.ObjectMeta{Name: "ui-admin", Namespace: ns}}
 				utils.WaitForConditions(node, e2eTimeout, e2eInterval)
 				utils.MatchCRDResource(node, "ui-admin")
+			})
+		})
+
+		Describe("Optional service block", Ordered, func() {
+			const ns = "e2e-optional-svc"
+			BeforeAll(func() { createNS(ns) })
+			AfterAll(func() { deleteNS(ns) })
+
+			It("provisions an admin Service with default ports (no admin-ui) when service is omitted", func() {
+				ctx := context.Background()
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "optnosvc-cl", "namespace": ns})
+				admin := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "optnosvc-admin", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type:                     v1alpha1.NodeTypeAdmin,
+						Role:                     "optnosvc-admin-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "optnosvc-cl"},
+						// service intentionally omitted — the operator must still create one
+					},
+				}
+				Expect(k().Create(ctx, admin)).To(Succeed())
+				utils.SimulateClusterConfigReady(ns, "optnosvc-cl", e2eTimeout, e2eInterval)
+
+				svc := &corev1.Service{}
+				Eventually(func() error {
+					return k().Get(ctx, client.ObjectKey{Name: ownedName("optnosvc-cl", "optnosvc-admin"), Namespace: ns}, svc)
+				}, e2eTimeout, e2eInterval).Should(Succeed(), "operator must create a Service even when spec.service is omitted")
+
+				Expect(svc.Spec.Type).To(Equal(corev1.ServiceTypeClusterIP), "type defaults to ClusterIP")
+				Expect(svc.Spec.Ports).To(ContainElement(Satisfy(func(p corev1.ServicePort) bool {
+					return p.Name == "config" && p.Port == 6789
+				})), "admin config port defaults to 6789")
+				Expect(svc.Spec.Ports).To(ContainElement(Satisfy(func(p corev1.ServicePort) bool {
+					return p.Name == "ds-port" && p.Port == 6790
+				})), "admin distributed-service port defaults to 6790")
+				Expect(svc.Spec.Ports).NotTo(ContainElement(Satisfy(func(p corev1.ServicePort) bool {
+					return p.Name == "admin-ui"
+				})), "admin-ui must not be exposed without service.uiPort")
+			})
+
+			It("runs the admin UI but does not expose it when service is omitted (ui.enabled only)", func() {
+				ctx := context.Background()
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "optui-cl", "namespace": ns})
+				admin := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "optui-admin", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type:                     v1alpha1.NodeTypeAdmin,
+						Role:                     "optui-admin-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "optui-cl"},
+						UI:                       &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)},
+						// service omitted: ui.enabled runs the UI but must not expose it (Option A)
+					},
+				}
+				Expect(k().Create(ctx, admin)).To(Succeed())
+				utils.SimulateClusterConfigReady(ns, "optui-cl", e2eTimeout, e2eInterval)
+
+				deploy := &appsv1.Deployment{}
+				Eventually(func() error {
+					return k().Get(ctx, client.ObjectKey{Name: ownedName("optui-cl", "optui-admin"), Namespace: ns}, deploy)
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+
+				c := deploy.Spec.Template.Spec.Containers[0]
+				Expect(c.Env).To(ContainElement(Satisfy(func(e corev1.EnvVar) bool {
+					return e.Name == "ADMIN_UI_HTTP_MODE"
+				})), "ui.enabled must still configure the UI (ADMIN_UI_HTTP_MODE present)")
+				Expect(c.Ports).NotTo(ContainElement(Satisfy(func(p corev1.ContainerPort) bool {
+					return p.Name == "admin-ui"
+				})), "admin-ui container port must be absent without service.uiPort")
+
+				svc := &corev1.Service{}
+				Expect(k().Get(ctx, client.ObjectKey{Name: ownedName("optui-cl", "optui-admin"), Namespace: ns}, svc)).To(Succeed())
+				Expect(svc.Spec.Ports).NotTo(ContainElement(Satisfy(func(p corev1.ServicePort) bool {
+					return p.Name == "admin-ui"
+				})), "admin-ui Service port must be absent without service.uiPort")
+			})
+
+			It("provisions a runtime Service with the default http port when service is omitted", func() {
+				ctx := context.Background()
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "optrt-cl", "namespace": ns})
+				admin := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "optrt-admin", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type:                     v1alpha1.NodeTypeAdmin,
+						Role:                     "optrt-admin-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "optrt-cl"},
+						Service:                  defaultTestService(),
+					},
+				}
+				Expect(k().Create(ctx, admin)).To(Succeed())
+				runtime := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "optrt-runtime", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type:                     v1alpha1.NodeTypeRuntime,
+						Role:                     "optrt-runtime-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "optrt-cl"},
+						Replicas:                 ptr.To(int32(1)),
+						// service omitted
+					},
+				}
+				Expect(k().Create(ctx, runtime)).To(Succeed())
+				utils.SimulateClusterConfigReady(ns, "optrt-cl", e2eTimeout, e2eInterval)
+
+				svc := &corev1.Service{}
+				Eventually(func() error {
+					return k().Get(ctx, client.ObjectKey{Name: ownedName("optrt-cl", "optrt-runtime"), Namespace: ns}, svc)
+				}, e2eTimeout, e2eInterval).Should(Succeed(), "operator must create a runtime Service when service is omitted")
+
+				Expect(svc.Spec.Type).To(Equal(corev1.ServiceTypeClusterIP))
+				Expect(svc.Spec.Ports).To(ContainElement(Satisfy(func(p corev1.ServicePort) bool {
+					return p.Name == "http" && p.Port == 8443
+				})), "runtime http port defaults to 8443")
+			})
+
+			It("does not expose admin-ui when ui.enabled and service is set without uiPort (Option A)", func() {
+				ctx := context.Background()
+				utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+					map[string]interface{}{"name": "optoptin-cl", "namespace": ns})
+				admin := &v1alpha1.IdentityServerNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "optoptin-admin", Namespace: ns},
+					Spec: v1alpha1.IdentityServerNodeSpec{
+						Type:                     v1alpha1.NodeTypeAdmin,
+						Role:                     "optoptin-admin-role",
+						IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "optoptin-cl"},
+						UI:                       &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)},
+						Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 6789},
+					},
+				}
+				Expect(k().Create(ctx, admin)).To(Succeed())
+				utils.SimulateClusterConfigReady(ns, "optoptin-cl", e2eTimeout, e2eInterval)
+
+				svc := &corev1.Service{}
+				Eventually(func() error {
+					return k().Get(ctx, client.ObjectKey{Name: ownedName("optoptin-cl", "optoptin-admin"), Namespace: ns}, svc)
+				}, e2eTimeout, e2eInterval).Should(Succeed())
+				Expect(svc.Spec.Ports).NotTo(ContainElement(Satisfy(func(p corev1.ServicePort) bool {
+					return p.Name == "admin-ui"
+				})), "admin-ui must require service.uiPort, not just ui.enabled")
 			})
 		})
 

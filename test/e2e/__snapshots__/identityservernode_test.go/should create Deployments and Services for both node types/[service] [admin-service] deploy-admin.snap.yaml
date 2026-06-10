@@ -47,13 +47,6 @@ spec:
         type: 1
         intval: 0
         strval: ds-port
-    - name: admin-ui
-      protocol: TCP
-      port: 6749
-      targetPort:
-        type: 1
-        intval: 0
-        strval: admin-ui
   selector: <Any value>
   clusterIP: <Any value>
   clusterIPs: <Any value>

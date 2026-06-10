@@ -24,6 +24,7 @@ spec:
   service:
     type: ClusterIP
     port: 6789
+    uiPort: 6749
 status:
   conditions:
     - type: Ready

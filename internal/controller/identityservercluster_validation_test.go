@@ -840,6 +840,46 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		Expect(k8sClient.Create(ctx, node)).To(Succeed(), "explicit autoscaling.enabled=false is fine on admin")
 	})
 
+	It("should accept admin node with service omitted (operator defaults it)", func() {
+		testCreateCluster(ns, "val-cluster-admnosvc")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-admin-nosvc", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeAdmin,
+				Role:                     "admin-nosvc-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-admnosvc"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed(), "service is optional; the operator provisions a default Service")
+	})
+
+	It("should accept admin node with ui.enabled and service omitted", func() {
+		testCreateCluster(ns, "val-cluster-admuinosvc")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-admin-uinosvc", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeAdmin,
+				Role:                     "admin-uinosvc-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-admuinosvc"},
+				UI:                       &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed(), "enabling the admin UI must not make service required")
+	})
+
+	It("should accept runtime node with service omitted (defaults to ClusterIP/8443)", func() {
+		testCreateCluster(ns, "val-cluster-rtnosvc")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-rt-nosvc", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "rt-nosvc-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-rtnosvc"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed(), "service is optional for runtime too")
+	})
+
 	It("should reject runtime node with skipInstall set via CEL", func() {
 		testCreateCluster(ns, "val-cluster-rtski")
 		node := &v1alpha1.IdentityServerNode{
@@ -946,7 +986,7 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				Role:                     "bad-svc-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-svctype"},
 				Replicas:                 ptr.To(int32(1)),
-				Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceType("InvalidType"), Port: 8443},
+				Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceType("InvalidType"), Port: 8443},
 			},
 		}
 		err := k8sClient.Create(ctx, node)
@@ -975,7 +1015,7 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				Role:                     "port-max-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-portmax"},
 				Replicas:                 ptr.To(int32(1)),
-				Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 70000},
+				Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 70000},
 			},
 		}
 		err := k8sClient.Create(ctx, node)
@@ -1148,7 +1188,7 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 	})
 
-	It("should accept node with ExternalName service type", func() {
+	It("should reject node with ExternalName service type via Enum", func() {
 		testCreateCluster(ns, "val-cluster-extname")
 		node := &v1alpha1.IdentityServerNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "node-extname", Namespace: ns},
@@ -1157,10 +1197,12 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				Role:                     "extname-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-extname"},
 				Replicas:                 ptr.To(int32(1)),
-				Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeExternalName, Port: 8443},
+				Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeExternalName, Port: 8443},
 			},
 		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		err := k8sClient.Create(ctx, node)
+		Expect(err).To(HaveOccurred(), "ExternalName is unsupported: a node Service must front its own pods")
+		Expect(err.Error()).To(ContainSubstring("spec.service.type"))
 	})
 
 	It("should accept node with valid log streams", func() {
@@ -1256,7 +1298,7 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				Role:                     "port-max-role",
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-portbd"},
 				Replicas:                 ptr.To(int32(1)),
-				Service:                  v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 65535},
+				Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 65535},
 			},
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
@@ -1501,26 +1543,69 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		Expect(err.Error()).To(ContainSubstring("exactly one of minAvailable or maxUnavailable"))
 	})
 
-	It("should reject service block missing type via unstructured", func() {
+	It("should accept service block with only port (type defaults) via unstructured", func() {
 		testCreateCluster(ns, "val-cluster-svcnotype")
 		obj := newUnstructuredNode(ns, "node-svc-notype", "svc-notype-role", "val-cluster-svcnotype")
 		_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
 			"port": int64(8443),
 		}, "spec", "service")
-		err := k8sClient.Create(ctx, obj)
-		Expect(err).To(HaveOccurred(), "service without type should be rejected by Required")
-		Expect(err.Error()).To(ContainSubstring("spec.service.type"))
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed(), "service.type is optional; the operator defaults it to ClusterIP")
 	})
 
-	It("should reject service block missing port via unstructured", func() {
+	It("should accept service block with only type (port omitted) via unstructured", func() {
 		testCreateCluster(ns, "val-cluster-svcnoport")
 		obj := newUnstructuredNode(ns, "node-svc-noport", "svc-noport-role", "val-cluster-svcnoport")
 		_ = unstructured.SetNestedField(obj.Object, map[string]interface{}{
 			"type": "ClusterIP",
 		}, "spec", "service")
-		err := k8sClient.Create(ctx, obj)
-		Expect(err).To(HaveOccurred(), "service without port should be rejected by Required")
-		Expect(err.Error()).To(ContainSubstring("spec.service.port"))
+		Expect(k8sClient.Create(ctx, obj)).To(Succeed(), "service.port is optional; the role port is simply not exposed")
+	})
+
+	It("should reject distributedServicePort on a runtime node via CEL", func() {
+		testCreateCluster(ns, "val-cluster-rtds")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-rt-ds", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "rt-ds-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-rtds"},
+				Service:                  &v1alpha1.ServiceSpec{DistributedServicePort: 6790},
+			},
+		}
+		err := k8sClient.Create(ctx, node)
+		Expect(err).To(HaveOccurred(), "distributedServicePort is admin-only")
+		Expect(err.Error()).To(ContainSubstring("only valid on admin-type nodes"))
+	})
+
+	It("should reject uiPort on a runtime node via CEL", func() {
+		testCreateCluster(ns, "val-cluster-rtui")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-rt-ui", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "rt-ui-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-rtui"},
+				Service:                  &v1alpha1.ServiceSpec{UIPort: 6749},
+			},
+		}
+		err := k8sClient.Create(ctx, node)
+		Expect(err).To(HaveOccurred(), "uiPort is admin-only")
+		Expect(err.Error()).To(ContainSubstring("only valid on admin-type nodes"))
+	})
+
+	It("should accept admin node with distributedServicePort and uiPort set", func() {
+		testCreateCluster(ns, "val-cluster-admports")
+		node := &v1alpha1.IdentityServerNode{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-adm-ports", Namespace: ns},
+			Spec: v1alpha1.IdentityServerNodeSpec{
+				Type:                     v1alpha1.NodeTypeAdmin,
+				Role:                     "adm-ports-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-admports"},
+				UI:                       &v1alpha1.UISpec{Enabled: true, Secure: ptr.To(true)},
+				Service:                  &v1alpha1.ServiceSpec{DistributedServicePort: 7790, UIPort: 7749},
+			},
+		}
+		Expect(k8sClient.Create(ctx, node)).To(Succeed(), "distributedServicePort and uiPort are valid on admin")
 	})
 
 	It("should reject ui block missing enabled via unstructured", func() {

@@ -172,7 +172,7 @@ var _ = Describe("IdentityServerNode Reconciler / NetworkPolicy", func() {
 				Role:                          "default",
 				IdentityServerClusterRef:      v1alpha1.ObjectReference{Name: clusterName},
 				Replicas:                      ptr.To(int32(1)),
-				Service:                       v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443},
+				Service:                       &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443},
 				ImagePullPolicy:               corev1.PullAlways,
 				TerminationGracePeriodSeconds: ptr.To(int64(120)),
 				SecurityContext:               &corev1.PodSecurityContext{FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch)},

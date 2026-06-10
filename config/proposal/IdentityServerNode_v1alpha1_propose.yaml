@@ -92,19 +92,35 @@ spec:
     readiness: {}
 
   # Kubernetes Service that exposes this node’s pods inside the cluster (and optionally outside it).
-  # Required — Curity inter-node DNS depends on the Service, so every node must
-  # declare its type and port explicitly.
-  # +kubebuilder:validation:Required
+  # Optional — the operator always creates the Service (inter-node DNS depends on
+  # it) with the full set of role ports at their defaults. Set only the fields you
+  # want to override. Non-default ds/ui/http ports set only the K8s side; you must
+  # also configure Curity to listen there.
+  # +kubebuilder:validation:Optional
   service:
-    # How the Service is exposed (`ClusterIP`, `NodePort`, `LoadBalancer`, or `ExternalName`).
-    # +kubebuilder:validation:Required
-    # +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer;ExternalName
+    # Service type for the whole Service (every port shares it). Defaults to ClusterIP.
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
     type: ClusterIP                  # LoadBalancer or NodePort to expose externally
-    # TCP port the Service targets (must match the container listen port for this node role; commonly `6789` for admin, `8443` for runtime).
-    # +kubebuilder:validation:Required
+    # Primary Service port: the http port on runtime (default 8443) and the
+    # config-service port on admin (default 6789). On admin it is also fed to
+    # genclust, so cluster.xml and runtime nodes agree on it; changing it
+    # triggers a cluster.xml regen + rolling restart of admin and runtimes.
+    # +kubebuilder:validation:Optional
     # +kubebuilder:validation:Minimum=1
     # +kubebuilder:validation:Maximum=65535
     port: 8443
+    # Admin distributed-service port (default 6790). Admin-only.
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:Minimum=1
+    # +kubebuilder:validation:Maximum=65535
+    distributedServicePort: 6790
+    # Admin UI port. Setting it opts into exposing the admin UI on the Service at
+    # this port (typically 6749); omit to run the UI (ui.enabled) unexposed. Admin-only.
+    # +kubebuilder:validation:Optional
+    # +kubebuilder:validation:Minimum=1
+    # +kubebuilder:validation:Maximum=65535
+    uiPort: 6749
 
   # Additional environment variables for the main container (`name`, `value`, or `valueFrom`).
   # Example:

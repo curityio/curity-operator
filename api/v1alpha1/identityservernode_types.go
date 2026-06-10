@@ -12,6 +12,7 @@ import (
 // +kubebuilder:object:generate=true
 // +kubebuilder:validation:XValidation:rule="self.type != 'admin' || !has(self.replicas)",message="replicas cannot be set on admin-type nodes (Curity admin is always single-active with 1 replica)"
 // +kubebuilder:validation:XValidation:rule="self.type != 'admin' || !has(self.autoscaling) || !self.autoscaling.enabled",message="autoscaling cannot be enabled on admin-type nodes (Curity admin is single-active)"
+// +kubebuilder:validation:XValidation:rule="self.type == 'admin' || !has(self.service) || (!has(self.service.distributedServicePort) && !has(self.service.uiPort))",message="service.distributedServicePort and service.uiPort are only valid on admin-type nodes"
 // +kubebuilder:validation:XValidation:rule="self.type == 'admin' || !has(self.skipInstall)",message="skipInstall can only be set on admin-type nodes"
 type IdentityServerNodeSpec struct {
 	// Type determines whether this is an admin or runtime node.
@@ -63,11 +64,11 @@ type IdentityServerNodeSpec struct {
 	// Overrides cluster-level probes when set.
 	Probes *ProbeSpec `json:"probes,omitempty"`
 
-	// Service configures the Kubernetes Service for this node. Required —
-	// Curity inter-node DNS depends on the Service, so every node must declare
-	// its type and port explicitly.
-	// +kubebuilder:validation:Required
-	Service ServiceSpec `json:"service"`
+	// Service tunes the node's Kubernetes Service. Optional — the operator always
+	// creates the Service (inter-node DNS depends on it) with the full set of
+	// role ports at their defaults; the fields override the Service type and the
+	// individual port numbers.
+	Service *ServiceSpec `json:"service,omitempty"`
 
 	// EnvironmentVariables are additional environment variables passed to the
 	// Curity container. Uses standard Kubernetes env var format with support

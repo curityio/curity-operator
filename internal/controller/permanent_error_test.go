@@ -1046,7 +1046,7 @@ func TestDryRunPodAdmission_PodShapeMirrorsJobTemplate(t *testing.T) {
 		Build()
 
 	r := &IdentityServerClusterReconciler{Client: cli, Scheme: s}
-	job := buildClusterConfigJob(cluster, "admin", "config-hash-1")
+	job := buildClusterConfigJob(cluster, "admin", "config-hash-1", portConfig)
 
 	if err := r.dryRunPodAdmission(ctx, cluster, job); err != nil {
 		t.Fatalf("unexpected error: %v", err)

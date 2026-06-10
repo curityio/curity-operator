@@ -200,17 +200,39 @@ type UISpec struct {
 	Secure *bool `json:"secure,omitempty"`
 }
 
-// ServiceSpec configures the Kubernetes Service for the node. Both type
-// and port are required.
+// ServiceSpec tunes the node's single Kubernetes Service. Every field is
+// optional and defaults per node role — set only the ports you want to
+// override; the Service is always created with the full set of role ports.
 type ServiceSpec struct {
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort;ExternalName
-	Type corev1.ServiceType `json:"type"`
+	// Type is the Service type for the whole Service (every port shares it).
+	// Defaults to ClusterIP.
+	// +optional
+	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort
+	Type corev1.ServiceType `json:"type,omitempty"`
 
-	// +kubebuilder:validation:Required
+	// Port is the node's primary Service port: http on runtime (default 8443),
+	// config on admin (default 6789). Changing the admin config port reruns
+	// genclust and rolling-restarts the cluster.
+	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
-	Port int32 `json:"port"`
+	Port int32 `json:"port,omitempty"`
+
+	// DistributedServicePort overrides the admin node's distributed-service
+	// port (default 6790). Admin-only.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	DistributedServicePort int32 `json:"distributedServicePort,omitempty"`
+
+	// UIPort exposes the admin UI on the Service at this port (typically 6749,
+	// Curity's UI port). Setting it opts into exposure; omit it to run the UI
+	// (ui.enabled) without surfacing it — the operator never auto-exposes the
+	// UI. Admin-only.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	UIPort int32 `json:"uiPort,omitempty"`
 }
 
 // ProbeSpec configures liveness and readiness probes.

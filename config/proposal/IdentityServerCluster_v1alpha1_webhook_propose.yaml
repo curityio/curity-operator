@@ -1,9 +1,26 @@
-# Proposal — additions to IdentityServerCluster.spec.packages[]:
+# Proposal — changes to IdentityServerCluster.spec.packages[] (PackageSpec):
 #
-#   syncWebhook   optional — signed inbound POSTs from GitHub/Slack
-#                            re-fetch `source` and re-apply mounts.
-#   mountPaths[]  required — replaces single `mountPath`; each entry is
-#                            (archive path, container path).
+#  NEW source.type        zip|git (default zip). zip → HTTPS GET + unpack;
+#                         git → go-git clone/fetch at source.ref (working tree).
+#  NEW source.ref         git ref (branch/tag/SHA); git-only.
+#  NEW source.auth.sshKey SSH key (PEM + optional passphrase); git ssh:// only.
+#                         Joins existing basicAuth/bearerToken in PackageAuthSpec;
+#                         host-agnostic, not github-specific.
+#  NEW syncWebhook        signed inbound POSTs (GitHub/Slack) re-fetch source
+#                         and re-apply mounts.
+#  CHG mountPaths[]       replaces single `mountPath`; each entry is (source
+#                         path, container path), archive-relative for zip /
+#                         repo-relative for git. BREAKING — see note below.
+#  CHG source.url         secure transports only — https or ssh (git). Drops
+#                         http that PackageSource allows today; breaking for
+#                         any http manifest. git:// / ftp:// also rejected.
+#  KEPT source.tls        unchanged; applies to https fetches, N/A for ssh.
+#
+# Open item — mountPath → mountPaths[] drops the cluster-wide mountPath
+# uniqueness CEL that PackageSpec guarantees today. Per-package destination
+# uniqueness is enforced below, but two packages can still target the same
+# container path. Restore the global guarantee with a packages-level CEL or
+# move it to the reconciler — decide before promoting this proposal.
 #
 # Mechanism: operator registers a handler on controller-runtime's built-in
 # webhook server (`mgr.GetWebhookServer().Register`), publishes the full URL
@@ -16,9 +33,16 @@
 #            `status.packages[].signingSecretRef`. User does not supply one.
 #   slack  → user supplies `syncWebhook.signingSecretRef` (Slack issues the
 #            value, operator cannot generate it).
+#
+# SSH host keys (operator-level): chart ships `git.knownHosts` (ssh-keyscan
+# lines, pre-seeded with github/gitlab/bitbucket/azure) → ConfigMap at
+# /etc/curity/known_hosts → go-git HostKeyCallback via knownhosts.New. Missing/
+# mismatched key fails the clone (no InsecureIgnoreHostKey). Self-hosted: ops
+# appends a line. Static — refresh on host-key rotation via chart bump (pin
+# ed25519). The sshKey Secret carries only the private key (+ passphrase).
 ---
-# Slack-only — copy the Signing Secret from the Slack app's Basic Information
-# page into `data.secret`. Skip this Secret entirely for GitHub.
+# Slack-only — Signing Secret from the Slack app's Basic Information page into
+# `stringData.secret`. Omit entirely for GitHub.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -27,6 +51,22 @@ metadata:
 type: Opaque
 stringData:
   secret: REPLACE_ME
+---
+# git ssh source — deploy key. Generate with `ssh-keygen -t ed25519`, register
+# the public half as a read-only deploy key on the repo. `passphrase` is
+# optional; drop the field for an unencrypted key.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: plugins-deploy-key
+  namespace: curity
+type: kubernetes.io/ssh-auth   # mandates the `ssh-privatekey` key
+stringData:
+  ssh-privatekey: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    REPLACE_ME
+    -----END OPENSSH PRIVATE KEY-----
+  passphrase: REPLACE_ME
 ---
 apiVersion: curity.io/v1alpha1
 kind: IdentityServerCluster
@@ -43,7 +83,7 @@ spec:
   # +kubebuilder:validation:XValidation:rule="self.all(p1, !has(p1.name) || self.exists_one(p2, has(p2.name) && p2.name == p1.name))",message="each packages[].name must be unique within the cluster"
   packages:
 
-    # Git — minimum viable config. Operator generates the signing Secret.
+    # git source over SSH (go-git). Operator generates the signing Secret.
     - # Logical name; used to derive the webhook URL path.
       # +kubebuilder:validation:Optional
       # +kubebuilder:validation:MinLength=1
@@ -51,31 +91,69 @@ spec:
       # +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
       name: plugins-main
 
+      # Additive over the existing PackageSource: ref is git-only; ssh:// ⇒ git
+      # + sshKey; git rejects bearerToken; auth holds exactly one method (the
+      # last rule extends the existing PackageSource exactly-one CEL).
+      # +kubebuilder:validation:Required
+      # +kubebuilder:validation:XValidation:rule="self.type == 'git' || !has(self.ref)",message="source.ref is only valid when source.type is 'git'"
+      # +kubebuilder:validation:XValidation:rule="!self.url.startsWith('ssh://') || self.type == 'git'",message="ssh:// urls are only valid for source.type 'git'"
+      # +kubebuilder:validation:XValidation:rule="self.url.startsWith('ssh://') == (has(self.auth) && has(self.auth.sshKey))",message="ssh:// requires auth.sshKey, and auth.sshKey requires an ssh:// url"
+      # +kubebuilder:validation:XValidation:rule="self.type != 'git' || !has(self.auth) || !has(self.auth.bearerToken)",message="git sources use auth.basicAuth (https) or auth.sshKey (ssh://), not bearerToken"
+      # +kubebuilder:validation:XValidation:rule="!has(self.auth) || ((has(self.auth.basicAuth) ? 1 : 0) + (has(self.auth.bearerToken) ? 1 : 0) + (has(self.auth.sshKey) ? 1 : 0) == 1)",message="exactly one of auth.basicAuth, auth.bearerToken, or auth.sshKey must be set when auth is configured"
       source:
-        url: https://github.com/curityio/myrepo
+        # +kubebuilder:validation:Optional
+        # +kubebuilder:validation:Enum=zip;git
+        # +kubebuilder:default=zip
+        type: git
+        # Secure transports only: https (encrypted) or ssh (encrypted + host-key
+        # verified). http/git/ftp are rejected. https branch mirrors the existing
+        # PackageSource pattern but drops http; ssh adds a user@host branch (git
+        # ssh urls need userinfo, which the https branch forbids).
+        # +kubebuilder:validation:Required
+        # +kubebuilder:validation:MaxLength=2048
+        # +kubebuilder:validation:Pattern=`^(https://[^/@\s]+([/?#][^\s]*)?|ssh://[^@/\s]+@[^/@\s]+/[^\s]+)$`
+        url: ssh://git@git.example.com/curity/plugins.git
+        # Branch, tag, or SHA; defaults to remote HEAD.
+        # +kubebuilder:validation:Optional
+        # +kubebuilder:validation:MaxLength=255
+        ref: main
+        # auth — existing PackageAuthSpec + sshKey (new). go-git mapping:
+        #   bearerToken  net/http Bearer; zip only (git hosts reject it).
+        #   basicAuth    http.BasicAuth; zip, or git https (user + PAT).
+        #   sshKey       ssh.PublicKeys; git ssh:// only (host keys: see header).
+        # Exactly-one is enforced by the source-level XValidation above.
+        # +kubebuilder:validation:Optional
         auth:
-          bearerToken:
+          sshKey:
             secretRef:
-              name: github-pat
-              key: token
+              name: plugins-deploy-key
+              # kubernetes.io/ssh-auth `ssh-privatekey`, PEM.
+              privateKeyKey: ssh-privatekey
+              # Optional.
+              passphraseKey: passphrase
+          # HTTPS + PAT alternative (set url: https://git.example.com/...):
+          # basicAuth:
+          #   secretRef:
+          #     name: git-pat
+          #     usernameKey: username   # host-dependent; PAT goes in password
+          #     passwordKey: password
 
       # +kubebuilder:validation:Optional
       # +kubebuilder:validation:XValidation:rule="(self.provider == 'slack') == has(self.signingSecretRef)",message="syncWebhook.signingSecretRef must be set iff provider is 'slack' (github keys are operator-generated)"
       syncWebhook:
         # +kubebuilder:validation:Required
-        # +kubebuilder:validation:Enum=git;slack
-        provider: git
-        # signingSecretRef: required for slack, forbidden for git.
+        # +kubebuilder:validation:Enum=github;slack
+        provider: github
 
-      # Each entry: archive path → container path. Destinations unique per package.
+      # Each entry: source path → container path.
       # +kubebuilder:validation:Required
       # +kubebuilder:validation:MinItems=1
       # +kubebuilder:validation:MaxItems=32
       # +kubebuilder:validation:XValidation:rule="self.all(m1, self.exists_one(m2, m2.destination == m1.destination))",message="each mountPaths[].destination must be unique within this package"
       mountPaths:
-        - # Archive-relative path; `.` for whole archive; no leading `/` or `..`.
+        - # Source-relative path (archive root for zip, repo root for git);
+          # `.` for the whole tree; no leading `/` or `..`.
           # +kubebuilder:validation:Required
-          # +kubebuilder:validation:MinLength=1
           # +kubebuilder:validation:MaxLength=1024
           # +kubebuilder:validation:Pattern=`^([.]|[^/\s][^\s]*)$`
           # +kubebuilder:validation:XValidation:rule="!self.contains('..')",message="source must not contain '..' segments"
@@ -88,10 +166,11 @@ spec:
         - source: dist/post-commit-scripts
           destination: /opt/idsvr/usr/share/post-commit-scripts
 
-    # Slack — user supplies the signing Secret.
+    # Slack — user supplies the signing Secret. zip source (type defaults).
     - name: scripts-on-demand
       source:
-        url: https://github.com/curityio/myrepo
+        type: zip
+        url: https://artifacts.internal.example.com/scripts.zip
         auth:
           basicAuth:
             secretRef:
@@ -113,6 +192,5 @@ spec:
 #                      Paste into GitHub "Payload URL" / Slack "Request URL".
 #                      Host = chart's `operator.webhookBaseUrl`; path =
 #                      /webhooks/<ns>/<cluster>/<name>.
-#   .signingSecretRef  secretKeyRef. Set for provider=git (operator-
-#                      generated key). Read the value and paste it into
-#                      GitHub's webhook "Secret" field.
+#   .signingSecretRef  secretKeyRef. Set for provider=github (operator-
+#                      generated key). Paste into GitHub's webhook "Secret" field.

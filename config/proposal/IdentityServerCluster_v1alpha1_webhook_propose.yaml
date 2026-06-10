@@ -4,8 +4,7 @@
 #                         git → go-git clone/fetch at source.ref (working tree).
 #  NEW source.ref         git ref (branch/tag/SHA); git-only.
 #  NEW source.auth.sshKey SSH key (PEM + optional passphrase); git ssh:// only.
-#                         Joins existing basicAuth/bearerToken in PackageAuthSpec;
-#                         host-agnostic, not github-specific.
+#                         Joins existing basicAuth/bearerToken in PackageAuthSpec.
 #  NEW syncWebhook        signed inbound POSTs (GitHub/Slack) re-fetch source
 #                         and re-apply mounts.
 #  CHG mountPaths[]       replaces single `mountPath`; each entry is (source

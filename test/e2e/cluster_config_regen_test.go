@@ -247,6 +247,83 @@ var _ = Describe("cluster.xml regeneration", func() {
 		})
 	})
 
+	Describe("admin service.port change triggers regen", Ordered, func() {
+		const (
+			ns          = "e2e-regen-cfgport"
+			clusterName = "regen-cfgport"
+			adminName   = "regen-cfgport-admin"
+		)
+		BeforeAll(func() { createNS(ns) })
+		AfterAll(func() { deleteNS(ns) })
+
+		It("regenerates cluster.xml and rewires genclust when the admin config port changes", func() {
+			ctx := context.Background()
+
+			By("creating cluster + admin (config port 6789) and waiting for the cluster-config Secret to populate")
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
+				map[string]interface{}{"name": clusterName, "namespace": ns})
+			admin := &v1alpha1.IdentityServerNode{
+				ObjectMeta: metav1.ObjectMeta{Name: adminName, Namespace: ns},
+				Spec: v1alpha1.IdentityServerNodeSpec{
+					Type:                     v1alpha1.NodeTypeAdmin,
+					Role:                     "regen-cfgport-admin-role",
+					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
+					Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 6789},
+				},
+			}
+			Expect(k().Create(ctx, admin)).To(Succeed())
+			utils.SimulateClusterConfigReady(ns, clusterName, e2eTimeout, e2eInterval)
+
+			By("capturing the pre-change cluster-config-hash annotation")
+			secretBefore := &corev1.Secret{}
+			Expect(k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}, secretBefore)).To(Succeed())
+			hashBefore := secretBefore.Annotations["curity.io/cluster-config-hash"]
+			Expect(hashBefore).NotTo(BeEmpty())
+
+			By("changing the admin config port 6789 -> 7789")
+			Eventually(func() error {
+				n := &v1alpha1.IdentityServerNode{}
+				if err := k().Get(ctx, client.ObjectKey{Name: adminName, Namespace: ns}, n); err != nil {
+					return err
+				}
+				n.Spec.Service.Port = 7789
+				return k().Update(ctx, n)
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("observing regen fire — hash changes and Secret data resets to placeholder")
+			Eventually(func(g Gomega) {
+				s := &corev1.Secret{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}, s)).To(Succeed())
+				g.Expect(s.Annotations["curity.io/cluster-config-hash"]).NotTo(Equal(hashBefore),
+					"cluster-config-hash must change when the admin config port changes")
+				g.Expect(string(s.Data["cluster.xml"])).To(Equal("placeholder"),
+					"Secret data must reset to placeholder during regen")
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("verifying the fresh genclust Job carries CONFIG_SERVICE_PORT=7789")
+			Eventually(func(g Gomega) {
+				job := &batchv1.Job{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}, job)).To(Succeed())
+				var port string
+				for _, e := range job.Spec.Template.Spec.Containers[0].Env {
+					if e.Name == "CONFIG_SERVICE_PORT" {
+						port = e.Value
+					}
+				}
+				g.Expect(port).To(Equal("7789"), "genclust must be invoked with the overridden config port")
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("verifying the admin Service config port follows the override")
+			Eventually(func(g Gomega) {
+				svc := &corev1.Service{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: ownedName(clusterName, adminName), Namespace: ns}, svc)).To(Succeed())
+				g.Expect(svc.Spec.Ports).To(ContainElement(Satisfy(func(p corev1.ServicePort) bool {
+					return p.Name == "config" && p.Port == 7789
+				})), "admin Service config port must update to 7789")
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+		})
+	})
+
 	Describe("cluster CR delete cascades to genclust Job", Ordered, func() {
 		const (
 			ns          = "e2e-regen-cascade"

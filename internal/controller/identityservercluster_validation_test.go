@@ -1188,7 +1188,7 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 	})
 
-	It("should accept node with ExternalName service type", func() {
+	It("should reject node with ExternalName service type via Enum", func() {
 		testCreateCluster(ns, "val-cluster-extname")
 		node := &v1alpha1.IdentityServerNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "node-extname", Namespace: ns},
@@ -1200,7 +1200,9 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeExternalName, Port: 8443},
 			},
 		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
+		err := k8sClient.Create(ctx, node)
+		Expect(err).To(HaveOccurred(), "ExternalName is unsupported: a node Service must front its own pods")
+		Expect(err.Error()).To(ContainSubstring("spec.service.type"))
 	})
 
 	It("should accept node with valid log streams", func() {

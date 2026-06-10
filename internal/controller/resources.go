@@ -1130,13 +1130,13 @@ func buildNetworkPolicy(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.
 				}},
 			}},
 			Ports: []networkingv1.NetworkPolicyPort{
-				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(portConfig))},
-				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(portDistributedService))},
+				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(resolveConfigPort(node)))},
+				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(resolveDistributedServicePort(node)))},
 			},
 		},
 		{
-			// The genclust config Job dials admin on portConfig; without this peer an
-			// enforcing CNI denies it and cluster-config generation never completes.
+			// The genclust config Job dials admin on the config port; without this peer
+			// an enforcing CNI denies it and cluster-config generation never completes.
 			From: []networkingv1.NetworkPolicyPeer{{
 				PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
 					"curity.io/cluster":   cluster.Name,
@@ -1144,12 +1144,14 @@ func buildNetworkPolicy(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.
 				}},
 			}},
 			Ports: []networkingv1.NetworkPolicyPort{
-				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(portConfig))},
+				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(resolveConfigPort(node)))},
 			},
 		},
 	}
 
-	if node.Spec.UI != nil && node.Spec.UI.Enabled && cluster.Spec.NetworkPolicy.APIGatewayNamespace != "" {
+	// Open the UI port to the gateway only when it is actually exposed
+	// (adminUIExposed gates buildServicePorts/buildContainerPorts the same way).
+	if adminUIExposed(node) && cluster.Spec.NetworkPolicy.APIGatewayNamespace != "" {
 		ingress = append(ingress, networkingv1.NetworkPolicyIngressRule{
 			From: []networkingv1.NetworkPolicyPeer{{
 				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
@@ -1157,7 +1159,7 @@ func buildNetworkPolicy(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.
 				}},
 			}},
 			Ports: []networkingv1.NetworkPolicyPort{
-				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(portAdminUI))},
+				{Protocol: &tcp, Port: ptr.To(intstr.FromInt32(node.Spec.Service.UIPort))},
 			},
 		})
 	}

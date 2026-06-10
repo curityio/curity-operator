@@ -100,7 +100,7 @@ spec:
   service:
     # Service type for the whole Service (every port shares it). Defaults to ClusterIP.
     # +kubebuilder:validation:Optional
-    # +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer;ExternalName
+    # +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
     type: ClusterIP                  # LoadBalancer or NodePort to expose externally
     # Primary Service port: the http port on runtime (default 8443) and the
     # config-service port on admin (default 6789). On admin it is also fed to

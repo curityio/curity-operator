@@ -40,8 +40,8 @@ var _ = Describe("IdentityServerNode customization + NetworkPolicy", Label("smok
 				"apiGatewayNamespace": "edge-gateway",
 			})
 
-		// Admin node with UI enabled — triggers the cluster-scoped NetworkPolicy
-		// (admin-only).
+		// Admin node with UI enabled and exposed (uiPort) — triggers the
+		// cluster-scoped NetworkPolicy with the admin-UI ingress rule (admin-only).
 		utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-admin-ui.yaml", ns,
 			map[string]interface{}{
 				"name":        adminName,
@@ -49,6 +49,7 @@ var _ = Describe("IdentityServerNode customization + NetworkPolicy", Label("smok
 				"clusterName": clusterName,
 				"uiEnabled":   true,
 				"uiSecure":    true,
+				"uiPort":      6749,
 			})
 
 		// Unblock the admin Deployment gate (genclust does not complete in e2e).

@@ -207,7 +207,7 @@ type ServiceSpec struct {
 	// Type is the Service type for the whole Service (every port shares it).
 	// Defaults to ClusterIP.
 	// +optional
-	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort;ExternalName
+	// +kubebuilder:validation:Enum=ClusterIP;LoadBalancer;NodePort
 	Type corev1.ServiceType `json:"type,omitempty"`
 
 	// Port is the node's primary Service port: http on runtime (default 8443),

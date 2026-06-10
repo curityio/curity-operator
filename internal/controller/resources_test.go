@@ -4148,22 +4148,59 @@ func TestBuildNetworkPolicy_UIRuleConditional(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
 
-	// Base rules (runtime + genclust) are always present; the UI rule is the +1.
+	// Base rules (runtime + genclust) are always present; the UI rule is the +1,
+	// added only when the UI is actually exposed (adminUIExposed: ui.enabled AND
+	// service.uiPort) and a gateway namespace is set.
 	cluster.Spec.NetworkPolicy = &v1alpha1.NetworkPolicySpec{APIGatewayNamespace: "edge"}
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+	node.Spec.Service.UIPort = portAdminUI
 	if np := buildNetworkPolicy(cluster, node); len(np.Spec.Ingress) != 3 {
-		t.Errorf("UI on + gateway ns: want 3 ingress rules (runtime + genclust + UI), got %d", len(np.Spec.Ingress))
+		t.Errorf("UI exposed + gateway ns: want 3 ingress rules (runtime + genclust + UI), got %d", len(np.Spec.Ingress))
 	}
 
 	cluster.Spec.NetworkPolicy = &v1alpha1.NetworkPolicySpec{}
 	if np := buildNetworkPolicy(cluster, node); len(np.Spec.Ingress) != 2 {
-		t.Errorf("UI on, no gateway ns: want 2 ingress rules (runtime + genclust), got %d", len(np.Spec.Ingress))
+		t.Errorf("UI exposed, no gateway ns: want 2 ingress rules (runtime + genclust), got %d", len(np.Spec.Ingress))
 	}
 
+	// ui.enabled but no uiPort: the UI is not exposed (Option A), so no UI rule.
 	cluster.Spec.NetworkPolicy = &v1alpha1.NetworkPolicySpec{APIGatewayNamespace: "edge"}
+	node.Spec.Service.UIPort = 0
+	if np := buildNetworkPolicy(cluster, node); len(np.Spec.Ingress) != 2 {
+		t.Errorf("ui.enabled but no uiPort: want 2 ingress rules (UI not exposed), got %d", len(np.Spec.Ingress))
+	}
+
 	node.Spec.UI = &v1alpha1.UISpec{Enabled: false}
+	node.Spec.Service.UIPort = portAdminUI
 	if np := buildNetworkPolicy(cluster, node); len(np.Spec.Ingress) != 2 {
 		t.Errorf("UI off: want 2 ingress rules (runtime + genclust), got %d", len(np.Spec.Ingress))
+	}
+}
+
+func TestBuildNetworkPolicy_HonorsPortOverrides(t *testing.T) {
+	// Regression: the NP must admit the operator's resolved ports, not the
+	// hardcoded defaults. Otherwise an enforcing CNI blocks genclust/runtime
+	// when the admin overrides the config/distributed-service/UI ports.
+	cluster := newTestCluster()
+	cluster.Spec.NetworkPolicy = &v1alpha1.NetworkPolicySpec{APIGatewayNamespace: "edge"}
+	node := newTestNode(v1alpha1.NodeTypeAdmin)
+	node.Spec.UI = &v1alpha1.UISpec{Enabled: true}
+	node.Spec.Service.Port = 7000
+	node.Spec.Service.DistributedServicePort = 6800
+	node.Spec.Service.UIPort = 7777
+
+	np := buildNetworkPolicy(cluster, node)
+	if len(np.Spec.Ingress) != 3 {
+		t.Fatalf("want 3 ingress rules (runtime + genclust + UI), got %d", len(np.Spec.Ingress))
+	}
+	if rt := np.Spec.Ingress[0].Ports; len(rt) != 2 || rt[0].Port.IntValue() != 7000 || rt[1].Port.IntValue() != 6800 {
+		t.Errorf("runtime rule must admit overridden config/ds ports [7000 6800], got %+v", rt)
+	}
+	if gc := np.Spec.Ingress[1].Ports; len(gc) != 1 || gc[0].Port.IntValue() != 7000 {
+		t.Errorf("genclust rule must admit overridden config port 7000, got %+v", gc)
+	}
+	if ui := np.Spec.Ingress[2].Ports; len(ui) != 1 || ui[0].Port.IntValue() != 7777 {
+		t.Errorf("UI rule must admit overridden uiPort 7777, got %+v", ui)
 	}
 }
 

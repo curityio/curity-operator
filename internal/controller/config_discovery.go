@@ -40,6 +40,10 @@ const (
 	ConfigTypeLicense          = "license"
 	ConfigTypeLogging          = "logging"
 	ConfigTypePostCommitScript = "postCommitScript"
+	// ConfigTypeEnv resources are injected as environment variables (envFrom)
+	// instead of mounted as files. Used by the operator-managed keystore Secret
+	// (spec.convertKeystore); the only env-type producer today.
+	ConfigTypeEnv = "env"
 )
 
 const (
@@ -332,9 +336,11 @@ func resolveConfigType(annotations map[string]string) (string, error) {
 		return ConfigTypeLogging, nil
 	case ConfigTypePostCommitScript:
 		return ConfigTypePostCommitScript, nil
+	case ConfigTypeEnv:
+		return ConfigTypeEnv, nil
 	default:
-		return "", fmt.Errorf("%w: %q (valid: %q, %q, %q, %q)",
-			ErrUnknownConfigType, val, ConfigTypeBase, ConfigTypeLicense, ConfigTypeLogging, ConfigTypePostCommitScript)
+		return "", fmt.Errorf("%w: %q (valid: %q, %q, %q, %q, %q)",
+			ErrUnknownConfigType, val, ConfigTypeBase, ConfigTypeLicense, ConfigTypeLogging, ConfigTypePostCommitScript, ConfigTypeEnv)
 	}
 }
 
@@ -363,6 +369,11 @@ func shouldMountConfig(nodeType v1alpha1.NodeType, adminExists bool, configType 
 	if configType == ConfigTypeLogging {
 		return true
 	}
+	// env vars are not distributed admin→runtime by Curity; each pod needs them
+	// in its own environment, so inject on every node (like logging).
+	if configType == ConfigTypeEnv {
+		return true
+	}
 	if configType == ConfigTypePostCommitScript {
 		return nodeType == v1alpha1.NodeTypeAdmin
 	}
@@ -374,6 +385,12 @@ func shouldMountConfig(nodeType v1alpha1.NodeType, adminExists bool, configType 
 
 // computeConfigHash returns a deterministic SHA256 hex string over the sorted
 // config names and their data. Returns empty string for nil or empty configs.
+//
+// Load-bearing for env-typed (config-type: env) resources: they are injected via
+// envFrom referencing the live Secret, so the PodSpec does NOT change when the
+// Secret's data changes — only this hash (stamped as the pod-template
+// managed-configs-hash annotation) rolls the pods. Do NOT exclude env-typed
+// resources here, or a converted-keystore rotation would silently fail to redeploy.
 func computeConfigHash(configs []DiscoveredManagedResource) string {
 	if len(configs) == 0 {
 		return ""
@@ -518,10 +535,19 @@ func detectDuplicateKeys(configs []DiscoveredManagedResource) []DuplicateKeyWarn
 		for i, o := range owners {
 			refs[i] = o.Kind + "/" + o.Name
 		}
-		w, ok := newDuplicateKeyWarning(owners, fmt.Sprintf(
+		msg := fmt.Sprintf(
 			"data key %q (config type %q) exists in multiple resources: %v — all will be mounted at distinct paths (prefixed by resource name), verify this is intentional",
 			mk.filename, mk.configType, refs,
-		))
+		)
+		if mk.configType == ConfigTypeEnv {
+			// env vars don't mount at paths — a shared key means one envFrom value
+			// silently shadows the other (order is non-deterministic).
+			msg = fmt.Sprintf(
+				"environment variable %q is defined by multiple env resources: %v — one value will shadow the others (envFrom order is non-deterministic), remove the duplicate",
+				mk.filename, refs,
+			)
+		}
+		w, ok := newDuplicateKeyWarning(owners, msg)
 		if !ok {
 			continue // invariant violated upstream; skip rather than emit malformed
 		}

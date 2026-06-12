@@ -184,6 +184,7 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `topologySpreadConstraints` | list | Pod spread policies |
 | `affinity` | object | Advanced scheduling constraints |
 | `packages` | list | Remote ZIP archives downloaded and unpacked into every Curity container at startup. See [Packages](#packages) |
+| `convertKeystore` | list | Convert `kubernetes.io/tls` Secrets to base64 PKCS#12 keystores, published as env vars (e.g. `SSL_SERVER_KEY`) on every node. See [Converting TLS certificates to keystores](#converting-tls-certificates-to-keystores-convertkeystore) |
 
 ### IdentityServerNode (`isn`)
 
@@ -271,6 +272,7 @@ Set the `curity.io/config-type` annotation to control where configs are mounted.
 | License | `license` | `/opt/idsvr/etc/init/license/{kind}_{resource-name}_{filename}` | Admin (all nodes if no admin) |
 | Logging | `logging` | `/opt/idsvr/etc/log4j2.xml` (single file; replaces the shipped default) | Every node |
 | Post-commit script | `postCommitScript` | `/opt/idsvr/usr/bin/post-commit-scripts/{kind}_{resource-name}_{filename}` (executable) | Admin only |
+| Environment variables | `env` | injected via `envFrom` — no file mount | Every node |
 
 Mount filenames are prefixed with the resource kind and name to prevent collisions when multiple ConfigMaps/Secrets contain the same data key. The `{kind}` prefix is `cm` for ConfigMaps and `secret` for Secrets (e.g. `cm_my-config_base-config.xml`). The `logging` type is the exception — it mounts a single `log4j2.xml` at a fixed path with no mangling.
 
@@ -281,6 +283,37 @@ A resource with an unknown `curity.io/config-type` value is skipped (not mounted
 A `postCommitScript`-typed ConfigMap (or Secret) mounts each data key as an **executable** file (`0755`, or `0555` for Secrets) into `/opt/idsvr/usr/bin/post-commit-scripts/` on the **admin node only**. Curity runs these after a configuration commit (see Curity's post-commit-scripts documentation) — the operator's role is to deliver them executable to the right place. Editing a script rolls the admin pod so the new content is picked up. You can stream their output with `spec.logging.logs: [post-commit-scripts]`.
 
 If a `postCommitScript` is applied to a cluster with no admin node, it mounts nowhere — the operator emits a `PostCommitScriptNoAdmin` Warning event on the IdentityServerCluster.
+
+#### Converting TLS certificates to keystores (`convertKeystore`)
+
+Curity expects its TLS server key in the `SSL_SERVER_KEY` environment variable as a **base64-encoded PKCS#12 keystore**. A Kubernetes `kubernetes.io/tls` Secret gives you **PEM** (`tls.crt` + `tls.key`) instead — the wrong format.
+
+`spec.convertKeystore` on the `IdentityServerCluster` bridges that gap:
+
+1. The operator reads each source TLS Secret and converts it to a PKCS#12 keystore in-process (no Job, no extra pod).
+2. It writes the results into one cluster-owned Secret, `<cluster>-convert-ks-env` (config-type `env`).
+3. That Secret is injected via `envFrom` onto every node, so `SSL_SERVER_KEY` is set in each Curity pod.
+
+```yaml
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: my-cluster
+spec:
+  version: "11.0.0"
+  convertKeystore:
+    - sourceTls:
+        keyName: SSL_SERVER_KEY        # env var that receives the keystore
+        fromSecretRef: my-tls          # source kubernetes.io/tls Secret (same namespace)
+        cert: SSL_SERVER_CERT          # optional: also publish the raw PEM cert
+```
+
+Then reference `${SSL_SERVER_KEY}` from your base configuration (the `ssl-server-keystore` element) so Curity serves it. Notes:
+
+- Conversion re-runs automatically when the source certificate rotates.
+- A node's Deployment is deferred until its keystore is published, so no pod boots referencing a missing `${SSL_SERVER_KEY}`.
+- Status is on the cluster's `ConvertKeystoreReady` condition: `SourceSecretMissing`/`SourceKeysMissing` (waiting on the source), `ConversionFailed` (bad cert — nothing published), or `Ready`.
+- No keystore password to manage: the operator emits the keystore in exactly the form Curity loads, so you never supply one.
 
 ```yaml
 apiVersion: v1

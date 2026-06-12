@@ -133,31 +133,34 @@ func hasManagedLabel(obj client.Object) bool {
 	return obj.GetLabels()[LabelManagedConfig] == "true"
 }
 
-// adminCredsCandidatePredicate filters Secret events down to Opaque type so
-// cert-manager TLS, SA tokens, and dockercfg Secrets don't trigger
-// findClusterForSecret's cluster List on every renewal.
-type adminCredsCandidatePredicate struct {
+// clusterSecretWatchPredicate filters Secret events down to the kinds a cluster
+// can reference, so findClusterForSecret's cluster List doesn't run on every
+// system Secret churn (SA tokens, dockercfg, release records). Two kinds qualify: Opaque (the
+// admin-credentials Secret) and kubernetes.io/tls (convertKeystore sources, so a
+// cert rotation re-converts). findClusterForSecret still confirms an actual
+// spec reference before enqueuing, so non-referenced TLS Secrets cost only a List.
+type clusterSecretWatchPredicate struct {
 	predicate.Funcs
 }
 
-func (p adminCredsCandidatePredicate) Create(e event.CreateEvent) bool {
-	return isAdminCredsCandidate(e.Object)
+func (p clusterSecretWatchPredicate) Create(e event.CreateEvent) bool {
+	return isClusterWatchedSecret(e.Object)
 }
 
-func (p adminCredsCandidatePredicate) Update(e event.UpdateEvent) bool {
-	return isAdminCredsCandidate(e.ObjectOld) || isAdminCredsCandidate(e.ObjectNew)
+func (p clusterSecretWatchPredicate) Update(e event.UpdateEvent) bool {
+	return isClusterWatchedSecret(e.ObjectOld) || isClusterWatchedSecret(e.ObjectNew)
 }
 
-func (p adminCredsCandidatePredicate) Delete(e event.DeleteEvent) bool {
-	return isAdminCredsCandidate(e.Object)
+func (p clusterSecretWatchPredicate) Delete(e event.DeleteEvent) bool {
+	return isClusterWatchedSecret(e.Object)
 }
 
-func isAdminCredsCandidate(obj client.Object) bool {
+func isClusterWatchedSecret(obj client.Object) bool {
 	secret, ok := obj.(*corev1.Secret)
 	if !ok || secret == nil {
 		return false
 	}
-	return secret.Type == "" || secret.Type == corev1.SecretTypeOpaque
+	return secret.Type == "" || secret.Type == corev1.SecretTypeOpaque || secret.Type == corev1.SecretTypeTLS
 }
 
 // clusterConditionStatus returns the Status field of the named condition, or

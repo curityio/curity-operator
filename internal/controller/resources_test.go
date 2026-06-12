@@ -3323,6 +3323,10 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 		"TerminationGracePeriodSeconds": true,
 		"ImagePullPolicy":               true,
 		"NetworkPolicy":                 true,
+		// ConvertKeystore has its own input hash (convert_keystore.go) and is
+		// consumed via envFrom on nodes; it does not affect cluster.xml, so it
+		// must not trigger a genclust Job re-run.
+		"ConvertKeystore": true,
 	}
 
 	specType := reflect.TypeOf(v1alpha1.IdentityServerClusterSpec{})
@@ -4227,6 +4231,65 @@ func TestBuildNetworkPolicy_SelectorsMatchRealPodLabels(t *testing.T) {
 	for k, v := range np.Spec.PodSelector.MatchLabels {
 		if got := adminPodLabels[k]; got != v {
 			t.Errorf("NP podSelector %s=%q does not match admin pod label (got %q) — policy applies to no pod", k, v, got)
+		}
+	}
+}
+
+// --- convertKeystore: env consumption ---
+
+func TestBuildEnvFrom_SecretAndConfigMapSortedOptional(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "z-env-secret", IsSecret: true, ConfigType: ConfigTypeEnv},
+		{Name: "a-env-cm", IsSecret: false, ConfigType: ConfigTypeEnv},
+		{Name: "base-cm", IsSecret: false, ConfigType: ConfigTypeBase}, // ignored
+	}
+	got := buildEnvFrom(configs)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 env sources (env-typed only), got %d", len(got))
+	}
+	// sorted by name: a-env-cm before z-env-secret
+	if got[0].ConfigMapRef == nil || got[0].ConfigMapRef.Name != "a-env-cm" {
+		t.Errorf("expected first source ConfigMapRef a-env-cm, got %+v", got[0])
+	}
+	if got[1].SecretRef == nil || got[1].SecretRef.Name != "z-env-secret" {
+		t.Errorf("expected second source SecretRef z-env-secret, got %+v", got[1])
+	}
+	for i, s := range got {
+		var opt *bool
+		if s.SecretRef != nil {
+			opt = s.SecretRef.Optional
+		} else {
+			opt = s.ConfigMapRef.Optional
+		}
+		if opt == nil || !*opt {
+			t.Errorf("source %d must be Optional:true (missing Secret must not wedge the pod)", i)
+		}
+	}
+}
+
+func TestBuildEnvFrom_NoEnvResourcesReturnsNil(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "base-cm", IsSecret: false, ConfigType: ConfigTypeBase},
+	}
+	if got := buildEnvFrom(configs); got != nil {
+		t.Errorf("expected nil when no env-typed resources, got %+v", got)
+	}
+}
+
+func TestBuildVolumes_SkipsEnvTypedResources(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "my-env", IsSecret: true, ConfigType: ConfigTypeEnv, Data: map[string][]byte{"SSL_SERVER_KEY": []byte("x")}},
+	}
+	volumes, mounts := buildVolumes("cluster-1", configs)
+	// only cluster-config volume/mount should exist; the env resource is NOT mounted.
+	for _, v := range volumes {
+		if v.Name != "cluster-config" {
+			t.Errorf("env-typed resource must not produce a volume; got %q", v.Name)
+		}
+	}
+	for _, m := range mounts {
+		if m.Name != "cluster-config" {
+			t.Errorf("env-typed resource must not produce a mount; got %q", m.Name)
 		}
 	}
 }

@@ -1756,3 +1756,76 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 	})
 
 })
+
+var _ = Describe("IdentityServerCluster / convertKeystore validation", func() {
+	var ns string
+
+	BeforeEach(func() {
+		ns = nodeTestNamespace()
+		Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})).To(Succeed())
+	})
+	AfterEach(func() {
+		_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}})
+	})
+
+	clusterWith := func(name string, items ...v1alpha1.ConvertKeystoreSource) *v1alpha1.IdentityServerCluster {
+		cl := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec:       v1alpha1.IdentityServerClusterSpec{Version: "11.2.0"},
+		}
+		for _, it := range items {
+			cl.Spec.ConvertKeystore = append(cl.Spec.ConvertKeystore, v1alpha1.ConvertKeystoreItem{SourceTLS: it})
+		}
+		return cl
+	}
+
+	It("accepts a minimal convertKeystore item", func() {
+		cl := clusterWith("ck-ok", v1alpha1.ConvertKeystoreSource{KeyName: "SSL_SERVER_KEY", FromSecretRef: "curity-local-tls"})
+		Expect(k8sClient.Create(ctx, cl, client.DryRunAll)).To(Succeed())
+	})
+
+	It("rejects a keyName that is not a valid env identifier", func() {
+		cl := clusterWith("ck-bad-name", v1alpha1.ConvertKeystoreSource{KeyName: "SSL-SERVER", FromSecretRef: "tls"})
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("keyName"))
+	})
+
+	It("rejects a keyName colliding with an operator-managed variable", func() {
+		cl := clusterWith("ck-reserved", v1alpha1.ConvertKeystoreSource{KeyName: "ADMIN_PASSWORD", FromSecretRef: "tls"})
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("operator-managed"))
+	})
+
+	It("rejects a cert colliding with an operator-managed variable", func() {
+		cl := clusterWith("ck-reserved-cert", v1alpha1.ConvertKeystoreSource{KeyName: "SSL_SERVER_KEY", FromSecretRef: "tls", Cert: "CONFIG_ENCRYPTION_KEY"})
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("operator-managed"))
+	})
+
+	It("rejects a keyName colliding with SKIP_INSTALL (operator container.Env shadows envFrom)", func() {
+		cl := clusterWith("ck-skip-install", v1alpha1.ConvertKeystoreSource{KeyName: "SKIP_INSTALL", FromSecretRef: "tls"})
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("operator-managed"))
+	})
+
+	It("rejects cert equal to keyName", func() {
+		cl := clusterWith("ck-cert-eq", v1alpha1.ConvertKeystoreSource{KeyName: "SSL_SERVER_KEY", FromSecretRef: "tls", Cert: "SSL_SERVER_KEY"})
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("cert must differ from keyName"))
+	})
+
+	It("rejects duplicate keyName across items", func() {
+		cl := clusterWith("ck-dup",
+			v1alpha1.ConvertKeystoreSource{KeyName: "SSL_SERVER_KEY", FromSecretRef: "tls-a"},
+			v1alpha1.ConvertKeystoreSource{KeyName: "SSL_SERVER_KEY", FromSecretRef: "tls-b"},
+		)
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("keyName must be unique"))
+	})
+})

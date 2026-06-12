@@ -407,6 +407,44 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 	}
 
+	// 5.8. Don't CREATE a Deployment until the converted env Secret is published, so
+	// a pod never boots referencing an absent ${SSL_SERVER_KEY}. Gate on the Secret
+	// existing (and non-empty), not the cluster condition, to avoid a status race —
+	// the node watches the Secret, so it re-triggers promptly. Existing Deployments
+	// aren't blocked: their pods already have the key, so a convert blip can't freeze
+	// legitimate updates.
+	if len(cluster.Spec.ConvertKeystore) > 0 {
+		var envSecret corev1.Secret
+		envErr := r.Get(ctx, client.ObjectKey{Name: convertKeystoreSecretName(cluster.Name), Namespace: node.Namespace}, &envSecret)
+		if envErr != nil && !apierrors.IsNotFound(envErr) {
+			return ctrl.Result{}, fmt.Errorf("checking convert-keystore Secret for deploy gate: %w", envErr)
+		}
+		if apierrors.IsNotFound(envErr) || len(envSecret.Data) == 0 {
+			var existingDeploy appsv1.Deployment
+			deployName := OwnedResourceName(cluster.Name, node.Name)
+			err := r.Get(ctx, client.ObjectKey{Name: deployName, Namespace: node.Namespace}, &existingDeploy)
+			if err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, fmt.Errorf("checking existing deployment for convert-keystore gate: %w", err)
+			}
+			if apierrors.IsNotFound(err) {
+				log.Info("waiting for keystore conversion before creating Deployment", "cluster", cluster.Name)
+				setCondition(&node.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
+					"WaitingForConvertKeystore", "Waiting for keystore conversion (SSL_SERVER_KEY) before creating Deployment", node.Generation)
+				node.Status.ObservedGeneration = node.Generation
+				node.Status.ServiceName = svc.Name
+				if statusErr := r.Status().Update(ctx, &node); statusErr != nil {
+					if apierrors.IsConflict(statusErr) {
+						return ctrl.Result{Requeue: true}, nil
+					}
+					return ctrl.Result{}, fmt.Errorf("failed to update status: %w", statusErr)
+				}
+				r.Recorder.Eventf(&node, corev1.EventTypeNormal, "WaitingForConvertKeystore",
+					"Deferring Deployment creation until cluster %q publishes the converted keystore", cluster.Name)
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+		}
+	}
+
 	// 6. Build and reconcile the Deployment.
 	// as/packagesHash/priorPackagesReadyForGate are read by HPA/status below
 	// — hoisted out so they're set even when the defer branch skips the build.

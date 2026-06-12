@@ -156,7 +156,39 @@ spec:
       # +kubebuilder:validation:Pattern=`^/`
       # +kubebuilder:validation:MaxLength=1024
       mountPath: /etc/plugins/testing
-      
+
+  # Convert kubernetes.io/tls Secrets (PEM cert+key) into the base64 PKCS#12 keystore
+  # Curity loads from the SSL_SERVER_KEY environment variable. The operator converts each
+  # entry in-process and publishes the results into one cluster-owned env Secret
+  # (`<cluster>-convert-ks-env`), injected via envFrom onto every node. Reference
+  # ${keyName} from your base config's ssl-server-keystore element to make Curity serve it.
+  # +kubebuilder:validation:Optional
+  # +kubebuilder:validation:MaxItems=20
+  # +kubebuilder:validation:XValidation:rule="self.all(p1, self.exists_one(p2, p2.sourceTls.keyName == p1.sourceTls.keyName))",message="each convertKeystore keyName must be unique"
+  # +kubebuilder:validation:XValidation:rule="self.all(p, !(p.sourceTls.keyName in ['ADMIN_PASSWORD','PASSWORD','CONFIG_ENCRYPTION_KEY','LOGGING_LEVEL','STATUS_CMD_PORT','ADMIN_UI_HTTP_MODE','SKIP_INSTALL']) && (!has(p.sourceTls.cert) || !(p.sourceTls.cert in ['ADMIN_PASSWORD','PASSWORD','CONFIG_ENCRYPTION_KEY','LOGGING_LEVEL','STATUS_CMD_PORT','ADMIN_UI_HTTP_MODE','SKIP_INSTALL'])))",message="keyName/cert must not be an operator-managed variable (ADMIN_PASSWORD, PASSWORD, CONFIG_ENCRYPTION_KEY, LOGGING_LEVEL, STATUS_CMD_PORT, ADMIN_UI_HTTP_MODE, SKIP_INSTALL)"
+  convertKeystore:
+      # cert must differ from keyName (they become two distinct environment variables).
+      # +kubebuilder:validation:Required
+      # +kubebuilder:validation:XValidation:rule="!has(self.cert) || self.cert != self.keyName",message="cert must differ from keyName (they become two distinct environment variables)"
+    - sourceTls:
+        # Environment variable the converted keystore is published under (e.g. SSL_SERVER_KEY).
+        # Must be a valid POSIX env var identifier and must be referenced from your Curity base config.
+        # +kubebuilder:validation:Required
+        # +kubebuilder:validation:MinLength=1
+        # +kubebuilder:validation:MaxLength=253
+        # +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+        keyName: SSL_SERVER_KEY
+        # Source kubernetes.io/tls Secret (tls.crt + tls.key) in this namespace.
+        # +kubebuilder:validation:Required
+        # +kubebuilder:validation:MinLength=1
+        # +kubebuilder:validation:MaxLength=253
+        # +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
+        fromSecretRef: curity-local-tls
+        # Optional: also publish the raw PEM certificate under this env var name.
+        # +kubebuilder:validation:Optional
+        # +kubebuilder:validation:MaxLength=253
+        # +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+        cert: SSL_SERVER_CERT
 
 # ------------------------------------------------------------
 # COMMON WORKLOAD CONFIGURATION FOR ALL NODES

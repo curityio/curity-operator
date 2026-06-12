@@ -99,6 +99,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 		Args:            buildContainerArgs(node),
 		Ports:           buildContainerPorts(node),
 		Env:             buildEnvVars(cluster, node),
+		EnvFrom:         buildEnvFrom(configs),
 		LivenessProbe:   buildLivenessProbe(probes),
 		ReadinessProbe:  buildReadinessProbe(probes),
 		// apiserver-default
@@ -420,6 +421,43 @@ func buildEnvVars(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 	return envVars
 }
 
+// buildEnvFrom returns one EnvFromSource per env-typed discovered resource,
+// sorted by name for deterministic ordering. Each ref is Optional so a
+// missing/just-emptied Secret never wedges a pod in CreateContainerConfigError.
+// (Content changes roll pods via the managed-configs-hash; see computeConfigHash.)
+func buildEnvFrom(configs []DiscoveredManagedResource) []corev1.EnvFromSource {
+	envConfigs := make([]DiscoveredManagedResource, 0, len(configs))
+	for _, cfg := range configs {
+		if cfg.ConfigType == ConfigTypeEnv {
+			envConfigs = append(envConfigs, cfg)
+		}
+	}
+	if len(envConfigs) == 0 {
+		return nil
+	}
+	sort.Slice(envConfigs, func(i, j int) bool { return envConfigs[i].Name < envConfigs[j].Name })
+
+	sources := make([]corev1.EnvFromSource, 0, len(envConfigs))
+	for _, cfg := range envConfigs {
+		if cfg.IsSecret {
+			sources = append(sources, corev1.EnvFromSource{
+				SecretRef: &corev1.SecretEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: cfg.Name},
+					Optional:             ptr.To(true),
+				},
+			})
+		} else {
+			sources = append(sources, corev1.EnvFromSource{
+				ConfigMapRef: &corev1.ConfigMapEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: cfg.Name},
+					Optional:             ptr.To(true),
+				},
+			})
+		}
+	}
+	return sources
+}
+
 // buildVolumes returns volumes and mounts for the cluster-config (cluster.xml)
 // and any discovered config resources. Cluster-config is always first.
 func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]corev1.Volume, []corev1.VolumeMount) {
@@ -452,6 +490,10 @@ func buildVolumes(clusterName string, configs []DiscoveredManagedResource) ([]co
 
 	// Discovered config volumes.
 	for _, cfg := range configs {
+		// env-typed resources are injected via envFrom (buildEnvFrom), not mounted.
+		if cfg.ConfigType == ConfigTypeEnv {
+			continue
+		}
 		mountPath, isLeaf := mountPathForConfigType(cfg.ConfigType)
 
 		keys := make([]string, 0, len(cfg.Data))

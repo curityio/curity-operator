@@ -490,6 +490,64 @@ func TestShouldMountConfig_LicenseFollowsBasePattern(t *testing.T) {
 	}
 }
 
+func TestShouldMountConfig_EnvMountsOnAllNodes(t *testing.T) {
+	// env injects on every node regardless of type or admin presence (like
+	// logging) — Curity does not distribute env vars admin→runtime.
+	cases := []struct {
+		nodeType    v1alpha1.NodeType
+		adminExists bool
+	}{
+		{v1alpha1.NodeTypeAdmin, true},
+		{v1alpha1.NodeTypeRuntime, true},
+		{v1alpha1.NodeTypeAdmin, false},
+		{v1alpha1.NodeTypeRuntime, false},
+	}
+	for _, c := range cases {
+		if !shouldMountConfig(c.nodeType, c.adminExists, ConfigTypeEnv) {
+			t.Errorf("expected env to mount on %s (adminExists=%v)", c.nodeType, c.adminExists)
+		}
+	}
+}
+
+func TestResolveConfigType_Env(t *testing.T) {
+	got, err := resolveConfigType(map[string]string{AnnotationConfigType: ConfigTypeEnv})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != ConfigTypeEnv {
+		t.Errorf("expected %q, got %q", ConfigTypeEnv, got)
+	}
+}
+
+func TestComputeConfigHash_EnvDataChangeFlipsHash(t *testing.T) {
+	// Load-bearing: envFrom references the live Secret, so only the config hash
+	// rolls pods on a content change — env must be in the hash.
+	base := []DiscoveredManagedResource{
+		{Name: "c-convert-ks-env", IsSecret: true, ConfigType: ConfigTypeEnv, Data: map[string][]byte{"SSL_SERVER_KEY": []byte("aaa")}},
+	}
+	changed := []DiscoveredManagedResource{
+		{Name: "c-convert-ks-env", IsSecret: true, ConfigType: ConfigTypeEnv, Data: map[string][]byte{"SSL_SERVER_KEY": []byte("bbb")}},
+	}
+	if computeConfigHash(base) == computeConfigHash(changed) {
+		t.Error("expected env-typed data change to flip the config hash")
+	}
+}
+
+func TestDetectDuplicateKeys_EnvMessage(t *testing.T) {
+	configs := []DiscoveredManagedResource{
+		{Name: "env-a", IsSecret: true, ConfigType: ConfigTypeEnv, Data: map[string][]byte{"SSL_SERVER_KEY": []byte("x")}},
+		{Name: "env-b", IsSecret: true, ConfigType: ConfigTypeEnv, Data: map[string][]byte{"SSL_SERVER_KEY": []byte("y")}},
+	}
+	warnings := detectDuplicateKeys(configs)
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 duplicate warning, got %d", len(warnings))
+	}
+	msg := warnings[0].Message
+	if !strings.Contains(msg, "environment variable") || strings.Contains(msg, "mounted at distinct paths") {
+		t.Errorf("expected env-specific duplicate message, got: %q", msg)
+	}
+}
+
 // --- computeConfigHash ---
 
 func TestComputeConfigHash_Deterministic(t *testing.T) {

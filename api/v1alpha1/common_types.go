@@ -38,6 +38,11 @@ const (
 	// of staying all-green. Advisory-only issues that still mount
 	// (DuplicateConfigKey) stay in managedResourceIssues but do not flip this.
 	ConditionManagedConfigsValid = "ManagedConfigsValid"
+	// ConditionConvertKeystoreReady reports keystore-conversion state when
+	// spec.convertKeystore is set: True once the env Secret is published, False
+	// while a source Secret is missing or a conversion fails. Omitted entirely
+	// when convertKeystore is empty.
+	ConditionConvertKeystoreReady = "ConvertKeystoreReady"
 )
 
 // Reason values used across multiple condition types. Each constant names
@@ -159,6 +164,44 @@ type KeyToPath struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
 	Path string `json:"path"`
+}
+
+// ConvertKeystoreItem is one keystore-conversion request.
+type ConvertKeystoreItem struct {
+	// +kubebuilder:validation:Required
+	SourceTLS ConvertKeystoreSource `json:"sourceTls"`
+}
+
+// ConvertKeystoreSource describes a TLS Secret to convert and the env vars to
+// publish the result under.
+// +kubebuilder:validation:XValidation:rule="!has(self.cert) || self.cert != self.keyName",message="cert must differ from keyName (they become two distinct environment variables)"
+type ConvertKeystoreSource struct {
+	// KeyName is the environment variable the converted keystore is published
+	// under (e.g. SSL_SERVER_KEY). It must also be referenced from the Curity
+	// base configuration (the ssl-server-keystore element). Must be a valid
+	// environment-variable name: a letter or underscore, then alphanumerics or
+	// underscores.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+	KeyName string `json:"keyName"`
+
+	// FromSecretRef is the source kubernetes.io/tls Secret (tls.crt + tls.key) in
+	// the same namespace.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
+	FromSecretRef string `json:"fromSecretRef"`
+
+	// Cert, when set, additionally publishes the raw PEM certificate (multi-line,
+	// not base64) under this environment-variable name (e.g. SSL_SERVER_CERT), for
+	// Curity config that references the cert directly. A cert chain is a few KB,
+	// well under env-size limits.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[A-Za-z_][A-Za-z0-9_]*$`
+	Cert string `json:"cert,omitempty"`
 }
 
 // SecretKeyRefSource references the admin-credentials Secret. Items must
@@ -329,8 +372,8 @@ type AppliedManagedResource struct {
 	// +kubebuilder:validation:Enum=ConfigMap;Secret
 	Kind string `json:"kind"`
 
-	// ConfigType is the curity.io/config-type annotation value ("base", "license", "logging", or "postCommitScript").
-	// +kubebuilder:validation:Enum=base;license;logging;postCommitScript
+	// ConfigType is the curity.io/config-type annotation value ("base", "license", "logging", "postCommitScript", or "env").
+	// +kubebuilder:validation:Enum=base;license;logging;postCommitScript;env
 	ConfigType string `json:"configType"`
 }
 

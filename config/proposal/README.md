@@ -38,10 +38,48 @@ This separation follows the Kubernetes convention of using **labels for selectio
 |------|-----------|-------|
 | `base` | `/opt/idsvr/etc/init/` | General XML configuration fragments. Each data key becomes a file at that path. Equivalent to `curity.config.configuration[].configMapRef` in the Helm chart. |
 | `license` | `/opt/idsvr/etc/init/license/` | License file. Mounted to a dedicated sub-directory under `init` as required by the Identity Server. |
+| `logging` | `/opt/idsvr/etc/log4j2.xml` | Single log config file (replaces the shipped default). Every node. |
+| `postCommitScript` | `/opt/idsvr/usr/bin/post-commit-scripts/` | Executable scripts Curity runs after a config commit. Admin only. |
+| `env` | injected via `envFrom` (no file mount) | Environment variables on every node. Produced by `spec.convertKeystore` (TLS→keystore), or a user-supplied `config-type: env` ConfigMap/Secret. |
 
-> Additional types (e.g. `post-commit-script`) may be introduced as the operator evolves.
 > Each type encapsulates the mount path and any special handling so it does not need to be
 > repeated across resources.
+
+---
+
+## Converting TLS to keystores (`convertKeystore`)
+
+Curity loads its TLS server key from the `SSL_SERVER_KEY` environment variable as a
+base64-encoded PKCS#12 keystore, but Kubernetes TLS Secrets are PEM (`tls.crt` +
+`tls.key`). `spec.convertKeystore` on the `IdentityServerCluster` converts each source
+`kubernetes.io/tls` Secret into that keystore form in-process and publishes them into
+one cluster-owned `env`-typed Secret (`<cluster>-convert-ks-env`), injected via
+`envFrom` on every node.
+
+```yaml
+spec:
+  convertKeystore:
+    - sourceTls:
+        keyName: SSL_SERVER_KEY        # env var that receives the keystore
+        fromSecretRef: my-tls          # source kubernetes.io/tls Secret
+        cert: SSL_SERVER_CERT          # optional: also publish the raw PEM cert
+```
+
+### Why there is no `keystorePasswordSecretRef`
+
+The Helm chart's `convertKeystore` requires a `keystorePasswordSecretRef`
+(`KEYSTORE_PASSWORD`); the operator deliberately omits it. In the Helm chart the
+conversion is a two-tool pipeline run by a hook Job: `openssl pkcs12 -export` builds an
+intermediate keystore, then Curity's `convertks` repackages it. `openssl` requires an
+export password, so `KEYSTORE_PASSWORD` exists only to hand that intermediate keystore
+from `openssl` to `convertks`. It is **not** the password Curity uses at runtime —
+`convertks` writes its output with its own default password (`default`), which is what
+Curity's server-keystore loader expects (its config carries no password field).
+
+The operator performs the whole conversion in one in-process step (PEM → PKCS#12 with
+`default`), so there is no intermediate keystore and no tool-to-tool hand-off — nothing
+for `keystorePasswordSecretRef` to protect. Dropping it removes a required Secret from
+the user's setup with no change to what Curity loads.
 
 ---
 

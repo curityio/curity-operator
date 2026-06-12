@@ -196,6 +196,14 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		setCondition(&cluster.Status.Conditions, v1alpha1.ConditionManagedConfigsValid,
 			mc.Status, mc.Reason, mc.Message, cluster.Generation)
 	}
+
+	// 7b. Convert keystores and publish the env Secret. Set after the condition
+	// rebuild so ConvertKeystoreReady survives.
+	if err := r.ensureConvertedKeystores(ctx, &cluster); err != nil {
+		return ctrl.Result{}, err
+	}
+	applyConvertKeystoreDegraded(&cluster)
+
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.NodeCount = int32(len(childNodes))
 	cluster.Status.ReadyNodes = readyCount
@@ -357,7 +365,7 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findClusterForSecret),
-			builder.WithPredicates(adminCredsCandidatePredicate{}),
+			builder.WithPredicates(clusterSecretWatchPredicate{}),
 		).
 		Watches(
 			&corev1.ConfigMap{},
@@ -1742,10 +1750,19 @@ func (r *IdentityServerClusterReconciler) findClusterForSecret(ctx context.Conte
 	var requests []ctrl.Request
 	for i := range clusterList.Items {
 		c := &clusterList.Items[i]
-		if c.Spec.AdminCredentials == nil {
-			continue
+		matches := c.Spec.AdminCredentials != nil &&
+			c.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name == secret.Name
+		// Also wake the cluster when a convertKeystore source TLS Secret changes
+		// (cert rotation) so the operator re-converts.
+		if !matches {
+			for _, ck := range c.Spec.ConvertKeystore {
+				if ck.SourceTLS.FromSecretRef == secret.Name {
+					matches = true
+					break
+				}
+			}
 		}
-		if c.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name == secret.Name {
+		if matches {
 			requests = append(requests, ctrl.Request{
 				NamespacedName: client.ObjectKey{Name: c.Name, Namespace: c.Namespace},
 			})

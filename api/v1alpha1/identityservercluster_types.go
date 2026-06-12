@@ -124,6 +124,18 @@ type IdentityServerClusterSpec struct {
 	// effect on a cluster whose CNI implements NetworkPolicy enforcement;
 	// otherwise it is silently ignored by Kubernetes.
 	NetworkPolicy *NetworkPolicySpec `json:"networkPolicy,omitempty"`
+
+	// ConvertKeystore declares TLS Secrets whose keypairs are converted to
+	// Curity keystore format and published as environment variables (e.g.
+	// SSL_SERVER_KEY) into every node referencing this cluster. The operator
+	// performs the conversion in-process and writes a managed env Secret.
+	// Cross-item env-var collisions (a cert name equal to another item's keyName
+	// or cert) aren't expressible in CEL; they're caught at conversion time and
+	// surfaced as PartiallyReady.
+	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:XValidation:rule="self.all(p1, self.exists_one(p2, p2.sourceTls.keyName == p1.sourceTls.keyName))",message="each convertKeystore keyName must be unique"
+	// +kubebuilder:validation:XValidation:rule="self.all(p, !(p.sourceTls.keyName in ['ADMIN_PASSWORD','PASSWORD','CONFIG_ENCRYPTION_KEY','LOGGING_LEVEL','STATUS_CMD_PORT','ADMIN_UI_HTTP_MODE','SKIP_INSTALL']) && (!has(p.sourceTls.cert) || !(p.sourceTls.cert in ['ADMIN_PASSWORD','PASSWORD','CONFIG_ENCRYPTION_KEY','LOGGING_LEVEL','STATUS_CMD_PORT','ADMIN_UI_HTTP_MODE','SKIP_INSTALL'])))",message="keyName/cert must not be an operator-managed variable (ADMIN_PASSWORD, PASSWORD, CONFIG_ENCRYPTION_KEY, LOGGING_LEVEL, STATUS_CMD_PORT, ADMIN_UI_HTTP_MODE, SKIP_INSTALL)"
+	ConvertKeystore []ConvertKeystoreItem `json:"convertKeystore,omitempty"`
 }
 
 // IdentityServerClusterStatus defines the observed state of IdentityServerCluster.

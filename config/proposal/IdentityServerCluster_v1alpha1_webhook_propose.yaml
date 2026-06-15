@@ -5,8 +5,10 @@
 #  NEW source.ref         git ref (branch/tag/SHA); git-only.
 #  NEW source.auth.sshKey SSH key (PEM + optional passphrase); git ssh:// only.
 #                         Joins existing basicAuth/bearerToken in PackageAuthSpec.
-#  NEW syncWebhook        signed inbound POSTs (GitHub/Slack) re-fetch source
-#                         and re-apply mounts.
+#  NEW syncWebhook        bool. Enables a generic HMAC receiver that re-fetches
+#                         source and re-applies mounts on a signed inbound POST.
+#                         Operator generates the signing secret into a Secret;
+#                         status references it. No provider/vendor coupling.
 #  CHG mountPaths[]       replaces single `mountPath`; each entry is (source
 #                         path, container path), archive-relative for zip /
 #                         repo-relative for git. BREAKING — see note below.
@@ -27,11 +29,13 @@
 # internal debounce coalesces bursts; content-hash dedup makes unchanged
 # events no-ops.
 #
-# Signing secret:
-#   github → operator always generates; reference published on
-#            `status.packages[].signingSecretRef`. User does not supply one.
-#   slack  → user supplies `syncWebhook.signingSecretRef` (Slack issues the
-#            value, operator cannot generate it).
+# Signing secret: operator generates one HMAC secret per webhook, stores it in a
+# Secret, and publishes a secretKeyRef on `status.packages[].signingSecretRef`.
+# Callers sign each request (X-Curity-Signature: sha256=HMAC(body)) with that
+# value; the operator never accepts a user-supplied secret. The HMAC
+# authenticates the caller only — no replay/timestamp guard, since a webhook
+# event just enqueues a reconcile and the reconcile path absorbs duplicate
+# triggers regardless of source (debounce + content-hash dedup above).
 #
 # SSH host keys (operator-level): chart ships `git.knownHosts` (ssh-keyscan
 # lines, pre-seeded with github/gitlab/bitbucket/azure) → ConfigMap at
@@ -39,17 +43,6 @@
 # mismatched key fails the clone (no InsecureIgnoreHostKey). Self-hosted: ops
 # appends a line. Static — refresh on host-key rotation via chart bump (pin
 # ed25519). The sshKey Secret carries only the private key (+ passphrase).
----
-# Slack-only — Signing Secret from the Slack app's Basic Information page into
-# `stringData.secret`. Omit entirely for GitHub.
-apiVersion: v1
-kind: Secret
-metadata:
-  name: slack-signing
-  namespace: curity
-type: Opaque
-stringData:
-  secret: REPLACE_ME
 ---
 # git ssh source — deploy key. Generate with `ssh-keygen -t ed25519`, register
 # the public half as a read-only deploy key on the repo. `passphrase` is
@@ -75,14 +68,15 @@ metadata:
 spec:
   version: "11.0"
 
-  # `name` is required when `syncWebhook` is set and unique within the cluster.
+  # `name` is required when `syncWebhook` is true (derives the URL path) and
+  # unique within the cluster.
   # +kubebuilder:validation:Optional
   # +kubebuilder:validation:MaxItems=20
-  # +kubebuilder:validation:XValidation:rule="self.all(p, !has(p.syncWebhook) || has(p.name))",message="packages[].name is required when packages[].syncWebhook is set"
+  # +kubebuilder:validation:XValidation:rule="self.all(p, !p.syncWebhook || has(p.name))",message="packages[].name is required when packages[].syncWebhook is true"
   # +kubebuilder:validation:XValidation:rule="self.all(p1, !has(p1.name) || self.exists_one(p2, has(p2.name) && p2.name == p1.name))",message="each packages[].name must be unique within the cluster"
   packages:
 
-    # git source over SSH (go-git). Operator generates the signing Secret.
+    # git source over SSH (go-git).
     - # Logical name; used to derive the webhook URL path.
       # +kubebuilder:validation:Optional
       # +kubebuilder:validation:MinLength=1
@@ -137,12 +131,11 @@ spec:
           #     usernameKey: username   # host-dependent; PAT goes in password
           #     passwordKey: password
 
+      # Enables the generic HMAC receiver; operator generates the signing secret
+      # and publishes status.packages[].syncWebhookUrl + .signingSecretRef.
       # +kubebuilder:validation:Optional
-      # +kubebuilder:validation:XValidation:rule="(self.provider == 'slack') == has(self.signingSecretRef)",message="syncWebhook.signingSecretRef must be set iff provider is 'slack' (github keys are operator-generated)"
-      syncWebhook:
-        # +kubebuilder:validation:Required
-        # +kubebuilder:validation:Enum=github;slack
-        provider: github
+      # +kubebuilder:default=false
+      syncWebhook: true
 
       # Each entry: source path → container path.
       # +kubebuilder:validation:Required
@@ -165,7 +158,7 @@ spec:
         - source: dist/post-commit-scripts
           destination: /opt/idsvr/usr/share/post-commit-scripts
 
-    # Slack — user supplies the signing Secret. zip source (type defaults).
+    # zip source over https; webhook enabled (same generic receiver).
     - name: scripts-on-demand
       source:
         type: zip
@@ -176,20 +169,16 @@ spec:
               name: artifact-basic-auth
               usernameKey: username
               passwordKey: password
-      syncWebhook:
-        provider: slack
-        signingSecretRef:
-          name: slack-signing
-          key: secret
+      syncWebhook: true
       mountPaths:
         - source: .
           destination: /opt/idsvr/usr/share/scripts
 
 # status.packages[]  (listType=map, listMapKey=name, MaxItems=20):
 #   .name              string. Map key.
-#   .syncWebhookUrl    string. Set when spec.packages[].syncWebhook is set.
-#                      Paste into GitHub "Payload URL" / Slack "Request URL".
-#                      Host = chart's `operator.webhookBaseUrl`; path =
-#                      /webhooks/<ns>/<cluster>/<name>.
-#   .signingSecretRef  secretKeyRef. Set for provider=github (operator-
-#                      generated key). Paste into GitHub's webhook "Secret" field.
+#   .syncWebhookUrl    string. POST target for the trigger. Set when
+#                      spec.packages[].syncWebhook is true. Host = chart's
+#                      `operator.webhookBaseUrl`; path = /webhooks/<ns>/<cluster>/<name>.
+#   .signingSecretRef  secretKeyRef into the operator-generated Secret holding
+#                      the HMAC key. Set when syncWebhook is true. Callers sign
+#                      requests with this value (X-Curity-Signature: sha256=HMAC(body)).

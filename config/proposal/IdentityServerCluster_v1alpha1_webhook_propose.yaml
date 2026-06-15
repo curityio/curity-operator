@@ -5,16 +5,14 @@
 #  NEW source.ref         git ref (branch/tag/SHA); git-only.
 #  NEW source.auth.sshKey SSH key (PEM + optional passphrase); git ssh:// only.
 #                         Joins existing basicAuth/bearerToken in PackageAuthSpec.
-#  NEW syncWebhook        bool. Enables a generic HMAC receiver that re-fetches
-#                         source and re-applies mounts on a signed inbound POST.
-#                         Operator generates the signing secret into a Secret;
-#                         status references it. No provider/vendor coupling.
+#  NEW syncWebhook        bool. Generic HMAC receiver: signed POST → re-fetch
+#                         source, re-apply mounts. Operator publishes url+hmac
+#                         in one Secret (status.webhookSecretRef).
 #  CHG mountPaths[]       replaces single `mountPath`; each entry is (source
 #                         path, container path), archive-relative for zip /
 #                         repo-relative for git. BREAKING — see note below.
-#  CHG source.url         secure transports only — https or ssh (git). Drops
-#                         http that PackageSource allows today; breaking for
-#                         any http manifest. git:// / ftp:// also rejected.
+#  CHG source.url         secure transports only — https or ssh (git); drops
+#                         http (breaking). git:// / ftp:// rejected.
 #  KEPT source.tls        unchanged; applies to https fetches, N/A for ssh.
 #
 # Open item — mountPath → mountPaths[] drops the cluster-wide mountPath
@@ -29,14 +27,11 @@
 # `source.Channel`. Fixed internal debounce coalesces bursts; content-hash
 # dedup makes unchanged events no-ops.
 #
-# Webhook Secret: operator generates one Secret per webhook holding everything a
-# caller needs — `url` and `hmac` (signing key) — and publishes its name on
-# `status.packages[].webhookSecretRef`. Callers sign each request
-# (X-Curity-Signature: sha256=HMAC(body)) with `hmac`; the operator never accepts
-# a user-supplied secret. The HMAC authenticates the caller only — no replay/
-# timestamp guard, since a webhook event just enqueues a reconcile and the
-# reconcile path absorbs duplicate triggers regardless of source (debounce +
-# content-hash dedup above).
+# Webhook Secret: operator generates one Secret per webhook with `url` + `hmac`
+# (signing key); name on `status.packages[].webhookSecretRef`. Callers sign with
+# `hmac` (X-Curity-Signature: sha256=HMAC(body)); no user-supplied secret. HMAC
+# authenticates the caller, not freshness — no replay guard; reconcile is
+# idempotent and rate-limited regardless of trigger source (debounce + dedup).
 #
 # SSH host keys (operator-level): chart ships `git.knownHosts` (ssh-keyscan
 # lines, pre-seeded with github/gitlab/bitbucket/azure) → ConfigMap at
@@ -45,9 +40,8 @@
 # appends a line. Static — refresh on host-key rotation via chart bump (pin
 # ed25519). The sshKey Secret carries only the private key (+ passphrase).
 ---
-# git ssh source — deploy key. Generate with `ssh-keygen -t ed25519`, register
-# the public half as a read-only deploy key on the repo. `passphrase` is
-# optional; drop the field for an unencrypted key.
+# git ssh deploy key (read-only, ed25519). `passphrase` optional — drop for an
+# unencrypted key.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -78,16 +72,15 @@ spec:
   packages:
 
     # git source over SSH (go-git).
-    - # Logical name; used to derive the webhook URL path.
+    - # Webhook URL path segment.
       # +kubebuilder:validation:Optional
       # +kubebuilder:validation:MinLength=1
       # +kubebuilder:validation:MaxLength=63
       # +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
       name: plugins-main
 
-      # Additive over the existing PackageSource: ref is git-only; ssh:// ⇒ git
-      # + sshKey; git rejects bearerToken; auth holds exactly one method (the
-      # last rule extends the existing PackageSource exactly-one CEL).
+      # Additive over PackageSource: ref git-only; ssh:// ⇒ git + sshKey; git
+      # rejects bearerToken; auth holds exactly one method.
       # +kubebuilder:validation:Required
       # +kubebuilder:validation:XValidation:rule="self.type == 'git' || !has(self.ref)",message="source.ref is only valid when source.type is 'git'"
       # +kubebuilder:validation:XValidation:rule="!self.url.startsWith('ssh://') || self.type == 'git'",message="ssh:// urls are only valid for source.type 'git'"
@@ -99,10 +92,8 @@ spec:
         # +kubebuilder:validation:Enum=zip;git
         # +kubebuilder:default=zip
         type: git
-        # Secure transports only: https (encrypted) or ssh (encrypted + host-key
-        # verified). http/git/ftp are rejected. https branch mirrors the existing
-        # PackageSource pattern but drops http; ssh adds a user@host branch (git
-        # ssh urls need userinfo, which the https branch forbids).
+        # Secure transports only — https or ssh; http/git/ftp rejected. ssh
+        # requires user@host (forbidden on the https branch).
         # +kubebuilder:validation:Required
         # +kubebuilder:validation:MaxLength=2048
         # +kubebuilder:validation:Pattern=`^(https://[^/@\s]+([/?#][^\s]*)?|ssh://[^@/\s]+@[^/@\s]+/[^\s]+)$`
@@ -145,7 +136,7 @@ spec:
       # +kubebuilder:validation:XValidation:rule="self.all(m1, self.exists_one(m2, m2.destination == m1.destination))",message="each mountPaths[].destination must be unique within this package"
       mountPaths:
         - # Source-relative path (archive root for zip, repo root for git);
-          # `.` for the whole tree; no leading `/` or `..`.
+          # `.` = whole tree.
           # +kubebuilder:validation:Required
           # +kubebuilder:validation:MaxLength=1024
           # +kubebuilder:validation:Pattern=`^([.]|[^/\s][^\s]*)$`
@@ -178,7 +169,6 @@ spec:
 # status.packages[]  (listType=map, listMapKey=name, MaxItems=20):
 #   .name              string. Map key.
 #   .webhookSecretRef  name of the operator-generated Secret; set when
-#                      syncWebhook is true. Holds everything a caller needs:
-#                      `url`  = POST target (<operator.webhookBaseUrl>/webhooks/
-#                               <ns>/<cluster>/<name>)
+#                      syncWebhook is true. Keys:
+#                      `url`  = POST target (<operator.webhookBaseUrl>/webhooks/<ns>/<cluster>/<name>)
 #                      `hmac` = signing key (X-Curity-Signature: sha256=HMAC(body)).

@@ -24,18 +24,19 @@
 # move it to the reconciler — decide before promoting this proposal.
 #
 # Mechanism: operator registers a handler on controller-runtime's built-in
-# webhook server (`mgr.GetWebhookServer().Register`), publishes the full URL
-# on status, verifies HMAC, enqueues reconcile via `source.Channel`. Fixed
-# internal debounce coalesces bursts; content-hash dedup makes unchanged
-# events no-ops.
+# webhook server (`mgr.GetWebhookServer().Register`), writes the URL + signing
+# key to one operator-managed Secret, verifies HMAC, enqueues reconcile via
+# `source.Channel`. Fixed internal debounce coalesces bursts; content-hash
+# dedup makes unchanged events no-ops.
 #
-# Signing secret: operator generates one HMAC secret per webhook, stores it in a
-# Secret, and publishes a secretKeyRef on `status.packages[].signingSecretRef`.
-# Callers sign each request (X-Curity-Signature: sha256=HMAC(body)) with that
-# value; the operator never accepts a user-supplied secret. The HMAC
-# authenticates the caller only — no replay/timestamp guard, since a webhook
-# event just enqueues a reconcile and the reconcile path absorbs duplicate
-# triggers regardless of source (debounce + content-hash dedup above).
+# Webhook Secret: operator generates one Secret per webhook holding everything a
+# caller needs — `url` and `hmac` (signing key) — and publishes its name on
+# `status.packages[].webhookSecretRef`. Callers sign each request
+# (X-Curity-Signature: sha256=HMAC(body)) with `hmac`; the operator never accepts
+# a user-supplied secret. The HMAC authenticates the caller only — no replay/
+# timestamp guard, since a webhook event just enqueues a reconcile and the
+# reconcile path absorbs duplicate triggers regardless of source (debounce +
+# content-hash dedup above).
 #
 # SSH host keys (operator-level): chart ships `git.knownHosts` (ssh-keyscan
 # lines, pre-seeded with github/gitlab/bitbucket/azure) → ConfigMap at
@@ -131,8 +132,8 @@ spec:
           #     usernameKey: username   # host-dependent; PAT goes in password
           #     passwordKey: password
 
-      # Enables the generic HMAC receiver; operator generates the signing secret
-      # and publishes status.packages[].syncWebhookUrl + .signingSecretRef.
+      # Enables the generic HMAC receiver; operator generates the webhook Secret
+      # (url + hmac) and publishes status.packages[].webhookSecretRef.
       # +kubebuilder:validation:Optional
       # +kubebuilder:default=false
       syncWebhook: true
@@ -176,9 +177,8 @@ spec:
 
 # status.packages[]  (listType=map, listMapKey=name, MaxItems=20):
 #   .name              string. Map key.
-#   .syncWebhookUrl    string. POST target for the trigger. Set when
-#                      spec.packages[].syncWebhook is true. Host = chart's
-#                      `operator.webhookBaseUrl`; path = /webhooks/<ns>/<cluster>/<name>.
-#   .signingSecretRef  secretKeyRef into the operator-generated Secret holding
-#                      the HMAC key. Set when syncWebhook is true. Callers sign
-#                      requests with this value (X-Curity-Signature: sha256=HMAC(body)).
+#   .webhookSecretRef  name of the operator-generated Secret; set when
+#                      syncWebhook is true. Holds everything a caller needs:
+#                      `url`  = POST target (<operator.webhookBaseUrl>/webhooks/
+#                               <ns>/<cluster>/<name>)
+#                      `hmac` = signing key (X-Curity-Signature: sha256=HMAC(body)).

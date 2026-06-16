@@ -23,6 +23,12 @@ type IdentityServerClusterSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	ImagePullSecret string `json:"imagePullSecret,omitempty"`
 
+	// FIPSMode enables/disables FIPS mode (--fips-mode) on all admin and runtime
+	// nodes of this cluster. Defaults to false. Requires a special license and a
+	// FIPS-enabled Docker image — contact sales@curity.io for more details.
+	// +kubebuilder:default=false
+	FIPSMode bool `json:"fipsMode,omitempty"`
+
 	// AdminCredentials references a Secret containing ADMIN_PASSWORD and
 	// CONFIG_ENCRYPTION_KEY. The operator creates the secret with random
 	// values if it does not exist.

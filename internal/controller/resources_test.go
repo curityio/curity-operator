@@ -68,6 +68,30 @@ func TestBuildDeployment_RuntimeArgs(t *testing.T) {
 	assertNotContains(t, args, "-N")
 }
 
+func TestBuildDeployment_FIPSModeDefaultOff(t *testing.T) {
+	cluster := newTestCluster()
+	for _, nodeType := range []v1alpha1.NodeType{v1alpha1.NodeTypeAdmin, v1alpha1.NodeTypeRuntime} {
+		node := newTestNode(nodeType)
+		deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+		args := deploy.Spec.Template.Spec.Containers[0].Args
+		assertNotContains(t, args, "--fips-mode")
+	}
+}
+
+func TestBuildDeployment_FIPSModeAppendsFlag(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.FIPSMode = true
+
+	for _, nodeType := range []v1alpha1.NodeType{v1alpha1.NodeTypeAdmin, v1alpha1.NodeTypeRuntime} {
+		node := newTestNode(nodeType)
+		deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+		args := deploy.Spec.Template.Spec.Containers[0].Args
+		assertContains(t, args, "--fips-mode")
+		// The base idsvr invocation is preserved.
+		assertContains(t, args, "/opt/idsvr/bin/idsvr")
+	}
+}
+
 func TestBuildDeployment_AdminPorts(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)

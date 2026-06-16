@@ -1,0 +1,60 @@
+# Example: IdentityServerDatabase that initializes the Curity database schema.
+#
+# Applying this triggers a run-once Job that executes `/opt/idsvr/bin/idsvr -I`
+# using the same image as the referenced IdentityServerCluster ("demo"). The Job
+# re-runs whenever the cluster's version/image override — or this resource's
+# spec — changes.
+#
+# JDBC settings can be set inline (as below) or sourced from a Secret. JDBC_URL
+# is required unless connection.secretRef provides it.
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerDatabase
+metadata:
+  name: acct-schema
+  namespace: curity
+spec:
+  identityServerClusterRef:
+    name: demo
+  connection:
+    url:
+      value: "jdbc:postgresql://postgres:5432/curity"
+    username:
+      value: curity
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: db-credentials
+          key: password
+---
+# Variant: keep the whole JDBC connection in a single Secret (keys JDBC_URL,
+# JDBC_USERNAME, JDBC_PASSWORD) and customize the Job (service account,
+# resources, hardened container security context).
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerDatabase
+metadata:
+  name: acct-schema-from-secret
+  namespace: curity
+spec:
+  identityServerClusterRef:
+    name: demo
+  connection:
+    secretRef: db-connection
+  jobTemplate:
+    serviceAccountName: db-migrator
+    backoffLimit: 2
+    ttlSecondsAfterFinished: 600
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
+    securityContext:
+      runAsNonRoot: true
+    containerSecurityContext:
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL

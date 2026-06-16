@@ -95,6 +95,15 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
+	//nolint:staticcheck // TODO: migrate to events.EventRecorder
+	databaseRec := mgr.GetEventRecorderFor("identityserverdatabase-controller")
+	err = (&controller.IdentityServerDatabaseReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: databaseRec,
+	}).SetupWithManager(mgr)
+	Expect(err).NotTo(HaveOccurred())
+
 	go func() {
 		defer GinkgoRecover()
 		Expect(mgr.Start(ctx)).To(Succeed())

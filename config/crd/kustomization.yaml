@@ -4,3 +4,4 @@
 resources:
 - bases/curity.io_identityserverclusters.yaml
 - bases/curity.io_identityservernodes.yaml
+- bases/curity.io_identityserverdatabases.yaml

@@ -3351,6 +3351,10 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 		// consumed via envFrom on nodes; it does not affect cluster.xml, so it
 		// must not trigger a genclust Job re-run.
 		"ConvertKeystore": true,
+		// FIPSMode only appends the --fips-mode flag to the node idsvr args; it
+		// does not affect cluster.xml generation. Flipping it rolls the node
+		// Deployments via the normal Deployment diff, not a genclust Job re-run.
+		"FIPSMode": true,
 	}
 
 	specType := reflect.TypeOf(v1alpha1.IdentityServerClusterSpec{})

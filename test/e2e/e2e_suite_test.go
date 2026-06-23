@@ -7,6 +7,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -30,6 +31,13 @@ func setup() {
 
 	err := v1alpha1.AddToScheme(utils.TestEnvironment.Scheme)
 	if err != nil {
+		fmt.Printf("Test setup failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// ServiceMonitor types so the e2e client can read the observability test's
+	// ServiceMonitor objects. The CRD itself is installed only by that test.
+	if err = monitoringv1.AddToScheme(utils.TestEnvironment.Scheme); err != nil {
 		fmt.Printf("Test setup failed: %v\n", err)
 		os.Exit(1)
 	}

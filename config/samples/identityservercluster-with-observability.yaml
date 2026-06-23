@@ -1,0 +1,16 @@
+# Example: IdentityServerCluster with an explicit Prometheus ServiceMonitor.
+# Scraping is on by default wherever the Prometheus Operator is installed, so
+# this block is only needed to tune the interval or add a label that the
+# cluster's Prometheus serviceMonitorSelector matches (kube-prometheus-stack
+# selects on release: <helm-release-name>). Set enabled: false to opt out.
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: demo-with-observability
+  namespace: curity
+spec:
+  version: "11.0"
+  observability:
+    serviceMonitor:
+      enabled: true
+      interval: 30s

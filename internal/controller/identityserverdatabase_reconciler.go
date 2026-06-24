@@ -91,9 +91,9 @@ func (r *IdentityServerDatabaseReconciler) Reconcile(ctx context.Context, req ct
 
 	image := buildImage(&cluster)
 
-	// CEL guarantees a source is declared; confirm the referenced Secret/key
+	// CEL guarantees a source is declared; confirm every referenced Secret/key
 	// exists before launching a Job that would otherwise fail.
-	if reason, msg, err := r.checkJDBCURLSource(ctx, &db); err != nil {
+	if reason, msg, err := r.checkConnectionSources(ctx, &db); err != nil {
 		return ctrl.Result{}, err
 	} else if reason != "" {
 		setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
@@ -178,13 +178,17 @@ func (r *IdentityServerDatabaseReconciler) Reconcile(ctx context.Context, req ct
 	return ctrl.Result{}, r.updateStatus(ctx, &db)
 }
 
-// checkJDBCURLSource verifies the JDBC_URL source resolves to an existing
-// Secret/key. Returns a (reason, message) for Ready=False, or empty when fine.
-func (r *IdentityServerDatabaseReconciler) checkJDBCURLSource(ctx context.Context, db *v1alpha1.IdentityServerDatabase) (reason, message string, err error) {
+// checkConnectionSources pre-flights every declared connection source before a
+// Job is launched: the required JDBC_URL, plus any per-field username/password
+// secretKeyRef the user set. Inline values and unset fields are left alone — we
+// only resolve what the user actually pointed at a Secret. Returns a
+// (reason, message) for Ready=False, or empty when all sources resolve.
+func (r *IdentityServerDatabaseReconciler) checkConnectionSources(ctx context.Context, db *v1alpha1.IdentityServerDatabase) (reason, message string, err error) {
 	conn := db.Spec.Connection
 
-	// No per-field url: JDBC_URL must come from the secretRef Secret's key.
+	// JDBC_URL is the one required setting; check it whichever way it is sourced.
 	if conn.URL == nil {
+		// Sourced from the bundle secretRef Secret's JDBC_URL key.
 		var secret corev1.Secret
 		if err := r.Get(ctx, client.ObjectKey{Name: conn.SecretRef, Namespace: db.Namespace}, &secret); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -197,12 +201,7 @@ func (r *IdentityServerDatabaseReconciler) checkJDBCURLSource(ctx context.Contex
 			return v1alpha1.ReasonJDBCURLMissing,
 				fmt.Sprintf("Secret %q has no JDBC_URL key; set connection.url or add the key", conn.SecretRef), nil
 		}
-		return "", "", nil
-	}
-
-	// Per-field url sourced from a Secret key: verify that Secret and key exist,
-	// otherwise the pod fails to start with no operator-surfaced cause.
-	if skr := conn.URL.SecretKeyRef; skr != nil {
+	} else if skr := conn.URL.SecretKeyRef; skr != nil {
 		var secret corev1.Secret
 		if err := r.Get(ctx, client.ObjectKey{Name: skr.Name, Namespace: db.Namespace}, &secret); err != nil {
 			if apierrors.IsNotFound(err) {
@@ -215,6 +214,34 @@ func (r *IdentityServerDatabaseReconciler) checkJDBCURLSource(ctx context.Contex
 			return v1alpha1.ReasonJDBCURLMissing,
 				fmt.Sprintf("Secret %q has no key %q for JDBC_URL", skr.Name, skr.Key), nil
 		}
+	}
+
+	// username/password are optional — only pre-flight a secretKeyRef the user set.
+	if reason, msg, err := r.checkValueSourceSecret(ctx, db.Namespace, "connection.username", conn.Username); reason != "" || err != nil {
+		return reason, msg, err
+	}
+	return r.checkValueSourceSecret(ctx, db.Namespace, "connection.password", conn.Password)
+}
+
+// checkValueSourceSecret pre-flights an optional per-field connection
+// secretKeyRef. A nil field or an inline value needs no check — we resolve only
+// what the user set. Returns a (reason, message) for Ready=False, or empty.
+func (r *IdentityServerDatabaseReconciler) checkValueSourceSecret(ctx context.Context, namespace, field string, vs *v1alpha1.ValueSource) (reason, message string, err error) {
+	if vs == nil || vs.SecretKeyRef == nil {
+		return "", "", nil
+	}
+	skr := vs.SecretKeyRef
+	var secret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{Name: skr.Name, Namespace: namespace}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return v1alpha1.ReasonConnectionSecretMissing,
+				fmt.Sprintf("%s.secretKeyRef Secret %q not found", field, skr.Name), nil
+		}
+		return "", "", fmt.Errorf("failed to get %s Secret %q: %w", field, skr.Name, err)
+	}
+	if _, ok := secret.Data[skr.Key]; !ok && !ptr.Deref(skr.Optional, false) {
+		return v1alpha1.ReasonConnectionKeyMissing,
+			fmt.Sprintf("Secret %q has no key %q for %s", skr.Name, skr.Key, field), nil
 	}
 	return "", "", nil
 }

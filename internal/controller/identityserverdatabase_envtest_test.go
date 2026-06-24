@@ -243,7 +243,7 @@ var _ = Describe("IdentityServerDatabase", func() {
 			Expect(getDatabaseJob(ns, "acct")).To(BeNil(), "no Job should be created when the connection Secret is absent")
 		})
 
-		It("reports JDBCURLMissing when url.valueFrom.secretKeyRef points at a missing key", func() {
+		It("reports JDBCURLMissing when url.secretKeyRef points at a missing key", func() {
 			ns := dbTestNamespace()
 			testCreateCluster(ns, "demo")
 			// Secret exists but lacks the referenced JDBC_URL key.
@@ -286,6 +286,58 @@ var _ = Describe("IdentityServerDatabase", func() {
 				g.Expect(from[0].SecretRef.Name).To(Equal("db-conn"))
 			}).Should(Succeed())
 		})
+
+		It("reports ConnectionKeyMissing when password.secretKeyRef names an absent key", func() {
+			ns := dbTestNamespace()
+			testCreateCluster(ns, "demo")
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "db-pw", Namespace: ns},
+				Data:       map[string][]byte{"other": []byte("x")},
+			})).To(Succeed())
+			createDatabase(ns, "acct", "demo", v1alpha1.JDBCConnection{
+				URL: inlineURLSource("jdbc:postgresql://db/acct"),
+				Password: &v1alpha1.ValueSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "db-pw"}, Key: "password",
+				}},
+			}, nil)
+
+			Eventually(func(g Gomega) {
+				var db v1alpha1.IdentityServerDatabase
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "acct", Namespace: ns}, &db)).To(Succeed())
+				g.Expect(conditionReason(db.Status.Conditions, v1alpha1.ConditionReady)).To(Equal(v1alpha1.ReasonConnectionKeyMissing))
+			}).Should(Succeed())
+			Expect(getDatabaseJob(ns, "acct")).To(BeNil(), "no Job should be created when the password secret key is missing")
+		})
+
+		It("reports ConnectionSecretMissing when username.secretKeyRef Secret is absent", func() {
+			ns := dbTestNamespace()
+			testCreateCluster(ns, "demo")
+			createDatabase(ns, "acct", "demo", v1alpha1.JDBCConnection{
+				URL: inlineURLSource("jdbc:postgresql://db/acct"),
+				Username: &v1alpha1.ValueSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "ghost"}, Key: "user",
+				}},
+			}, nil)
+
+			Eventually(func(g Gomega) {
+				var db v1alpha1.IdentityServerDatabase
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "acct", Namespace: ns}, &db)).To(Succeed())
+				g.Expect(conditionReason(db.Status.Conditions, v1alpha1.ConditionReady)).To(Equal(v1alpha1.ReasonConnectionSecretMissing))
+			}).Should(Succeed())
+			Expect(getDatabaseJob(ns, "acct")).To(BeNil())
+		})
+
+		It("creates the Job when an optional password is unset (only set fields are checked)", func() {
+			ns := dbTestNamespace()
+			testCreateCluster(ns, "demo")
+			createDatabase(ns, "acct", "demo", v1alpha1.JDBCConnection{
+				URL: inlineURLSource("jdbc:postgresql://db/acct"),
+			}, nil)
+
+			Eventually(func(g Gomega) {
+				g.Expect(getDatabaseJob(ns, "acct")).NotTo(BeNil())
+			}).Should(Succeed())
+		})
 	})
 
 	Context("referenced cluster missing", func() {
@@ -315,7 +367,7 @@ var _ = Describe("IdentityServerDatabase", func() {
 			Expect(apierrors.IsInvalid(err)).To(BeTrue())
 		})
 
-		It("rejects a ValueSource with both value and valueFrom", func() {
+		It("rejects a ValueSource with both value and secretKeyRef", func() {
 			ns := dbTestNamespace()
 			err := k8sClient.Create(ctx, &v1alpha1.IdentityServerDatabase{
 				ObjectMeta: metav1.ObjectMeta{Name: "bad", Namespace: ns},

@@ -68,6 +68,10 @@ const (
 	// ReasonConnectionSecretMissing is set on Ready=False when connection.secretRef
 	// points at a Secret that does not exist.
 	ReasonConnectionSecretMissing = "ConnectionSecretMissing"
+	// ReasonConnectionKeyMissing is set on Ready=False when a per-field
+	// connection secretKeyRef (username/password) names a key absent from the
+	// referenced Secret.
+	ReasonConnectionKeyMissing = "ConnectionKeyMissing"
 	// ReasonJobPodNotStarting is set on Progressing=True/Ready=False when the
 	// Job's pod cannot start (unschedulable, image pull failure, or container
 	// config error) — a state the Job itself never reports as complete or failed.

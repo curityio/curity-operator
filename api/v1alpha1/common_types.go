@@ -68,6 +68,10 @@ const (
 	// ReasonConnectionSecretMissing is set on Ready=False when connection.secretRef
 	// points at a Secret that does not exist.
 	ReasonConnectionSecretMissing = "ConnectionSecretMissing"
+	// ReasonJobPodNotStarting is set on Progressing=True/Ready=False when the
+	// Job's pod cannot start (unschedulable, image pull failure, or container
+	// config error) — a state the Job itself never reports as complete or failed.
+	ReasonJobPodNotStarting = "JobPodNotStarting"
 )
 
 // Reason values used across multiple condition types. Each constant names
@@ -627,29 +631,30 @@ type NetworkPolicySpec struct {
 	APIGatewayNamespace string `json:"apiGatewayNamespace,omitempty"`
 }
 
-// ValueSource provides a string value either inline or sourced from a Secret /
-// ConfigMap key. Exactly one of value/valueFrom must be set. It projects onto a
-// single container environment variable, so valueFrom accepts the standard
-// Kubernetes EnvVarSource (secretKeyRef, configMapKeyRef, fieldRef, ...).
-// +kubebuilder:validation:XValidation:rule="has(self.value) != has(self.valueFrom)",message="exactly one of value or valueFrom must be set"
+// ValueSource provides a string value either inline or from a Secret key.
+// Exactly one of value/secretKeyRef must be set. A non-secret value belongs in
+// value; secretKeyRef is for secrets like a JDBC password. (Unlike a raw env
+// var there is no fieldRef/resourceFieldRef — pod metadata and resource
+// quantities are meaningless for a connection setting.)
+// +kubebuilder:validation:XValidation:rule="has(self.value) != has(self.secretKeyRef)",message="exactly one of value or secretKeyRef must be set"
 type ValueSource struct {
-	// Value is the literal value. Mutually exclusive with valueFrom.
+	// Value is the literal value. Mutually exclusive with secretKeyRef.
 	// +kubebuilder:validation:MaxLength=2048
 	Value string `json:"value,omitempty"`
 
-	// ValueFrom sources the value from a Secret or ConfigMap key (the usual
-	// place to keep a JDBC password). Mutually exclusive with value.
-	ValueFrom *corev1.EnvVarSource `json:"valueFrom,omitempty"`
+	// SecretKeyRef names the Secret and key holding the value. Mutually
+	// exclusive with value.
+	SecretKeyRef *corev1.SecretKeySelector `json:"secretKeyRef,omitempty"`
 }
 
 // JDBCConnection describes how the database-init Job obtains its JDBC
 // connection settings. Each setting maps onto an environment variable read by
 // idsvr: url -> JDBC_URL, username -> JDBC_USERNAME, password -> JDBC_PASSWORD.
 //
-// Settings may be provided three ways, in increasing precedence:
+// Settings may be provided two ways, in increasing precedence:
 //  1. secretRef — a Secret whose JDBC_URL / JDBC_USERNAME / JDBC_PASSWORD keys
 //     are loaded as env vars (envFrom, optional so missing keys are tolerated).
-//  2. url/username/password — per-field inline value or valueFrom secretKeyRef.
+//  2. url/username/password — per-field inline value or secretKeyRef.
 //     These are appended after envFrom, so an explicit field overrides the
 //     matching key from secretRef.
 //
@@ -674,7 +679,7 @@ type JDBCConnection struct {
 	Username *ValueSource `json:"username,omitempty"`
 
 	// Password sets JDBC_PASSWORD. Optional; overrides secretRef's JDBC_PASSWORD.
-	// Prefer valueFrom.secretKeyRef over an inline value.
+	// Prefer secretKeyRef over an inline value.
 	Password *ValueSource `json:"password,omitempty"`
 }
 
@@ -764,10 +769,12 @@ type DatabaseJobTemplate struct {
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
 	// PodAnnotations are annotations applied to the Job's pod template.
+	// +kubebuilder:validation:MaxProperties=100
 	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
 
 	// PodLabels are labels applied to the Job's pod template. Operator-owned
 	// keys (curity.io/cluster, curity.io/component, curity.io/database) are rejected.
+	// +kubebuilder:validation:MaxProperties=100
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k in ['curity.io/cluster', 'curity.io/component', 'curity.io/database']))",message="podLabels cannot include operator-owned curity.io/* keys: cluster, component, database"
 	PodLabels map[string]string `json:"podLabels,omitempty"`
 }

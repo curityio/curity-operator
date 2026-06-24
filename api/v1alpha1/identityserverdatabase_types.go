@@ -45,9 +45,11 @@ type IdentityServerDatabaseStatus struct {
 	// from the referenced cluster. A change here re-triggers the Job.
 	ObservedImage string `json:"observedImage,omitempty"`
 
-	// ObservedHash is the trigger hash (image + spec) stamped on the current
-	// Job. The controller recreates the Job when this changes.
-	ObservedHash string `json:"observedHash,omitempty"`
+	// LastCompletedHash is the trigger hash of the last Job that completed
+	// successfully. Controller-internal bookkeeping, opaque to clients; it lets
+	// the controller tell a Job cleaned up by ttlSecondsAfterFinished apart from
+	// one that never ran, so a finished init is not re-run.
+	LastCompletedHash string `json:"lastCompletedHash,omitempty"`
 
 	// CompletionTime is when the Job finished successfully, if it has.
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`

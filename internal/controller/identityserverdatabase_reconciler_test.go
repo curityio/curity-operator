@@ -1,10 +1,13 @@
 package controller
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -39,7 +42,7 @@ func TestBuildDatabaseJob_CommandAndImage(t *testing.T) {
 	image := buildImage(cluster)
 	db := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:postgresql://db/acct")}, nil)
 
-	job := buildDatabaseJob(db, cluster, image, "hash123")
+	job := buildDatabaseJob(db, cluster, image, "hash123", "ch")
 
 	if got := job.Name; got != "acct-db-init-job" {
 		t.Fatalf("job name = %q, want acct-db-init-job", got)
@@ -73,7 +76,7 @@ func TestBuildDatabaseJob_ImageOverride(t *testing.T) {
 	}}
 	image := buildImage(cluster)
 	db := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, nil)
-	job := buildDatabaseJob(db, cluster, image, "h")
+	job := buildDatabaseJob(db, cluster, image, "h", "ch")
 	if job.Spec.Template.Spec.Containers[0].Image != "registry.example.com/curity:custom" {
 		t.Errorf("image = %q, want override", job.Spec.Template.Spec.Containers[0].Image)
 	}
@@ -102,12 +105,12 @@ func TestBuildJDBCEnv_InlineValues(t *testing.T) {
 
 func TestBuildJDBCEnv_SecretKeyRef(t *testing.T) {
 	conn := v1alpha1.JDBCConnection{
-		Password: &v1alpha1.ValueSource{ValueFrom: &corev1.EnvVarSource{
+		Password: &v1alpha1.ValueSource{
 			SecretKeyRef: &corev1.SecretKeySelector{
 				LocalObjectReference: corev1.LocalObjectReference{Name: "db-creds"},
 				Key:                  "password",
 			},
-		}},
+		},
 		URL: inlineURL("jdbc:x"),
 	}
 	env := buildJDBCEnvVars(conn)
@@ -149,7 +152,7 @@ func TestBuildJDBCEnv_PerFieldOverridesSecretRef(t *testing.T) {
 		URL:       inlineURL("jdbc:override"),
 	}
 	cluster := &v1alpha1.IdentityServerCluster{Spec: v1alpha1.IdentityServerClusterSpec{Version: "11.0"}}
-	job := buildDatabaseJob(testDatabase("acct", conn, nil), cluster, buildImage(cluster), "h")
+	job := buildDatabaseJob(testDatabase("acct", conn, nil), cluster, buildImage(cluster), "h", "ch")
 	c := job.Spec.Template.Spec.Containers[0]
 	if len(c.EnvFrom) != 1 {
 		t.Fatalf("expected envFrom from secretRef, got %+v", c.EnvFrom)
@@ -185,7 +188,7 @@ func TestBuildDatabaseJob_AppliesJobTemplate(t *testing.T) {
 		PodLabels:                map[string]string{"team": "iam"},
 	}
 	db := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, tmpl)
-	job := buildDatabaseJob(db, cluster, buildImage(cluster), "h")
+	job := buildDatabaseJob(db, cluster, buildImage(cluster), "h", "ch")
 
 	ps := job.Spec.Template.Spec
 	c := ps.Containers[0]
@@ -238,7 +241,7 @@ func TestBuildDatabaseJob_AppliesJobTemplate(t *testing.T) {
 func TestBuildDatabaseJob_SecurityContextDefaults(t *testing.T) {
 	cluster := &v1alpha1.IdentityServerCluster{Spec: v1alpha1.IdentityServerClusterSpec{Version: "11.0"}}
 	db := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, nil)
-	job := buildDatabaseJob(db, cluster, buildImage(cluster), "h")
+	job := buildDatabaseJob(db, cluster, buildImage(cluster), "h", "ch")
 	sc := job.Spec.Template.Spec.SecurityContext
 	if sc == nil || sc.RunAsUser == nil || *sc.RunAsUser != 10001 {
 		t.Errorf("runAsUser default = %v, want 10001", sc)
@@ -257,7 +260,7 @@ func TestBuildDatabaseJob_ImagePullSecretFallsBackToCluster(t *testing.T) {
 		ImagePullSecret: "cluster-pull",
 	}}
 	db := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, nil)
-	job := buildDatabaseJob(db, cluster, buildImage(cluster), "h")
+	job := buildDatabaseJob(db, cluster, buildImage(cluster), "h", "ch")
 	ps := job.Spec.Template.Spec.ImagePullSecrets
 	if len(ps) != 1 || ps[0].Name != "cluster-pull" {
 		t.Errorf("imagePullSecret = %+v, want cluster-pull", ps)
@@ -304,7 +307,9 @@ func TestApplyJobStatus_Conditions(t *testing.T) {
 		{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
 	}}}
 	db := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, nil)
-	r.applyJobStatus(db, complete)
+	if r.applyJobStatus(db, complete) {
+		t.Error("a complete Job is not running")
+	}
 	if !condIs(db.Status.Conditions, v1alpha1.ConditionComplete, metav1.ConditionTrue) {
 		t.Error("Complete should be True")
 	}
@@ -329,8 +334,130 @@ func TestApplyJobStatus_Conditions(t *testing.T) {
 
 	running := &batchv1.Job{Status: batchv1.JobStatus{Active: 1}}
 	db3 := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, nil)
-	r.applyJobStatus(db3, running)
+	if !r.applyJobStatus(db3, running) {
+		t.Error("a non-terminal Job is running")
+	}
 	if !condIs(db3.Status.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue) {
 		t.Error("Progressing should be True while running")
+	}
+}
+
+func TestClearPriorOutcome(t *testing.T) {
+	db := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, nil)
+	now := metav1.Now()
+	db.Status.CompletionTime = &now
+	setCondition(&db.Status.Conditions, v1alpha1.ConditionComplete, metav1.ConditionTrue, v1alpha1.ReasonJobComplete, "done", 1)
+	setCondition(&db.Status.Conditions, v1alpha1.ConditionFailed, metav1.ConditionTrue, v1alpha1.ReasonJobFailed, "boom", 1)
+
+	clearPriorOutcome(db)
+
+	if db.Status.CompletionTime != nil {
+		t.Error("CompletionTime should be cleared")
+	}
+	if apimeta.FindStatusCondition(db.Status.Conditions, v1alpha1.ConditionComplete) != nil {
+		t.Error("Complete condition should be removed")
+	}
+	if apimeta.FindStatusCondition(db.Status.Conditions, v1alpha1.ConditionFailed) != nil {
+		t.Error("Failed condition should be removed")
+	}
+}
+
+func TestConnectionSecretNames(t *testing.T) {
+	conn := v1alpha1.JDBCConnection{
+		SecretRef: "bulk",
+		URL:       inlineURL("jdbc:x"), // inline, no secret
+		Username: &v1alpha1.ValueSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}, Key: "user",
+		}},
+		Password: &v1alpha1.ValueSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}, Key: "pw", // same Secret → deduped
+		}},
+	}
+	got := connectionSecretNames(conn)
+	want := []string{"bulk", "creds"} // sorted + deduped
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("connectionSecretNames = %v, want %v", got, want)
+	}
+	if !databaseReferencesSecret(conn, "creds") || !databaseReferencesSecret(conn, "bulk") {
+		t.Error("should reference both creds and bulk")
+	}
+	if databaseReferencesSecret(conn, "other") {
+		t.Error("should not reference an unrelated Secret")
+	}
+	if names := connectionSecretNames(v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}); len(names) != 0 {
+		t.Errorf("inline-only connection references no Secret, got %v", names)
+	}
+}
+
+func TestMostRecentPod(t *testing.T) {
+	older := metav1.NewTime(time.Unix(1000, 0))
+	newer := metav1.NewTime(time.Unix(2000, 0))
+	pods := []corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "a", CreationTimestamp: older}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "b", CreationTimestamp: newer}},
+	}
+	if got := mostRecentPod(pods); got == nil || got.Name != "b" {
+		t.Errorf("expected newest pod 'b', got %v", got)
+	}
+	if mostRecentPod(nil) != nil {
+		t.Error("nil pods should return nil")
+	}
+}
+
+func waitingInitPod(reason string) corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", CreationTimestamp: metav1.Now()},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  databaseContainerName,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason, Message: "detail"}},
+			}},
+		},
+	}
+}
+
+func TestTranslateDatabaseInitPod(t *testing.T) {
+	if msg := translateDatabaseInitPod(nil); msg != "" {
+		t.Errorf("no pods should yield no message, got %q", msg)
+	}
+
+	unsched := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", CreationTimestamp: metav1.Now()},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			Conditions: []corev1.PodCondition{{
+				Type: corev1.PodScheduled, Status: corev1.ConditionFalse,
+				Reason: corev1.PodReasonUnschedulable, Message: "no nodes",
+			}},
+		},
+	}
+	if msg := translateDatabaseInitPod([]corev1.Pod{unsched}); !strings.Contains(msg, "cannot be scheduled") {
+		t.Errorf("unschedulable should surface, got %q", msg)
+	}
+
+	for _, reason := range []string{"ImagePullBackOff", "ErrImagePull", "InvalidImageName"} {
+		if msg := translateDatabaseInitPod([]corev1.Pod{waitingInitPod(reason)}); !strings.Contains(msg, "image pull failed") {
+			t.Errorf("%s should surface image pull failure, got %q", reason, msg)
+		}
+	}
+
+	// CreateContainerConfigError is the runtime symptom of a missing secret key.
+	if msg := translateDatabaseInitPod([]corev1.Pod{waitingInitPod("CreateContainerConfigError")}); !strings.Contains(msg, "container config error") {
+		t.Errorf("config error should surface, got %q", msg)
+	}
+
+	// A waiting reason on a different container is ignored.
+	other := waitingInitPod("ImagePullBackOff")
+	other.Status.ContainerStatuses[0].Name = "sidecar"
+	if msg := translateDatabaseInitPod([]corev1.Pod{other}); msg != "" {
+		t.Errorf("non-init container should be ignored, got %q", msg)
+	}
+
+	// A pod being deleted is not a start failure.
+	del := waitingInitPod("ImagePullBackOff")
+	now := metav1.Now()
+	del.DeletionTimestamp = &now
+	if msg := translateDatabaseInitPod([]corev1.Pod{del}); msg != "" {
+		t.Errorf("deleting pod should be ignored, got %q", msg)
 	}
 }

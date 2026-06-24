@@ -1046,3 +1046,104 @@ func TestClusterConfigPodChangedPredicate_NilGuards(t *testing.T) {
 		t.Error("nil ObjectNew must drop")
 	}
 }
+
+// ============================================================================
+// databaseInitPodChangedPredicate (Pod watch for database-init Job pods)
+// ============================================================================
+
+func databaseInitPod(name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "ns",
+			Labels:    map[string]string{componentLabel: databaseComponentValue},
+		},
+	}
+}
+
+func TestDatabaseInitPodChangedPredicate_LabelGateAndCreate(t *testing.T) {
+	p := databaseInitPodChangedPredicate{}
+	unlabeled := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "ns"}}
+	if p.Update(event.UpdateEvent{ObjectOld: unlabeled, ObjectNew: unlabeled}) {
+		t.Error("unlabeled Pod Update must drop")
+	}
+	if p.Delete(event.DeleteEvent{Object: unlabeled}) {
+		t.Error("unlabeled Pod Delete must drop")
+	}
+	if p.Create(event.CreateEvent{Object: databaseInitPod("p")}) {
+		t.Error("Create must always drop (no status yet)")
+	}
+	if !p.Delete(event.DeleteEvent{Object: databaseInitPod("p")}) {
+		t.Error("Delete must pass for labeled pod")
+	}
+}
+
+func TestDatabaseInitPodChangedPredicate_UpdateDiff(t *testing.T) {
+	p := databaseInitPodChangedPredicate{}
+
+	// Identical pods → drop (no kubelet-heartbeat churn).
+	same := databaseInitPod("p")
+	same.Status.Phase = corev1.PodPending
+	if p.Update(event.UpdateEvent{ObjectOld: same, ObjectNew: same}) {
+		t.Error("identical Update must drop")
+	}
+
+	// Phase change → pass.
+	oldP := databaseInitPod("p")
+	oldP.Status.Phase = corev1.PodPending
+	running := databaseInitPod("p")
+	running.Status.Phase = corev1.PodRunning
+	if !p.Update(event.UpdateEvent{ObjectOld: oldP, ObjectNew: running}) {
+		t.Error("phase change must pass")
+	}
+
+	// Init container waiting-state change → pass.
+	stuck := databaseInitPod("p")
+	stuck.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  databaseContainerName,
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+	}}
+	if !p.Update(event.UpdateEvent{ObjectOld: databaseInitPod("p"), ObjectNew: stuck}) {
+		t.Error("init container waiting-state change must pass")
+	}
+}
+
+func opaqueSecret(name string, data map[string][]byte, labels map[string]string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: labels},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       data,
+	}
+}
+
+func TestConnectionSecretChangedPredicate(t *testing.T) {
+	p := connectionSecretChangedPredicate{}
+
+	// Non-Opaque (e.g. SA token) is dropped.
+	tok := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "t", Namespace: "ns"}, Type: corev1.SecretTypeServiceAccountToken}
+	if p.Create(event.CreateEvent{Object: tok}) {
+		t.Error("non-Opaque Secret must drop")
+	}
+
+	// Create/Delete of an Opaque Secret pass.
+	s := opaqueSecret("db-conn", map[string][]byte{"JDBC_PASSWORD": []byte("x")}, nil)
+	if !p.Create(event.CreateEvent{Object: s}) {
+		t.Error("Opaque Create must pass")
+	}
+	if !p.Delete(event.DeleteEvent{Object: s}) {
+		t.Error("Opaque Delete must pass")
+	}
+
+	// Metadata-only edit (label added, same .data) → drop.
+	oldS := opaqueSecret("db-conn", map[string][]byte{"JDBC_PASSWORD": []byte("x")}, nil)
+	labeled := opaqueSecret("db-conn", map[string][]byte{"JDBC_PASSWORD": []byte("x")}, map[string]string{"team": "iam"})
+	if p.Update(event.UpdateEvent{ObjectOld: oldS, ObjectNew: labeled}) {
+		t.Error("metadata-only edit must drop (no .data change)")
+	}
+
+	// .data change → pass.
+	changed := opaqueSecret("db-conn", map[string][]byte{"JDBC_PASSWORD": []byte("fixed")}, nil)
+	if !p.Update(event.UpdateEvent{ObjectOld: oldS, ObjectNew: changed}) {
+		t.Error(".data change must pass")
+	}
+}

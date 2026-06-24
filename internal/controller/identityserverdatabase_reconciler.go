@@ -6,11 +6,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -26,15 +28,17 @@ import (
 )
 
 const (
-	// databaseJobSuffix is appended to the IdentityServerDatabase name to form
-	// the managed Job name.
 	databaseJobSuffix = "-db-init-job"
-	// databaseContainerName is the name of the schema-management container. It
-	// is referenced by the Job's podFailurePolicy.
+	// Matched by name in the Job's podFailurePolicy.
 	databaseContainerName = "idsvr-db-init"
-	// databaseJobHashAnnotation stamps the trigger hash (image + spec) on the
-	// Job so the controller can detect when to recreate it.
+	// Image+spec hash, stamped on the Job to detect when to recreate it.
 	databaseJobHashAnnotation = "curity.io/database-job-hash"
+	// Hash of the connection Secrets' data; a change to it recovers a failed Job.
+	connectionSecretsHashAnnotation = "curity.io/connection-secrets-hash"
+	// Labels on the Job/pod, also used to route pod events back to the CR.
+	databaseLabel          = "curity.io/database"
+	componentLabel         = "curity.io/component"
+	databaseComponentValue = "database-init"
 )
 
 // IdentityServerDatabaseReconciler reconciles an IdentityServerDatabase object.
@@ -53,6 +57,7 @@ type IdentityServerDatabaseReconciler struct {
 // +kubebuilder:rbac:groups=curity.io,resources=identityserverclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
 // Reconcile handles a single reconciliation loop for an IdentityServerDatabase.
 func (r *IdentityServerDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -86,48 +91,41 @@ func (r *IdentityServerDatabaseReconciler) Reconcile(ctx context.Context, req ct
 
 	image := buildImage(&cluster)
 
-	// When JDBC_URL has no inline/per-field source, it must come from the
-	// referenced Secret. Verify the Secret exists and carries a JDBC_URL key
-	// before launching a Job that would otherwise fail at runtime. CEL already
-	// guarantees one of url/secretRef is declared.
-	if db.Spec.Connection.URL == nil {
-		secretName := db.Spec.Connection.SecretRef
-		var secret corev1.Secret
-		if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: db.Namespace}, &secret); err != nil {
-			if apierrors.IsNotFound(err) {
-				setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
-					v1alpha1.ReasonConnectionSecretMissing,
-					fmt.Sprintf("connection.secretRef Secret %q not found", secretName), db.Generation)
-				return ctrl.Result{}, r.updateStatus(ctx, &db)
-			}
-			return ctrl.Result{}, fmt.Errorf("failed to get connection Secret %q: %w", secretName, err)
-		}
-		if _, ok := secret.Data["JDBC_URL"]; !ok {
-			setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
-				v1alpha1.ReasonJDBCURLMissing,
-				fmt.Sprintf("Secret %q has no JDBC_URL key; set connection.url or add the key", secretName), db.Generation)
-			return ctrl.Result{}, r.updateStatus(ctx, &db)
-		}
+	// CEL guarantees a source is declared; confirm the referenced Secret/key
+	// exists before launching a Job that would otherwise fail.
+	if reason, msg, err := r.checkJDBCURLSource(ctx, &db); err != nil {
+		return ctrl.Result{}, err
+	} else if reason != "" {
+		setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
+			reason, msg, db.Generation)
+		return ctrl.Result{}, r.updateStatus(ctx, &db)
 	}
 
 	hash := computeDatabaseJobHash(&db, image)
+	connHash, err := r.computeConnectionSecretsHash(ctx, db.Spec.Connection, db.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	jobName := db.Name + databaseJobSuffix
 	db.Status.JobName = jobName
 	db.Status.ObservedImage = image
-	db.Status.ObservedHash = hash
 
 	var job batchv1.Job
-	err := r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: db.Namespace}, &job)
+	err = r.Get(ctx, client.ObjectKey{Name: jobName, Namespace: db.Namespace}, &job)
 	if apierrors.IsNotFound(err) {
-		return r.createJob(ctx, &db, &cluster, image, hash)
+		// Job gone but this hash already completed: TTL cleaned it up — don't
+		// re-run idsvr -I on an initialized DB. A new hash still recreates.
+		if db.Status.CompletionTime != nil && db.Status.LastCompletedHash == hash {
+			return ctrl.Result{}, r.updateStatus(ctx, &db)
+		}
+		return r.createJob(ctx, &db, &cluster, image, hash, connHash)
 	}
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get Job %q: %w", jobName, err)
 	}
 
-	// A Job mid-deletion (foreground GC after a hash change) is not yet ready
-	// to recreate; wait for it to disappear (the Owns watch re-enqueues on the
-	// delete event, the RequeueAfter is a backstop).
+	// Wait for an in-progress deletion to finish before recreating (the Owns
+	// watch re-enqueues on delete; RequeueAfter is a backstop).
 	if !job.DeletionTimestamp.IsZero() {
 		setCondition(&db.Status.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue,
 			v1alpha1.ReasonJobCreated, "waiting for the previous Job to be deleted before recreating", db.Generation)
@@ -142,19 +140,87 @@ func (r *IdentityServerDatabaseReconciler) Reconcile(ctx context.Context, req ct
 		}
 		r.Recorder.Eventf(&db, corev1.EventTypeNormal, "JobRecreated",
 			"recreating database-init Job %q after image/spec change", jobName)
+		clearPriorOutcome(&db)
 		setCondition(&db.Status.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue,
+			v1alpha1.ReasonJobCreated, "image or spec changed; recreating Job", db.Generation)
+		setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
 			v1alpha1.ReasonJobCreated, "image or spec changed; recreating Job", db.Generation)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, r.updateStatus(ctx, &db)
 	}
 
-	// Steady state — reflect the Job's outcome in status.
-	r.applyJobStatus(&db, &job)
+	// Failed Job whose connection Secret has since changed: recreate to pick up
+	// the fix. The stamped hash gates this to once per Secret change.
+	if _, failed := jobFailureMessage(&job); failed && job.Annotations[connectionSecretsHashAnnotation] != connHash {
+		log.Info("connection Secret changed, recreating failed database-init Job", "job", jobName)
+		if delErr := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
+			return ctrl.Result{}, fmt.Errorf("failed to delete failed Job for secret-change recovery: %w", delErr)
+		}
+		r.Recorder.Eventf(&db, corev1.EventTypeNormal, "JobRecreated",
+			"connection Secret changed; recreating database-init Job %q", jobName)
+		clearPriorOutcome(&db)
+		setCondition(&db.Status.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue,
+			v1alpha1.ReasonJobCreated, "connection Secret changed; recreating Job", db.Generation)
+		setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
+			v1alpha1.ReasonJobCreated, "connection Secret changed; recreating Job", db.Generation)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, r.updateStatus(ctx, &db)
+	}
+
+	// Steady state — reflect the Job's outcome in status. While non-terminal,
+	// surface a stuck pod's cause (the Job reports none of those).
+	if r.applyJobStatus(&db, &job) {
+		if err := r.surfacePodStartFailure(ctx, &db, &job); err != nil {
+			// Persist the running status best-effort, then requeue on the list
+			// error rather than reporting healthy progress while blind to the pod.
+			_ = r.updateStatus(ctx, &db)
+			return ctrl.Result{}, err
+		}
+	}
 	return ctrl.Result{}, r.updateStatus(ctx, &db)
 }
 
-// createJob builds and creates the database-init Job and sets initial status.
-func (r *IdentityServerDatabaseReconciler) createJob(ctx context.Context, db *v1alpha1.IdentityServerDatabase, cluster *v1alpha1.IdentityServerCluster, image, hash string) (ctrl.Result, error) {
-	job := buildDatabaseJob(db, cluster, image, hash)
+// checkJDBCURLSource verifies the JDBC_URL source resolves to an existing
+// Secret/key. Returns a (reason, message) for Ready=False, or empty when fine.
+func (r *IdentityServerDatabaseReconciler) checkJDBCURLSource(ctx context.Context, db *v1alpha1.IdentityServerDatabase) (reason, message string, err error) {
+	conn := db.Spec.Connection
+
+	// No per-field url: JDBC_URL must come from the secretRef Secret's key.
+	if conn.URL == nil {
+		var secret corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Name: conn.SecretRef, Namespace: db.Namespace}, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return v1alpha1.ReasonConnectionSecretMissing,
+					fmt.Sprintf("connection.secretRef Secret %q not found", conn.SecretRef), nil
+			}
+			return "", "", fmt.Errorf("failed to get connection Secret %q: %w", conn.SecretRef, err)
+		}
+		if _, ok := secret.Data["JDBC_URL"]; !ok {
+			return v1alpha1.ReasonJDBCURLMissing,
+				fmt.Sprintf("Secret %q has no JDBC_URL key; set connection.url or add the key", conn.SecretRef), nil
+		}
+		return "", "", nil
+	}
+
+	// Per-field url sourced from a Secret key: verify that Secret and key exist,
+	// otherwise the pod fails to start with no operator-surfaced cause.
+	if skr := conn.URL.SecretKeyRef; skr != nil {
+		var secret corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Name: skr.Name, Namespace: db.Namespace}, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return v1alpha1.ReasonConnectionSecretMissing,
+					fmt.Sprintf("connection.url.secretKeyRef Secret %q not found", skr.Name), nil
+			}
+			return "", "", fmt.Errorf("failed to get connection.url Secret %q: %w", skr.Name, err)
+		}
+		if _, ok := secret.Data[skr.Key]; !ok && !ptr.Deref(skr.Optional, false) {
+			return v1alpha1.ReasonJDBCURLMissing,
+				fmt.Sprintf("Secret %q has no key %q for JDBC_URL", skr.Name, skr.Key), nil
+		}
+	}
+	return "", "", nil
+}
+
+func (r *IdentityServerDatabaseReconciler) createJob(ctx context.Context, db *v1alpha1.IdentityServerDatabase, cluster *v1alpha1.IdentityServerCluster, image, hash, connHash string) (ctrl.Result, error) {
+	job := buildDatabaseJob(db, cluster, image, hash, connHash)
 	if err := controllerutil.SetControllerReference(db, job, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to set owner ref on database Job: %w", err)
 	}
@@ -167,6 +233,7 @@ func (r *IdentityServerDatabaseReconciler) createJob(ctx context.Context, db *v1
 	}
 	r.Recorder.Eventf(db, corev1.EventTypeNormal, "JobCreated",
 		"created database-init Job %q (image %q)", job.Name, image)
+	clearPriorOutcome(db)
 	setCondition(&db.Status.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue,
 		v1alpha1.ReasonJobCreated, "database-init Job created", db.Generation)
 	setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
@@ -174,11 +241,21 @@ func (r *IdentityServerDatabaseReconciler) createJob(ctx context.Context, db *v1
 	return ctrl.Result{}, r.updateStatus(ctx, db)
 }
 
-// applyJobStatus maps the Job's batch conditions onto the CR conditions.
-func (r *IdentityServerDatabaseReconciler) applyJobStatus(db *v1alpha1.IdentityServerDatabase, job *batchv1.Job) {
+// clearPriorOutcome drops a prior run's terminal status before (re)creating the
+// Job, so a stale Complete/Failed isn't reported alongside the new run.
+func clearPriorOutcome(db *v1alpha1.IdentityServerDatabase) {
+	db.Status.CompletionTime = nil
+	apimeta.RemoveStatusCondition(&db.Status.Conditions, v1alpha1.ConditionComplete)
+	apimeta.RemoveStatusCondition(&db.Status.Conditions, v1alpha1.ConditionFailed)
+}
+
+// applyJobStatus maps the Job's conditions onto the CR. Returns true when the
+// Job is non-terminal, so the caller can layer a stuck-pod cause on top.
+func (r *IdentityServerDatabaseReconciler) applyJobStatus(db *v1alpha1.IdentityServerDatabase, job *batchv1.Job) (running bool) {
 	gen := db.Generation
 	if ct := jobCompletionTime(job); ct != nil {
 		db.Status.CompletionTime = ct
+		db.Status.LastCompletedHash = job.Annotations[databaseJobHashAnnotation]
 		setCondition(&db.Status.Conditions, v1alpha1.ConditionComplete, metav1.ConditionTrue,
 			v1alpha1.ReasonJobComplete, "database schema initialized successfully", gen)
 		setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionTrue,
@@ -187,7 +264,7 @@ func (r *IdentityServerDatabaseReconciler) applyJobStatus(db *v1alpha1.IdentityS
 			v1alpha1.ReasonJobComplete, "Job complete", gen)
 		setCondition(&db.Status.Conditions, v1alpha1.ConditionFailed, metav1.ConditionFalse,
 			v1alpha1.ReasonJobComplete, "Job complete", gen)
-		return
+		return false
 	}
 	if msg, failed := jobFailureMessage(job); failed {
 		setCondition(&db.Status.Conditions, v1alpha1.ConditionFailed, metav1.ConditionTrue,
@@ -196,12 +273,87 @@ func (r *IdentityServerDatabaseReconciler) applyJobStatus(db *v1alpha1.IdentityS
 			v1alpha1.ReasonJobFailed, msg, gen)
 		setCondition(&db.Status.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionFalse,
 			v1alpha1.ReasonJobFailed, "Job failed", gen)
-		return
+		return false
 	}
 	setCondition(&db.Status.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue,
 		v1alpha1.ReasonJobRunning, "database-init Job is running", gen)
 	setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
 		v1alpha1.ReasonJobRunning, "database-init Job has not completed", gen)
+	return true
+}
+
+// surfacePodStartFailure reports why the Job's pod can't start (image pull,
+// unschedulable, config error); returns the List error so the caller requeues.
+func (r *IdentityServerDatabaseReconciler) surfacePodStartFailure(ctx context.Context, db *v1alpha1.IdentityServerDatabase, job *batchv1.Job) error {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(db.Namespace),
+		client.MatchingLabels{databaseLabel: db.Name, componentLabel: databaseComponentValue}); err != nil {
+		return fmt.Errorf("failed to list database-init pods: %w", err)
+	}
+	// Only this Job's pods — a not-yet-GC'd pod from a prior run must not be
+	// mistaken for the current attempt.
+	var owned []corev1.Pod
+	for i := range pods.Items {
+		if metav1.IsControlledBy(&pods.Items[i], job) {
+			owned = append(owned, pods.Items[i])
+		}
+	}
+	msg := translateDatabaseInitPod(owned)
+	if msg == "" {
+		return nil
+	}
+	setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
+		v1alpha1.ReasonJobPodNotStarting, msg, db.Generation)
+	setCondition(&db.Status.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue,
+		v1alpha1.ReasonJobPodNotStarting, msg, db.Generation)
+	return nil
+}
+
+// translateDatabaseInitPod returns a concise cause when the most recent init pod
+// is stuck before running, or "" when nothing is wrong.
+func translateDatabaseInitPod(pods []corev1.Pod) string {
+	pod := mostRecentPod(pods)
+	if pod == nil || pod.DeletionTimestamp != nil {
+		return ""
+	}
+	if pod.Status.Phase == corev1.PodPending {
+		for i := range pod.Status.Conditions {
+			c := &pod.Status.Conditions[i]
+			if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
+				return truncateMessage(fmt.Sprintf("pod cannot be scheduled: %s", c.Message), 256)
+			}
+		}
+	}
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if cs.Name != databaseContainerName || cs.State.Waiting == nil {
+			continue
+		}
+		switch cs.State.Waiting.Reason {
+		case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
+			return truncateMessage(fmt.Sprintf("image pull failed: %s", cs.State.Waiting.Message), 256)
+		case "CreateContainerConfigError":
+			return truncateMessage(fmt.Sprintf("container config error: %s", cs.State.Waiting.Message), 256)
+		}
+	}
+	return ""
+}
+
+// mostRecentPod picks the newest pod by CreationTimestamp; ties are broken by
+// name so the choice is deterministic.
+func mostRecentPod(pods []corev1.Pod) *corev1.Pod {
+	if len(pods) == 0 {
+		return nil
+	}
+	winner := &pods[0]
+	for i := 1; i < len(pods); i++ {
+		p := &pods[i]
+		if p.CreationTimestamp.After(winner.CreationTimestamp.Time) ||
+			(p.CreationTimestamp.Equal(&winner.CreationTimestamp) && p.Name > winner.Name) {
+			winner = p
+		}
+	}
+	return winner
 }
 
 func (r *IdentityServerDatabaseReconciler) updateStatus(ctx context.Context, db *v1alpha1.IdentityServerDatabase) error {
@@ -247,8 +399,76 @@ func computeDatabaseJobHash(db *v1alpha1.IdentityServerDatabase, image string) s
 	return hex.EncodeToString(sum[:])
 }
 
+// connectionSecretNames returns the deduplicated, sorted names of every Secret
+// the connection references (secretRef plus any per-field secretKeyRef).
+func connectionSecretNames(conn v1alpha1.JDBCConnection) []string {
+	seen := map[string]struct{}{}
+	var names []string
+	add := func(n string) {
+		if n == "" {
+			return
+		}
+		if _, dup := seen[n]; dup {
+			return
+		}
+		seen[n] = struct{}{}
+		names = append(names, n)
+	}
+	add(conn.SecretRef)
+	for _, vs := range []*v1alpha1.ValueSource{conn.URL, conn.Username, conn.Password} {
+		if vs != nil && vs.SecretKeyRef != nil {
+			add(vs.SecretKeyRef.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func databaseReferencesSecret(conn v1alpha1.JDBCConnection, name string) bool {
+	for _, n := range connectionSecretNames(conn) {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// computeConnectionSecretsHash hashes the data content of the referenced
+// connection Secrets, so a credential change is detectable while a metadata-only
+// edit (a label/annotation) is not. Missing Secrets contribute their name only.
+func (r *IdentityServerDatabaseReconciler) computeConnectionSecretsHash(ctx context.Context, conn v1alpha1.JDBCConnection, namespace string) (string, error) {
+	names := connectionSecretNames(conn)
+	if len(names) == 0 {
+		return "", nil
+	}
+	h := sha256.New()
+	for _, name := range names {
+		h.Write([]byte(name))
+		h.Write([]byte{0})
+		var s corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &s); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return "", fmt.Errorf("getting Secret %q for connection hash: %w", name, err)
+		}
+		keys := make([]string, 0, len(s.Data))
+		for k := range s.Data {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			h.Write([]byte(k))
+			h.Write([]byte{0})
+			h.Write(s.Data[k])
+			h.Write([]byte{0})
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // buildDatabaseJob constructs the one-shot Job that runs `idsvr -I`.
-func buildDatabaseJob(db *v1alpha1.IdentityServerDatabase, cluster *v1alpha1.IdentityServerCluster, image, hash string) *batchv1.Job {
+func buildDatabaseJob(db *v1alpha1.IdentityServerDatabase, cluster *v1alpha1.IdentityServerCluster, image, hash, connHash string) *batchv1.Job {
 	tmpl := db.Spec.JobTemplate
 	if tmpl == nil {
 		tmpl = &v1alpha1.DatabaseJobTemplate{}
@@ -307,8 +527,8 @@ func buildDatabaseJob(db *v1alpha1.IdentityServerDatabase, cluster *v1alpha1.Ide
 	for k, v := range tmpl.PodLabels {
 		podLabels[k] = v
 	}
-	podLabels["curity.io/database"] = db.Name
-	podLabels["curity.io/component"] = "database-init"
+	podLabels[databaseLabel] = db.Name
+	podLabels[componentLabel] = databaseComponentValue
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -316,11 +536,12 @@ func buildDatabaseJob(db *v1alpha1.IdentityServerDatabase, cluster *v1alpha1.Ide
 			Namespace: db.Namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "curity-operator",
-				"curity.io/database":           db.Name,
-				"curity.io/component":          "database-init",
+				databaseLabel:                  db.Name,
+				componentLabel:                 databaseComponentValue,
 			},
 			Annotations: map[string]string{
-				databaseJobHashAnnotation: hash,
+				databaseJobHashAnnotation:       hash,
+				connectionSecretsHashAnnotation: connHash,
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -359,9 +580,8 @@ func buildDatabaseJob(db *v1alpha1.IdentityServerDatabase, cluster *v1alpha1.Ide
 	return job
 }
 
-// buildJDBCEnvFrom loads the whole connection Secret as env vars when secretRef
-// is set, so its JDBC_URL/JDBC_USERNAME/JDBC_PASSWORD keys appear in the
-// container. Optional so missing keys are tolerated.
+// buildJDBCEnvFrom loads the whole connection Secret via envFrom when secretRef
+// is set. Optional, so missing keys are tolerated.
 func buildJDBCEnvFrom(conn v1alpha1.JDBCConnection) []corev1.EnvFromSource {
 	if conn.SecretRef == "" {
 		return nil
@@ -376,9 +596,8 @@ func buildJDBCEnvFrom(conn v1alpha1.JDBCConnection) []corev1.EnvFromSource {
 	}
 }
 
-// buildJDBCEnvVars maps the per-field connection settings onto explicit env
-// vars. They are appended after envFrom, so an explicit field overrides the
-// matching key sourced from secretRef.
+// buildJDBCEnvVars maps the per-field connection settings to env vars, appended
+// after envFrom so an explicit field overrides the matching secretRef key.
 func buildJDBCEnvVars(conn v1alpha1.JDBCConnection) []corev1.EnvVar {
 	var env []corev1.EnvVar
 	if e, ok := valueSourceToEnvVar("JDBC_URL", conn.URL); ok {
@@ -398,8 +617,8 @@ func valueSourceToEnvVar(name string, vs *v1alpha1.ValueSource) (corev1.EnvVar, 
 		return corev1.EnvVar{}, false
 	}
 	e := corev1.EnvVar{Name: name}
-	if vs.ValueFrom != nil {
-		e.ValueFrom = vs.ValueFrom
+	if vs.SecretKeyRef != nil {
+		e.ValueFrom = &corev1.EnvVarSource{SecretKeyRef: vs.SecretKeyRef}
 	} else {
 		e.Value = vs.Value
 	}
@@ -413,9 +632,8 @@ func resolveDatabaseImagePullPolicy(tmpl *v1alpha1.DatabaseJobTemplate, image st
 	return defaultPullPolicy(image)
 }
 
-// findDatabasesForCluster maps an IdentityServerCluster change to the
-// IdentityServerDatabase objects that reference it, so a version/image bump
-// re-triggers the Job.
+// findDatabasesForCluster enqueues the databases referencing a changed cluster,
+// so a version/image bump re-triggers the Job.
 func (r *IdentityServerDatabaseReconciler) findDatabasesForCluster(ctx context.Context, obj client.Object) []ctrl.Request {
 	cluster, ok := obj.(*v1alpha1.IdentityServerCluster)
 	if !ok {
@@ -423,6 +641,8 @@ func (r *IdentityServerDatabaseReconciler) findDatabasesForCluster(ctx context.C
 	}
 	var list v1alpha1.IdentityServerDatabaseList
 	if err := r.List(ctx, &list, client.InNamespace(cluster.Namespace)); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "failed to list databases for cluster watch; an image change may not re-trigger the init Job until the next resync",
+			"cluster", cluster.Name, "namespace", cluster.Namespace)
 		return nil
 	}
 	var reqs []ctrl.Request
@@ -435,6 +655,45 @@ func (r *IdentityServerDatabaseReconciler) findDatabasesForCluster(ctx context.C
 		}
 	}
 	return reqs
+}
+
+// findDatabasesForConnectionSecret enqueues the databases referencing a changed
+// connection Secret, so a fixed Secret re-runs a failed init Job.
+func (r *IdentityServerDatabaseReconciler) findDatabasesForConnectionSecret(ctx context.Context, obj client.Object) []ctrl.Request {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return nil
+	}
+	var list v1alpha1.IdentityServerDatabaseList
+	if err := r.List(ctx, &list, client.InNamespace(secret.Namespace)); err != nil {
+		ctrl.LoggerFrom(ctx).Error(err, "failed to list databases for connection-secret watch",
+			"secret", secret.Name, "namespace", secret.Namespace)
+		return nil
+	}
+	var reqs []ctrl.Request
+	for i := range list.Items {
+		if databaseReferencesSecret(list.Items[i].Spec.Connection, secret.Name) {
+			reqs = append(reqs, ctrl.Request{NamespacedName: client.ObjectKey{
+				Name:      list.Items[i].Name,
+				Namespace: list.Items[i].Namespace,
+			}})
+		}
+	}
+	return reqs
+}
+
+// findDatabaseForPod enqueues the owning database of an init Pod, so a stuck pod
+// re-triggers a reconcile that surfaces the cause.
+func (r *IdentityServerDatabaseReconciler) findDatabaseForPod(_ context.Context, obj client.Object) []ctrl.Request {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod.Labels[componentLabel] != databaseComponentValue {
+		return nil
+	}
+	name, ok := pod.Labels[databaseLabel]
+	if !ok {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: client.ObjectKey{Name: name, Namespace: pod.Namespace}}}
 }
 
 // SetupWithManager registers the controller.
@@ -450,6 +709,21 @@ func (r *IdentityServerDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) er
 		Watches(
 			&v1alpha1.IdentityServerCluster{},
 			handler.EnqueueRequestsFromMapFunc(r.findDatabasesForCluster),
+			// Only the cluster's resolved image (a spec change) affects us; skip
+			// the frequent status-only writes.
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.findDatabaseForPod),
+			builder.WithPredicates(databaseInitPodChangedPredicate{}),
+		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findDatabasesForConnectionSecret),
+			// Opaque only and only on a .data change, so SA-token/TLS churn and
+			// metadata-only edits are ignored; the mapfunc confirms the reference.
+			builder.WithPredicates(connectionSecretChangedPredicate{}),
 		).
 		Complete(r)
 }

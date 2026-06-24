@@ -11,6 +11,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
@@ -140,6 +141,74 @@ var _ = Describe("IdentityServerDatabase", func() {
 				g.Expect(db.Status.CompletionTime).NotTo(BeNil())
 			}).Should(Succeed())
 		})
+
+		It("does not recreate a completed Job after it is cleaned up (ttlSecondsAfterFinished)", func() {
+			ns := dbTestNamespace()
+			testCreateCluster(ns, "demo")
+			createDatabase(ns, "acct", "demo",
+				v1alpha1.JDBCConnection{URL: inlineURLSource("jdbc:x")}, nil)
+
+			Eventually(func() *batchv1.Job { return getDatabaseJob(ns, "acct") }).ShouldNot(BeNil())
+			markJobComplete(getDatabaseJob(ns, "acct"))
+
+			// Controller records the successful completion (including the hash).
+			Eventually(func(g Gomega) {
+				var db v1alpha1.IdentityServerDatabase
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "acct", Namespace: ns}, &db)).To(Succeed())
+				g.Expect(db.Status.CompletionTime).NotTo(BeNil())
+				g.Expect(db.Status.LastCompletedHash).NotTo(BeEmpty())
+			}).Should(Succeed())
+
+			// Simulate the TTL controller garbage-collecting the finished Job.
+			// Background propagation so envtest (which has no GC) actually removes it.
+			Expect(k8sClient.Delete(ctx, getDatabaseJob(ns, "acct"),
+				client.PropagationPolicy(metav1.DeletePropagationBackground))).To(Succeed())
+			Eventually(func() *batchv1.Job { return getDatabaseJob(ns, "acct") }).Should(BeNil())
+
+			// The schema is already initialized and nothing changed, so the
+			// controller must not re-run idsvr -I.
+			Consistently(func() *batchv1.Job { return getDatabaseJob(ns, "acct") }, "3s", "300ms").
+				Should(BeNil(), "a completed Job cleaned up by TTL must not be recreated")
+		})
+
+		It("recreates a failed Job when the connection Secret is fixed", func() {
+			ns := dbTestNamespace()
+			testCreateCluster(ns, "demo")
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "db-conn", Namespace: ns},
+				Data:       map[string][]byte{"JDBC_URL": []byte("jdbc:postgresql://db/acct?bad")},
+			})).To(Succeed())
+			createDatabase(ns, "acct", "demo", v1alpha1.JDBCConnection{SecretRef: "db-conn"}, nil)
+
+			var firstUID types.UID
+			Eventually(func(g Gomega) {
+				job := getDatabaseJob(ns, "acct")
+				g.Expect(job).NotTo(BeNil())
+				g.Expect(job.Annotations).To(HaveKey("curity.io/connection-secrets-hash"))
+				firstUID = job.UID
+			}).Should(Succeed())
+
+			// The Job fails (e.g. bad credentials).
+			markJobFailed(getDatabaseJob(ns, "acct"), "connection refused")
+			Eventually(func(g Gomega) {
+				var db v1alpha1.IdentityServerDatabase
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "acct", Namespace: ns}, &db)).To(Succeed())
+				g.Expect(hasCondition(db.Status.Conditions, v1alpha1.ConditionFailed, metav1.ConditionTrue)).To(BeTrue())
+			}).Should(Succeed())
+
+			// Fix the connection Secret — its resourceVersion changes.
+			var s corev1.Secret
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "db-conn", Namespace: ns}, &s)).To(Succeed())
+			s.Data["JDBC_URL"] = []byte("jdbc:postgresql://db/acct?fixed")
+			Expect(k8sClient.Update(ctx, &s)).To(Succeed())
+
+			// The failed Job is recreated to pick up the fix (new object/UID).
+			Eventually(func(g Gomega) {
+				job := getDatabaseJob(ns, "acct")
+				g.Expect(job).NotTo(BeNil())
+				g.Expect(job.UID).NotTo(Equal(firstUID))
+			}).Should(Succeed())
+		})
 	})
 
 	Context("connection sourcing", func() {
@@ -159,6 +228,41 @@ var _ = Describe("IdentityServerDatabase", func() {
 				g.Expect(conditionReason(db.Status.Conditions, v1alpha1.ConditionReady)).To(Equal(v1alpha1.ReasonJDBCURLMissing))
 			}).Should(Succeed())
 			Expect(getDatabaseJob(ns, "acct")).To(BeNil(), "no Job should be created without a JDBC_URL source")
+		})
+
+		It("reports ConnectionSecretMissing when the secretRef Secret is absent", func() {
+			ns := dbTestNamespace()
+			testCreateCluster(ns, "demo")
+			createDatabase(ns, "acct", "demo", v1alpha1.JDBCConnection{SecretRef: "ghost"}, nil)
+
+			Eventually(func(g Gomega) {
+				var db v1alpha1.IdentityServerDatabase
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "acct", Namespace: ns}, &db)).To(Succeed())
+				g.Expect(conditionReason(db.Status.Conditions, v1alpha1.ConditionReady)).To(Equal(v1alpha1.ReasonConnectionSecretMissing))
+			}).Should(Succeed())
+			Expect(getDatabaseJob(ns, "acct")).To(BeNil(), "no Job should be created when the connection Secret is absent")
+		})
+
+		It("reports JDBCURLMissing when url.valueFrom.secretKeyRef points at a missing key", func() {
+			ns := dbTestNamespace()
+			testCreateCluster(ns, "demo")
+			// Secret exists but lacks the referenced JDBC_URL key.
+			Expect(k8sClient.Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "db-conn", Namespace: ns},
+				Data:       map[string][]byte{"OTHER": []byte("x")},
+			})).To(Succeed())
+			createDatabase(ns, "acct", "demo", v1alpha1.JDBCConnection{
+				URL: &v1alpha1.ValueSource{SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "db-conn"}, Key: "JDBC_URL",
+				}},
+			}, nil)
+
+			Eventually(func(g Gomega) {
+				var db v1alpha1.IdentityServerDatabase
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "acct", Namespace: ns}, &db)).To(Succeed())
+				g.Expect(conditionReason(db.Status.Conditions, v1alpha1.ConditionReady)).To(Equal(v1alpha1.ReasonJDBCURLMissing))
+			}).Should(Succeed())
+			Expect(getDatabaseJob(ns, "acct")).To(BeNil(), "no Job should be created when the url secret key is missing")
 		})
 
 		It("creates the Job from a secretRef that carries JDBC_URL", func() {
@@ -219,9 +323,9 @@ var _ = Describe("IdentityServerDatabase", func() {
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "demo"},
 					Connection: v1alpha1.JDBCConnection{URL: &v1alpha1.ValueSource{
 						Value: "jdbc:x",
-						ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						SecretKeyRef: &corev1.SecretKeySelector{
 							LocalObjectReference: corev1.LocalObjectReference{Name: "s"}, Key: "k",
-						}},
+						},
 					}},
 				},
 			})

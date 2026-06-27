@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"strings"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -479,7 +481,7 @@ func isConnectionSecretCandidate(obj client.Object) bool {
 
 // databaseInitPodStatusDiffers mirrors clusterConfigPodStatusDiffers for the
 // database-init container: true only when Phase, the PodScheduled condition, or
-// the init container's state changed.
+// the container's state changed.
 func databaseInitPodStatusDiffers(oldPod, newPod *corev1.Pod) bool {
 	if oldPod.Status.Phase != newPod.Status.Phase {
 		return true
@@ -500,6 +502,48 @@ func databaseInitPodStatusDiffers(oldPod, newPod *corev1.Pod) bool {
 		return !equalInitContainerStatus(oldStat, newStat)
 	}
 	return false
+}
+
+// jobStatusChangedPredicate drops Job updates the reconciler doesn't read.
+// GenerationChangedPredicate can't be used: Job generation never bumps on
+// status, so it would drop the completion events the controller depends on.
+type jobStatusChangedPredicate struct {
+	predicate.Funcs
+}
+
+func (p jobStatusChangedPredicate) Update(e event.UpdateEvent) bool {
+	oldJob, ok := e.ObjectOld.(*batchv1.Job)
+	if !ok {
+		return false
+	}
+	newJob, ok := e.ObjectNew.(*batchv1.Job)
+	if !ok {
+		return false
+	}
+	if oldJob.DeletionTimestamp.IsZero() && !newJob.DeletionTimestamp.IsZero() {
+		return true
+	}
+	return jobStatusDiffers(oldJob, newJob)
+}
+
+func jobStatusDiffers(oldJob, newJob *batchv1.Job) bool {
+	if oldJob.Status.Active != newJob.Status.Active ||
+		oldJob.Status.Succeeded != newJob.Status.Succeeded ||
+		oldJob.Status.Failed != newJob.Status.Failed ||
+		ptr.Deref(oldJob.Status.Ready, -1) != ptr.Deref(newJob.Status.Ready, -1) {
+		return true
+	}
+	return jobConditionStatus(oldJob, batchv1.JobComplete) != jobConditionStatus(newJob, batchv1.JobComplete) ||
+		jobConditionStatus(oldJob, batchv1.JobFailed) != jobConditionStatus(newJob, batchv1.JobFailed)
+}
+
+func jobConditionStatus(job *batchv1.Job, condType batchv1.JobConditionType) corev1.ConditionStatus {
+	for i := range job.Status.Conditions {
+		if job.Status.Conditions[i].Type == condType {
+			return job.Status.Conditions[i].Status
+		}
+	}
+	return corev1.ConditionUnknown
 }
 
 // clusterConfigPodChangedPredicate filters Pod events down to genclust Job

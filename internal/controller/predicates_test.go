@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -1145,5 +1146,60 @@ func TestConnectionSecretChangedPredicate(t *testing.T) {
 	changed := opaqueSecret("db-conn", map[string][]byte{"JDBC_PASSWORD": []byte("fixed")}, nil)
 	if !p.Update(event.UpdateEvent{ObjectOld: oldS, ObjectNew: changed}) {
 		t.Error(".data change must pass")
+	}
+}
+
+func TestJobStatusDiffers(t *testing.T) {
+	base := &batchv1.Job{Status: batchv1.JobStatus{Active: 1}}
+
+	if jobStatusDiffers(base, base.DeepCopy()) {
+		t.Error("identical status should not differ")
+	}
+
+	succeeded := base.DeepCopy()
+	succeeded.Status.Active = 0
+	succeeded.Status.Succeeded = 1
+	if !jobStatusDiffers(base, succeeded) {
+		t.Error("succeeded-count change should differ")
+	}
+
+	failed := base.DeepCopy()
+	failed.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+	if !jobStatusDiffers(base, failed) {
+		t.Error("Failed condition appearing should differ")
+	}
+
+	readyOnly := base.DeepCopy()
+	readyOnly.Status.Ready = ptr.To(int32(1))
+	if !jobStatusDiffers(base, readyOnly) {
+		t.Error("ready-count change should differ")
+	}
+}
+
+func TestJobStatusChangedPredicate_Update(t *testing.T) {
+	p := jobStatusChangedPredicate{}
+	old := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"a": "1"}}}
+
+	labelOnly := old.DeepCopy()
+	labelOnly.Labels["a"] = "2"
+	if p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: labelOnly}) {
+		t.Error("label-only update should be dropped")
+	}
+
+	statusChange := old.DeepCopy()
+	statusChange.Status.Succeeded = 1
+	if !p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: statusChange}) {
+		t.Error("status change should pass")
+	}
+
+	deleting := old.DeepCopy()
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	if !p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: deleting}) {
+		t.Error("deletionTimestamp set should pass")
+	}
+
+	if p.Update(event.UpdateEvent{ObjectOld: &corev1.Pod{}, ObjectNew: &corev1.Pod{}}) {
+		t.Error("non-Job update should be dropped")
 	}
 }

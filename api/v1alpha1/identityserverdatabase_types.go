@@ -11,8 +11,8 @@ import (
 // +kubebuilder:object:generate=true
 type IdentityServerDatabaseSpec struct {
 	// IdentityServerClusterRef references the IdentityServerCluster (in the same
-	// namespace) whose image the schema-management Job runs. The Job re-runs
-	// whenever that cluster's resolved image (version or image override) changes.
+	// namespace) whose image the schema-management Job runs. The Job re-runs when
+	// the resolved image, spec.connection, or spec.jobTemplate changes.
 	// +kubebuilder:validation:Required
 	IdentityServerClusterRef ObjectReference `json:"identityServerClusterRef"`
 

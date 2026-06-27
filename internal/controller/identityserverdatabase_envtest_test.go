@@ -9,6 +9,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -110,6 +111,16 @@ var _ = Describe("IdentityServerDatabase", func() {
 				g.Expect(oldHash).NotTo(BeEmpty())
 			}).Should(Succeed())
 
+			// Drive the first Job to success so the CR carries Complete=True and a
+			// CompletionTime — the stale outcome the re-trigger must clear.
+			markJobComplete(getDatabaseJob(ns, "acct"))
+			Eventually(func(g Gomega) {
+				var db v1alpha1.IdentityServerDatabase
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "acct", Namespace: ns}, &db)).To(Succeed())
+				g.Expect(hasCondition(db.Status.Conditions, v1alpha1.ConditionComplete, metav1.ConditionTrue)).To(BeTrue())
+				g.Expect(db.Status.CompletionTime).NotTo(BeNil())
+			}).Should(Succeed())
+
 			// Bump the cluster image override — this changes the resolved image.
 			var cluster v1alpha1.IdentityServerCluster
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "demo", Namespace: ns}, &cluster)).To(Succeed())
@@ -121,6 +132,14 @@ var _ = Describe("IdentityServerDatabase", func() {
 				g.Expect(job).NotTo(BeNil())
 				g.Expect(job.Annotations["curity.io/database-job-hash"]).NotTo(Equal(oldHash))
 				g.Expect(job.Spec.Template.Spec.Containers[0].Image).To(Equal("registry.example.com/curity:11.0-patched"))
+
+				// clearPriorOutcome ran: the prior success must not linger next to
+				// the new running Job (the envtest_status_write_after_create bite).
+				var db v1alpha1.IdentityServerDatabase
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "acct", Namespace: ns}, &db)).To(Succeed())
+				g.Expect(apimeta.FindStatusCondition(db.Status.Conditions, v1alpha1.ConditionComplete)).To(BeNil())
+				g.Expect(db.Status.CompletionTime).To(BeNil())
+				g.Expect(hasCondition(db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse)).To(BeTrue())
 			}).Should(Succeed())
 		})
 
@@ -252,9 +271,7 @@ var _ = Describe("IdentityServerDatabase", func() {
 				Data:       map[string][]byte{"OTHER": []byte("x")},
 			})).To(Succeed())
 			createDatabase(ns, "acct", "demo", v1alpha1.JDBCConnection{
-				URL: &v1alpha1.ValueSource{SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "db-conn"}, Key: "JDBC_URL",
-				}},
+				URL: &v1alpha1.ValueSource{SecretKeyRef: &v1alpha1.ConnectionSecretKeyRef{Name: "db-conn", Key: "JDBC_URL"}},
 			}, nil)
 
 			Eventually(func(g Gomega) {
@@ -295,10 +312,8 @@ var _ = Describe("IdentityServerDatabase", func() {
 				Data:       map[string][]byte{"other": []byte("x")},
 			})).To(Succeed())
 			createDatabase(ns, "acct", "demo", v1alpha1.JDBCConnection{
-				URL: inlineURLSource("jdbc:postgresql://db/acct"),
-				Password: &v1alpha1.ValueSource{SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "db-pw"}, Key: "password",
-				}},
+				URL:      inlineURLSource("jdbc:postgresql://db/acct"),
+				Password: &v1alpha1.ValueSource{SecretKeyRef: &v1alpha1.ConnectionSecretKeyRef{Name: "db-pw", Key: "password"}},
 			}, nil)
 
 			Eventually(func(g Gomega) {
@@ -313,10 +328,8 @@ var _ = Describe("IdentityServerDatabase", func() {
 			ns := dbTestNamespace()
 			testCreateCluster(ns, "demo")
 			createDatabase(ns, "acct", "demo", v1alpha1.JDBCConnection{
-				URL: inlineURLSource("jdbc:postgresql://db/acct"),
-				Username: &v1alpha1.ValueSource{SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "ghost"}, Key: "user",
-				}},
+				URL:      inlineURLSource("jdbc:postgresql://db/acct"),
+				Username: &v1alpha1.ValueSource{SecretKeyRef: &v1alpha1.ConnectionSecretKeyRef{Name: "ghost", Key: "user"}},
 			}, nil)
 
 			Eventually(func(g Gomega) {
@@ -374,10 +387,8 @@ var _ = Describe("IdentityServerDatabase", func() {
 				Spec: v1alpha1.IdentityServerDatabaseSpec{
 					IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "demo"},
 					Connection: v1alpha1.JDBCConnection{URL: &v1alpha1.ValueSource{
-						Value: "jdbc:x",
-						SecretKeyRef: &corev1.SecretKeySelector{
-							LocalObjectReference: corev1.LocalObjectReference{Name: "s"}, Key: "k",
-						},
+						Value:        "jdbc:x",
+						SecretKeyRef: &v1alpha1.ConnectionSecretKeyRef{Name: "s", Key: "k"},
 					}},
 				},
 			})

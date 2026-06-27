@@ -1,16 +1,26 @@
 package controller
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
@@ -106,10 +116,7 @@ func TestBuildJDBCEnv_InlineValues(t *testing.T) {
 func TestBuildJDBCEnv_SecretKeyRef(t *testing.T) {
 	conn := v1alpha1.JDBCConnection{
 		Password: &v1alpha1.ValueSource{
-			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: "db-creds"},
-				Key:                  "password",
-			},
+			SecretKeyRef: &v1alpha1.ConnectionSecretKeyRef{Name: "db-creds", Key: "password"},
 		},
 		URL: inlineURL("jdbc:x"),
 	}
@@ -366,12 +373,8 @@ func TestConnectionSecretNames(t *testing.T) {
 	conn := v1alpha1.JDBCConnection{
 		SecretRef: "bulk",
 		URL:       inlineURL("jdbc:x"), // inline, no secret
-		Username: &v1alpha1.ValueSource{SecretKeyRef: &corev1.SecretKeySelector{
-			LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}, Key: "user",
-		}},
-		Password: &v1alpha1.ValueSource{SecretKeyRef: &corev1.SecretKeySelector{
-			LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}, Key: "pw", // same Secret → deduped
-		}},
+		Username:  &v1alpha1.ValueSource{SecretKeyRef: &v1alpha1.ConnectionSecretKeyRef{Name: "creds", Key: "user"}},
+		Password:  &v1alpha1.ValueSource{SecretKeyRef: &v1alpha1.ConnectionSecretKeyRef{Name: "creds", Key: "pw"}}, // same Secret → deduped
 	}
 	got := connectionSecretNames(conn)
 	want := []string{"bulk", "creds"} // sorted + deduped
@@ -459,5 +462,314 @@ func TestTranslateDatabaseInitPod(t *testing.T) {
 	del.DeletionTimestamp = &now
 	if msg := translateDatabaseInitPod([]corev1.Pod{del}); msg != "" {
 		t.Errorf("deleting pod should be ignored, got %q", msg)
+	}
+
+	// A container that started and exited non-zero (wrong creds, unreachable DB)
+	// — the Job stays non-terminal through its retries, so this must surface.
+	terminated := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", CreationTimestamp: metav1.Now()},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+			Name: databaseContainerName,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: 1, Message: "FATAL: password authentication failed",
+			}},
+		}}},
+	}
+	if msg := translateDatabaseInitPod([]corev1.Pod{terminated}); !strings.Contains(msg, "container failed") || !strings.Contains(msg, "password authentication failed") || !strings.Contains(msg, "exit 1") {
+		t.Errorf("non-zero terminated container should surface cause, got %q", msg)
+	}
+
+	// Exit 0 is not a failure.
+	ok := terminated
+	ok.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  databaseContainerName,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+	}}
+	if msg := translateDatabaseInitPod([]corev1.Pod{ok}); msg != "" {
+		t.Errorf("exit 0 should not be a failure, got %q", msg)
+	}
+
+	// CrashLoopBackOff reads the cause from the previous termination.
+	crash := waitingInitPod("CrashLoopBackOff")
+	crash.Status.ContainerStatuses[0].LastTerminationState = corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 2, Reason: "Error"},
+	}
+	if msg := translateDatabaseInitPod([]corev1.Pod{crash}); !strings.Contains(msg, "crash-looping") || !strings.Contains(msg, "exit 2") {
+		t.Errorf("crash-loop should surface previous termination, got %q", msg)
+	}
+}
+
+func TestTerminationDetail(t *testing.T) {
+	if got := terminationDetail(nil); got != "container terminated" {
+		t.Errorf("nil → %q", got)
+	}
+	msg := terminationDetail(&corev1.ContainerStateTerminated{ExitCode: 1, Message: " boom ", Reason: "Error"})
+	if msg != "boom (exit 1)" {
+		t.Errorf("message preferred + trimmed, got %q", msg)
+	}
+	if got := terminationDetail(&corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}); got != "OOMKilled (exit 137)" {
+		t.Errorf("reason fallback, got %q", got)
+	}
+	if got := terminationDetail(&corev1.ContainerStateTerminated{ExitCode: 3}); got != "exit 3" {
+		t.Errorf("bare exit code, got %q", got)
+	}
+}
+
+func TestFindDatabaseForJobFailedCreateEvent(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := batchv1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{
+		Name: "acct" + databaseJobSuffix, Namespace: "ns",
+		Labels: map[string]string{databaseLabel: "acct"},
+	}}
+	noLabel := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "orphan", Namespace: "ns"}}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(job, noLabel).Build()
+	r := &IdentityServerDatabaseReconciler{Client: c}
+
+	evFor := func(jobName string) *corev1.Event {
+		return &corev1.Event{InvolvedObject: corev1.ObjectReference{
+			Kind: "Job", Name: jobName, Namespace: "ns"}}
+	}
+
+	reqs := r.findDatabaseForJobFailedCreateEvent(context.Background(), evFor("acct"+databaseJobSuffix))
+	if len(reqs) != 1 || reqs[0].Name != "acct" || reqs[0].Namespace != "ns" {
+		t.Fatalf("expected one request acct/ns, got %v", reqs)
+	}
+	if reqs := r.findDatabaseForJobFailedCreateEvent(context.Background(), evFor("orphan")); reqs != nil {
+		t.Errorf("expected nil for Job without database label, got %v", reqs)
+	}
+	if reqs := r.findDatabaseForJobFailedCreateEvent(context.Background(), evFor("ghost")); reqs != nil {
+		t.Errorf("expected nil for missing Job, got %v", reqs)
+	}
+	if reqs := r.findDatabaseForJobFailedCreateEvent(context.Background(), &corev1.Pod{}); reqs != nil {
+		t.Errorf("expected nil for non-Event object, got %v", reqs)
+	}
+}
+
+func TestFindDatabaseForPod(t *testing.T) {
+	r := &IdentityServerDatabaseReconciler{}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Labels: map[string]string{
+		componentLabel: databaseComponentValue, databaseLabel: "acct",
+	}}}
+	reqs := r.findDatabaseForPod(context.Background(), pod)
+	if len(reqs) != 1 || reqs[0].Name != "acct" || reqs[0].Namespace != "ns" {
+		t.Fatalf("expected acct/ns, got %v", reqs)
+	}
+	wrongComponent := pod.DeepCopy()
+	wrongComponent.Labels[componentLabel] = "other"
+	if r.findDatabaseForPod(context.Background(), wrongComponent) != nil {
+		t.Error("non-database-init pod should be ignored")
+	}
+	noDBLabel := pod.DeepCopy()
+	delete(noDBLabel.Labels, databaseLabel)
+	if r.findDatabaseForPod(context.Background(), noDBLabel) != nil {
+		t.Error("pod without database label should be ignored")
+	}
+	if r.findDatabaseForPod(context.Background(), &corev1.Secret{}) != nil {
+		t.Error("non-pod should be ignored")
+	}
+}
+
+func TestFindDatabasesForCluster(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	match := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, nil)
+	other := testDatabase("other", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, nil)
+	other.Spec.IdentityServerClusterRef.Name = "elsewhere"
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(match, other).Build()
+	r := &IdentityServerDatabaseReconciler{Client: c}
+
+	cluster := &v1alpha1.IdentityServerCluster{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns"}}
+	reqs := r.findDatabasesForCluster(context.Background(), cluster)
+	if len(reqs) != 1 || reqs[0].Name != "acct" {
+		t.Fatalf("expected only the referencing database, got %v", reqs)
+	}
+	if r.findDatabasesForCluster(context.Background(), &corev1.Pod{}) != nil {
+		t.Error("non-cluster object should be ignored")
+	}
+}
+
+func TestFindDatabasesForConnectionSecret(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := v1alpha1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	match := testDatabase("acct", v1alpha1.JDBCConnection{SecretRef: "db-conn"}, nil)
+	other := testDatabase("other", v1alpha1.JDBCConnection{SecretRef: "elsewhere"}, nil)
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(match, other).Build()
+	r := &IdentityServerDatabaseReconciler{Client: c}
+
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "db-conn", Namespace: "ns"}}
+	reqs := r.findDatabasesForConnectionSecret(context.Background(), secret)
+	if len(reqs) != 1 || reqs[0].Name != "acct" {
+		t.Fatalf("expected only the referencing database, got %v", reqs)
+	}
+	if r.findDatabasesForConnectionSecret(context.Background(), &v1alpha1.IdentityServerCluster{}) != nil {
+		t.Error("non-secret object should be ignored")
+	}
+}
+
+func TestDatabaseLatestJobFailedCreateMessage(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	uid := types.UID("job-uid")
+	older := &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: "e1", Namespace: "ns"},
+		InvolvedObject: corev1.ObjectReference{UID: uid},
+		Message:        "older", LastTimestamp: metav1.NewTime(time.Now().Add(-time.Hour)),
+	}
+	newer := &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: "e2", Namespace: "ns"},
+		InvolvedObject: corev1.ObjectReference{UID: uid},
+		Message:        "exceeded quota", LastTimestamp: metav1.NewTime(time.Now()),
+	}
+	unrelated := &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Name: "e3", Namespace: "ns"},
+		InvolvedObject: corev1.ObjectReference{UID: "other"},
+		Message:        "nope", LastTimestamp: metav1.NewTime(time.Now()),
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(older, newer, unrelated).Build()
+	r := &IdentityServerDatabaseReconciler{Client: c}
+
+	if msg, err := r.latestJobFailedCreateMessage(context.Background(), uid, "ns"); err != nil || msg != "exceeded quota" {
+		t.Errorf("expected newest matching message, got %q (err %v)", msg, err)
+	}
+	if msg, err := r.latestJobFailedCreateMessage(context.Background(), "absent", "ns"); err != nil || msg != "" {
+		t.Errorf("expected empty for unknown UID, got %q (err %v)", msg, err)
+	}
+}
+
+func TestComputeConnectionSecretsHash_Contract(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	conn := v1alpha1.JDBCConnection{SecretRef: "db-conn"}
+	base := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-conn", Namespace: "ns"},
+		Data:       map[string][]byte{"JDBC_URL": []byte("jdbc:x"), "JDBC_PASSWORD": []byte("pw")},
+	}
+	hashOf := func(sec *corev1.Secret) string {
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(sec).Build()
+		r := &IdentityServerDatabaseReconciler{Client: c}
+		h, err := r.computeConnectionSecretsHash(context.Background(), conn, "ns")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+
+	h1 := hashOf(base)
+
+	// Metadata-only change (a label) must NOT change the hash.
+	labelled := base.DeepCopy()
+	labelled.Labels = map[string]string{"team": "iam"}
+	if hashOf(labelled) != h1 {
+		t.Error("hash must be insensitive to metadata changes")
+	}
+
+	// A .data change MUST change the hash.
+	dataChanged := base.DeepCopy()
+	dataChanged.Data["JDBC_PASSWORD"] = []byte("rotated")
+	if hashOf(dataChanged) == h1 {
+		t.Error("hash must change when .data changes")
+	}
+}
+
+func TestBuildDryRunPod_DeterministicName(t *testing.T) {
+	cluster := &v1alpha1.IdentityServerCluster{Spec: v1alpha1.IdentityServerClusterSpec{Version: "11.0"}}
+	db := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, nil)
+	job := buildDatabaseJob(db, cluster, buildImage(cluster), "h", "ch")
+
+	pod := buildDryRunPod(db, job)
+	// Deterministic Name (not GenerateName): the apiserver Forbidden message
+	// embeds it, so a random suffix would flap the condition and spam events.
+	if pod.GenerateName != "" {
+		t.Errorf("dry-run pod must not use GenerateName, got %q", pod.GenerateName)
+	}
+	if pod.Name != job.Name+"-dryrun-preflight" {
+		t.Errorf("dry-run pod name = %q, want %q", pod.Name, job.Name+"-dryrun-preflight")
+	}
+	if buildDryRunPod(db, job).Name != pod.Name {
+		t.Error("dry-run pod name must be stable across calls")
+	}
+	if pod.Spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("restart policy = %q, want Never", pod.Spec.RestartPolicy)
+	}
+}
+
+func TestCreateJob_DryRunForbidden(t *testing.T) {
+	s := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{v1alpha1.AddToScheme, corev1.AddToScheme, batchv1.AddToScheme} {
+		if err := add(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dbObj := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, nil)
+	cluster := &v1alpha1.IdentityServerCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "ns"},
+		Spec:       v1alpha1.IdentityServerClusterSpec{Version: "11.0"},
+	}
+
+	var jobCreated bool
+	cli := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(dbObj).
+		WithStatusSubresource(dbObj).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				switch obj.(type) {
+				case *corev1.Pod: // the dry-run pre-flight pod → admission denial
+					return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, obj.GetName(),
+						fmt.Errorf("exceeded quota: pods=0"))
+				case *batchv1.Job:
+					jobCreated = true
+					return nil
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &IdentityServerDatabaseReconciler{Client: cli, Scheme: s, Recorder: record.NewFakeRecorder(10)}
+
+	// Pass the tracked object (with resourceVersion) so the status write succeeds.
+	var db v1alpha1.IdentityServerDatabase
+	if err := cli.Get(context.Background(), types.NamespacedName{Name: "acct", Namespace: "ns"}, &db); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := r.createJob(context.Background(), &db, cluster, buildImage(cluster), "h", "ch")
+	if err != nil {
+		t.Fatalf("admission denial must not be a hard error, got %v", err)
+	}
+	if res.RequeueAfter != jobAdmissionRetryInterval {
+		t.Errorf("RequeueAfter = %v, want %v (self-heal without log storm)", res.RequeueAfter, jobAdmissionRetryInterval)
+	}
+	if jobCreated {
+		t.Error("Job must NOT be created when the dry-run is denied")
+	}
+
+	var got v1alpha1.IdentityServerDatabase
+	if err := cli.Get(context.Background(), types.NamespacedName{Name: "acct", Namespace: "ns"}, &got); err != nil {
+		t.Fatal(err)
+	}
+	ready := apimeta.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse || ready.Reason != v1alpha1.ReasonJobPodNotStarting {
+		t.Errorf("Ready = %+v, want False/JobPodNotStarting", ready)
+	}
+	if !strings.Contains(ready.Message, "exceeded quota") {
+		t.Errorf("Ready message should carry the apiserver cause, got %q", ready.Message)
+	}
+	if !condIs(got.Status.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue) {
+		t.Error("Progressing should be True (still retrying)")
 	}
 }

@@ -648,7 +648,21 @@ type ValueSource struct {
 
 	// SecretKeyRef names the Secret and key holding the value. Mutually
 	// exclusive with value.
-	SecretKeyRef *corev1.SecretKeySelector `json:"secretKeyRef,omitempty"`
+	SecretKeyRef *ConnectionSecretKeyRef `json:"secretKeyRef,omitempty"`
+}
+
+// ConnectionSecretKeyRef selects one key in a Secret. It has no Optional knob:
+// a referenced key is always required, so the controller can reject a missing one.
+type ConnectionSecretKeyRef struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key"`
 }
 
 // JDBCConnection describes how the database-init Job obtains its JDBC

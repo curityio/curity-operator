@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -15,6 +16,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -39,6 +41,8 @@ const (
 	databaseLabel          = "curity.io/database"
 	componentLabel         = "curity.io/component"
 	databaseComponentValue = "database-init"
+	// Requeue interval to re-check a pod-admission denial without spinning.
+	jobAdmissionRetryInterval = time.Minute
 )
 
 // IdentityServerDatabaseReconciler reconciles an IdentityServerDatabase object.
@@ -57,7 +61,8 @@ type IdentityServerDatabaseReconciler struct {
 // +kubebuilder:rbac:groups=curity.io,resources=identityserverclusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;patch
 
 // Reconcile handles a single reconciliation loop for an IdentityServerDatabase.
 func (r *IdentityServerDatabaseReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -210,7 +215,7 @@ func (r *IdentityServerDatabaseReconciler) checkConnectionSources(ctx context.Co
 			}
 			return "", "", fmt.Errorf("failed to get connection.url Secret %q: %w", skr.Name, err)
 		}
-		if _, ok := secret.Data[skr.Key]; !ok && !ptr.Deref(skr.Optional, false) {
+		if _, ok := secret.Data[skr.Key]; !ok {
 			return v1alpha1.ReasonJDBCURLMissing,
 				fmt.Sprintf("Secret %q has no key %q for JDBC_URL", skr.Name, skr.Key), nil
 		}
@@ -239,7 +244,7 @@ func (r *IdentityServerDatabaseReconciler) checkValueSourceSecret(ctx context.Co
 		}
 		return "", "", fmt.Errorf("failed to get %s Secret %q: %w", field, skr.Name, err)
 	}
-	if _, ok := secret.Data[skr.Key]; !ok && !ptr.Deref(skr.Optional, false) {
+	if _, ok := secret.Data[skr.Key]; !ok {
 		return v1alpha1.ReasonConnectionKeyMissing,
 			fmt.Sprintf("Secret %q has no key %q for %s", skr.Name, skr.Key, field), nil
 	}
@@ -250,6 +255,21 @@ func (r *IdentityServerDatabaseReconciler) createJob(ctx context.Context, db *v1
 	job := buildDatabaseJob(db, cluster, image, hash, connHash)
 	if err := controllerutil.SetControllerReference(db, job, r.Scheme); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to set owner ref on database Job: %w", err)
+	}
+	// Catch an admission denial before the Job exists, instead of leaving it
+	// unable to ever create a pod with no cause on the CR.
+	if err := r.dryRunPodAdmission(ctx, db, job); err != nil {
+		if apierrors.IsForbidden(err) || apierrors.IsInvalid(err) {
+			msg := truncateMessage(fmt.Sprintf("pod admission rejected: %s", err.Error()), 256)
+			clearPriorOutcome(db)
+			setCondition(&db.Status.Conditions, v1alpha1.ConditionProgressing, metav1.ConditionTrue,
+				v1alpha1.ReasonJobPodNotStarting, msg, db.Generation)
+			setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
+				v1alpha1.ReasonJobPodNotStarting, msg, db.Generation)
+			// RequeueAfter (not an error) self-heals once fixed without log spam.
+			return ctrl.Result{RequeueAfter: jobAdmissionRetryInterval}, r.updateStatus(ctx, db)
+		}
+		return ctrl.Result{}, fmt.Errorf("pre-flight pod admission check failed: %w", err)
 	}
 	if err := r.Create(ctx, job); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -266,6 +286,27 @@ func (r *IdentityServerDatabaseReconciler) createJob(ctx context.Context, db *v1
 	setCondition(&db.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse,
 		v1alpha1.ReasonJobRunning, "database-init Job created and not yet complete", db.Generation)
 	return ctrl.Result{}, r.updateStatus(ctx, db)
+}
+
+// dryRunPodAdmission runs the pod template through the apiserver admission chain
+// without persisting. Deterministic Name (not GenerateName) keeps the Forbidden
+// message — which embeds the pod name — stable across reconciles.
+func (r *IdentityServerDatabaseReconciler) dryRunPodAdmission(ctx context.Context, db *v1alpha1.IdentityServerDatabase, job *batchv1.Job) error {
+	return r.Create(ctx, buildDryRunPod(db, job), client.DryRunAll)
+}
+
+func buildDryRunPod(db *v1alpha1.IdentityServerDatabase, job *batchv1.Job) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        job.Name + "-dryrun-preflight",
+			Namespace:   db.Namespace,
+			Labels:      job.Spec.Template.Labels,
+			Annotations: job.Spec.Template.Annotations,
+		},
+		Spec: *job.Spec.Template.Spec.DeepCopy(),
+	}
+	pod.Spec.RestartPolicy = corev1.RestartPolicyNever
+	return pod
 }
 
 // clearPriorOutcome drops a prior run's terminal status before (re)creating the
@@ -309,8 +350,8 @@ func (r *IdentityServerDatabaseReconciler) applyJobStatus(db *v1alpha1.IdentityS
 	return true
 }
 
-// surfacePodStartFailure reports why the Job's pod can't start (image pull,
-// unschedulable, config error); returns the List error so the caller requeues.
+// surfacePodStartFailure reports why the Job's pod can't start, or — when no pod
+// was created at all — why creation was denied. Returns errors so the caller requeues.
 func (r *IdentityServerDatabaseReconciler) surfacePodStartFailure(ctx context.Context, db *v1alpha1.IdentityServerDatabase, job *batchv1.Job) error {
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(db.Namespace),
@@ -326,6 +367,16 @@ func (r *IdentityServerDatabaseReconciler) surfacePodStartFailure(ctx context.Co
 		}
 	}
 	msg := translateDatabaseInitPod(owned)
+	if msg == "" && len(owned) == 0 {
+		// No pod created at all — surface the admission denial from the Event.
+		evMsg, err := r.latestJobFailedCreateMessage(ctx, job.UID, db.Namespace)
+		if err != nil {
+			return err
+		}
+		if evMsg != "" {
+			msg = truncateMessage(fmt.Sprintf("pod cannot be created: %s", evMsg), 256)
+		}
+	}
 	if msg == "" {
 		return nil
 	}
@@ -353,17 +404,43 @@ func translateDatabaseInitPod(pods []corev1.Pod) string {
 	}
 	for i := range pod.Status.ContainerStatuses {
 		cs := &pod.Status.ContainerStatuses[i]
-		if cs.Name != databaseContainerName || cs.State.Waiting == nil {
+		if cs.Name != databaseContainerName {
 			continue
 		}
-		switch cs.State.Waiting.Reason {
-		case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
-			return truncateMessage(fmt.Sprintf("image pull failed: %s", cs.State.Waiting.Message), 256)
-		case "CreateContainerConfigError":
-			return truncateMessage(fmt.Sprintf("container config error: %s", cs.State.Waiting.Message), 256)
+		if w := cs.State.Waiting; w != nil {
+			switch w.Reason {
+			case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
+				return truncateMessage(fmt.Sprintf("image pull failed: %s", w.Message), 256)
+			case "CreateContainerConfigError":
+				return truncateMessage(fmt.Sprintf("container config error: %s", w.Message), 256)
+			case "CrashLoopBackOff":
+				// The crash detail is in the previous termination, not Waiting.
+				return truncateMessage(fmt.Sprintf("container crash-looping: %s", terminationDetail(cs.LastTerminationState.Terminated)), 256)
+			}
+		}
+		// Started then exited non-zero (wrong creds, unreachable DB) — the Job
+		// stays non-terminal through its backoffLimit retries.
+		if t := cs.State.Terminated; t != nil && t.ExitCode != 0 {
+			return truncateMessage(fmt.Sprintf("container failed: %s", terminationDetail(t)), 256)
 		}
 	}
 	return ""
+}
+
+// terminationDetail renders a terminated container's cause, preferring the
+// message (FallbackToLogsOnError fills it) then the reason, always with the code.
+func terminationDetail(t *corev1.ContainerStateTerminated) string {
+	if t == nil {
+		return "container terminated"
+	}
+	switch {
+	case t.Message != "":
+		return fmt.Sprintf("%s (exit %d)", strings.TrimSpace(t.Message), t.ExitCode)
+	case t.Reason != "":
+		return fmt.Sprintf("%s (exit %d)", t.Reason, t.ExitCode)
+	default:
+		return fmt.Sprintf("exit %d", t.ExitCode)
+	}
 }
 
 // mostRecentPod picks the newest pod by CreationTimestamp; ties are broken by
@@ -385,6 +462,10 @@ func mostRecentPod(pods []corev1.Pod) *corev1.Pod {
 
 func (r *IdentityServerDatabaseReconciler) updateStatus(ctx context.Context, db *v1alpha1.IdentityServerDatabase) error {
 	if err := r.Status().Update(ctx, db); err != nil {
+		if apierrors.IsConflict(err) {
+			// Benign optimistic-lock conflict; the conflicting write re-reconciles.
+			return nil
+		}
 		return fmt.Errorf("failed to update IdentityServerDatabase status: %w", err)
 	}
 	return nil
@@ -645,7 +726,10 @@ func valueSourceToEnvVar(name string, vs *v1alpha1.ValueSource) (corev1.EnvVar, 
 	}
 	e := corev1.EnvVar{Name: name}
 	if vs.SecretKeyRef != nil {
-		e.ValueFrom = &corev1.EnvVarSource{SecretKeyRef: vs.SecretKeyRef}
+		e.ValueFrom = &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: vs.SecretKeyRef.Name},
+			Key:                  vs.SecretKeyRef.Key,
+		}}
 	} else {
 		e.Value = vs.Value
 	}
@@ -723,6 +807,60 @@ func (r *IdentityServerDatabaseReconciler) findDatabaseForPod(_ context.Context,
 	return []ctrl.Request{{NamespacedName: client.ObjectKey{Name: name, Namespace: pod.Namespace}}}
 }
 
+// findDatabaseForJobFailedCreateEvent maps a FailedCreate Event on a Job to its
+// owning database via the Job's curity.io/database label.
+func (r *IdentityServerDatabaseReconciler) findDatabaseForJobFailedCreateEvent(ctx context.Context, obj client.Object) []ctrl.Request {
+	ev, ok := obj.(*corev1.Event)
+	if !ok {
+		return nil
+	}
+	var job batchv1.Job
+	if err := r.Get(ctx, client.ObjectKey{Name: ev.InvolvedObject.Name, Namespace: ev.InvolvedObject.Namespace}, &job); err != nil {
+		return nil
+	}
+	name, ok := job.Labels[databaseLabel]
+	if !ok {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: client.ObjectKey{Name: name, Namespace: job.Namespace}}}
+}
+
+// latestJobFailedCreateMessage returns the newest cached FailedCreate Event
+// message for the Job UID, or "" if none. A List error is returned (not
+// swallowed) so the caller requeues rather than reporting no cause.
+func (r *IdentityServerDatabaseReconciler) latestJobFailedCreateMessage(ctx context.Context, jobUID types.UID, namespace string) (string, error) {
+	var events corev1.EventList
+	if err := r.List(ctx, &events, client.InNamespace(namespace)); err != nil {
+		return "", fmt.Errorf("failed to list FailedCreate events for Job %q: %w", jobUID, err)
+	}
+	var newest *corev1.Event
+	for i := range events.Items {
+		ev := &events.Items[i]
+		if ev.InvolvedObject.UID != jobUID {
+			continue
+		}
+		if newest == nil {
+			newest = ev
+			continue
+		}
+		newestStamp := newest.LastTimestamp
+		if newestStamp.IsZero() {
+			newestStamp = metav1.NewTime(newest.EventTime.Time)
+		}
+		evStamp := ev.LastTimestamp
+		if evStamp.IsZero() {
+			evStamp = metav1.NewTime(ev.EventTime.Time)
+		}
+		if evStamp.After(newestStamp.Time) {
+			newest = ev
+		}
+	}
+	if newest == nil {
+		return "", nil
+	}
+	return newest.Message, nil
+}
+
 // SetupWithManager registers the controller.
 func (r *IdentityServerDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -732,7 +870,7 @@ func (r *IdentityServerDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) er
 				predicate.LabelChangedPredicate{},
 				predicate.AnnotationChangedPredicate{},
 			))).
-		Owns(&batchv1.Job{}).
+		Owns(&batchv1.Job{}, builder.WithPredicates(jobStatusChangedPredicate{})).
 		Watches(
 			&v1alpha1.IdentityServerCluster{},
 			handler.EnqueueRequestsFromMapFunc(r.findDatabasesForCluster),
@@ -751,6 +889,12 @@ func (r *IdentityServerDatabaseReconciler) SetupWithManager(mgr ctrl.Manager) er
 			// Opaque only and only on a .data change, so SA-token/TLS churn and
 			// metadata-only edits are ignored; the mapfunc confirms the reference.
 			builder.WithPredicates(connectionSecretChangedPredicate{}),
+		).
+		Watches(
+			// FailedCreate Events surface a pod-admission denial after Job create.
+			&corev1.Event{},
+			handler.EnqueueRequestsFromMapFunc(r.findDatabaseForJobFailedCreateEvent),
+			builder.WithPredicates(jobFailedCreateEventPredicate{}),
 		).
 		Complete(r)
 }

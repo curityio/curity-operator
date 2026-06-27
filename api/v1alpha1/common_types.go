@@ -701,11 +701,52 @@ type JDBCConnection struct {
 	Password *ValueSource `json:"password,omitempty"`
 }
 
+// CommonPodConfig holds the pod and scheduling knobs that IdentityServerClusterSpec,
+// IdentityServerNodeSpec, and DatabaseJobTemplate share with identical validation.
+// It is embedded inline, so each type keeps these as top-level fields. Fields whose
+// validation differs per type (podLabels, podAnnotations, imagePullSecret) stay on
+// the individual specs.
+type CommonPodConfig struct {
+	// Resources defines CPU and memory requests/limits for the pod.
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// NodeSelector constrains the pod to nodes with matching labels.
+	// +kubebuilder:validation:MaxProperties=100
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations allow the pod to schedule onto nodes with matching taints.
+	// +kubebuilder:validation:MaxItems=100
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// TopologySpreadConstraints describe how the pod spreads across topology domains.
+	// +kubebuilder:validation:MaxItems=32
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// Affinity defines scheduling constraints for the pod.
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// SecurityContext sets the pod-level security context. Unset fields inherit
+	// the operator defaults (runAsUser 10001, runAsGroup/fsGroup 10000).
+	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
+
+	// ContainerSecurityContext sets the security context of the main container.
+	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
+
+	// TerminationGracePeriodSeconds overrides the pod termination grace period.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3600
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
+	// ImagePullPolicy overrides the pull policy of the main container. Unset
+	// defaults like Kubernetes: Always for :latest/untagged, else IfNotPresent.
+	// +kubebuilder:validation:Enum=Always;Never;IfNotPresent
+	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
+}
+
 // DatabaseJobTemplate carries the standard Kubernetes Job/Pod knobs that may be
 // configured on the database-init Job. Every field is optional; unset fields
 // fall back to operator defaults (and, for image pull settings, to the
-// referenced cluster). It is intentionally close to the pod-level fields on
-// IdentityServerClusterSpec so the two read alike.
+// referenced cluster).
 type DatabaseJobTemplate struct {
 	// BackoffLimit is the number of retries before the Job is marked failed.
 	// Defaults to 3.
@@ -735,21 +776,6 @@ type DatabaseJobTemplate struct {
 	// Defaults to false (the Job needs no Kubernetes API access).
 	AutomountServiceAccountToken *bool `json:"automountServiceAccountToken,omitempty"`
 
-	// Resources sets CPU/memory requests and limits on the idsvr container.
-	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
-
-	// SecurityContext sets the pod-level security context. Unset fields inherit
-	// the operator defaults (runAsUser 10001, runAsGroup/fsGroup 10000).
-	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
-
-	// ContainerSecurityContext sets the security context of the idsvr container.
-	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
-
-	// ImagePullPolicy overrides the pull policy of the idsvr container. Unset
-	// defaults like Kubernetes (Always for :latest/untagged, else IfNotPresent).
-	// +kubebuilder:validation:Enum=Always;Never;IfNotPresent
-	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
-
 	// ImagePullSecret names a Secret for pulling the image. Unset falls back to
 	// the referenced cluster's imagePullSecret.
 	// +kubebuilder:validation:MaxLength=253
@@ -762,29 +788,13 @@ type DatabaseJobTemplate struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['JDBC_URL','JDBC_USERNAME','JDBC_PASSWORD']))",message="env must not redefine JDBC_URL, JDBC_USERNAME or JDBC_PASSWORD; use spec.connection instead"
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
-	// NodeSelector constrains the pod to nodes with matching labels.
-	// +kubebuilder:validation:MaxProperties=100
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-
-	// Tolerations allow the pod to schedule onto nodes with matching taints.
-	// +kubebuilder:validation:MaxItems=100
-	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
-
-	// TopologySpreadConstraints describe how the pod spreads across topology domains.
-	// +kubebuilder:validation:MaxItems=32
-	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
-
-	// Affinity defines scheduling constraints for the pod.
-	Affinity *corev1.Affinity `json:"affinity,omitempty"`
-
 	// PriorityClassName sets the pod's PriorityClass.
 	// +kubebuilder:validation:MaxLength=253
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 
-	// TerminationGracePeriodSeconds overrides the pod termination grace period.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=3600
-	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+	// CommonPodConfig adds the shared pod/scheduling knobs (resources,
+	// nodeSelector, tolerations, affinity, securityContext, …).
+	CommonPodConfig `json:",inline"`
 
 	// PodAnnotations are annotations applied to the Job's pod template.
 	// +kubebuilder:validation:MaxProperties=100

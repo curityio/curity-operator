@@ -52,10 +52,6 @@ type IdentityServerClusterSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k in ['curity.io/owned-by', 'curity.io/cluster', 'curity.io/role']))",message="podLabels cannot include operator-owned curity.io/* keys: owned-by, cluster, role"
 	PodLabels map[string]string `json:"podLabels,omitempty"`
 
-	// Resources defines default CPU and memory requests/limits for pods.
-	// Node-level resources override these.
-	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
-
 	// Probes configures default liveness and readiness probes for pods.
 	// Node-level probes override these.
 	Probes *ProbeSpec `json:"probes,omitempty"`
@@ -66,20 +62,9 @@ type IdentityServerClusterSpec struct {
 	// PodDisruptionBudget configures the minimum available pods during disruptions.
 	PodDisruptionBudget *PDBSpec `json:"podDisruptionBudget,omitempty"`
 
-	// NodeSelector constrains pods to nodes with matching labels.
-	// +kubebuilder:validation:MaxProperties=100
-	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
-
-	// Tolerations allow pods to schedule onto nodes with matching taints.
-	// +kubebuilder:validation:MaxItems=100
-	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
-
-	// TopologySpreadConstraints describe how pods should be spread across topology domains.
-	// +kubebuilder:validation:MaxItems=32
-	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
-
-	// Affinity defines scheduling constraints for pods.
-	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+	// CommonPodConfig adds the shared pod/scheduling knobs (resources,
+	// nodeSelector, tolerations, affinity, securityContext, …).
+	CommonPodConfig `json:",inline"`
 
 	// InitContainers are user-defined init containers run after the operator's
 	// package-fetcher init containers. They cannot override operator-managed
@@ -95,27 +80,6 @@ type IdentityServerClusterSpec struct {
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:XValidation:rule="self.all(c, c.name != 'curity')",message="container name 'curity' is reserved by the operator"
 	ExtraContainers []corev1.Container `json:"extraContainers,omitempty"`
-
-	// SecurityContext overrides the pod-level security context. Unset fields
-	// inherit the operator defaults (runAsUser 10001, runAsGroup/fsGroup 10000).
-	// Node-level value replaces this entirely.
-	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
-
-	// ContainerSecurityContext sets the security context of the main Curity
-	// container. Node-level value replaces this entirely.
-	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
-
-	// TerminationGracePeriodSeconds overrides the pod termination grace period
-	// (default 30). Raise it (60-180 typical) for Curity's JVM shutdown under load.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=3600
-	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
-
-	// ImagePullPolicy overrides the pull policy of the main Curity container.
-	// When unset it defaults like Kubernetes: Always for a :latest or untagged
-	// image, otherwise IfNotPresent.
-	// +kubebuilder:validation:Enum=Always;Never;IfNotPresent
-	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 
 	// NetworkPolicy, when set, makes the operator manage a NetworkPolicy that
 	// restricts ingress to the admin node (mirrors the Helm chart's

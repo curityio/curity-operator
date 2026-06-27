@@ -40,21 +40,23 @@ var _ = Describe("Deployment scheduling", func() {
 		cluster := &v1alpha1.IdentityServerCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "sched-cluster", Namespace: ns},
 			Spec: v1alpha1.IdentityServerClusterSpec{
-				Version:      "11.0",
-				NodeSelector: map[string]string{"disk": "ssd", "zone": "us-west"},
-				Tolerations: []corev1.Toleration{
-					{Key: "special", Operator: corev1.TolerationOpExists},
-				},
-				Affinity: &corev1.Affinity{
-					NodeAffinity: &corev1.NodeAffinity{
-						RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
-							NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-								MatchExpressions: []corev1.NodeSelectorRequirement{{
-									Key:      "kubernetes.io/arch",
-									Operator: corev1.NodeSelectorOpIn,
-									Values:   []string{"amd64"},
+				Version: "11.0",
+				CommonPodConfig: v1alpha1.CommonPodConfig{
+					NodeSelector: map[string]string{"disk": "ssd", "zone": "us-west"},
+					Tolerations: []corev1.Toleration{
+						{Key: "special", Operator: corev1.TolerationOpExists},
+					},
+					Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+								NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+									MatchExpressions: []corev1.NodeSelectorRequirement{{
+										Key:      "kubernetes.io/arch",
+										Operator: corev1.NodeSelectorOpIn,
+										Values:   []string{"amd64"},
+									}},
 								}},
-							}},
+							},
 						},
 					},
 				},
@@ -123,10 +125,12 @@ var _ = Describe("Deployment scheduling", func() {
 		cluster := &v1alpha1.IdentityServerCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "override-cluster", Namespace: ns},
 			Spec: v1alpha1.IdentityServerClusterSpec{
-				Version:      "11.0",
-				NodeSelector: map[string]string{"pool": "default"},
-				Tolerations: []corev1.Toleration{
-					{Key: "old-taint", Operator: corev1.TolerationOpExists},
+				Version: "11.0",
+				CommonPodConfig: v1alpha1.CommonPodConfig{
+					NodeSelector: map[string]string{"pool": "default"},
+					Tolerations: []corev1.Toleration{
+						{Key: "old-taint", Operator: corev1.TolerationOpExists},
+					},
 				},
 			},
 		}
@@ -140,9 +144,11 @@ var _ = Describe("Deployment scheduling", func() {
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "override-cluster"},
 				Replicas:                 ptr.To(int32(1)),
 				Service:                  defaultTestService(),
-				NodeSelector:             map[string]string{"pool": "gpu"},
-				Tolerations: []corev1.Toleration{
-					{Key: "new-taint", Operator: corev1.TolerationOpEqual, Value: "yes"},
+				CommonPodConfig: v1alpha1.CommonPodConfig{
+					NodeSelector: map[string]string{"pool": "gpu"},
+					Tolerations: []corev1.Toleration{
+						{Key: "new-taint", Operator: corev1.TolerationOpEqual, Value: "yes"},
+					},
 				},
 			},
 		}
@@ -163,14 +169,16 @@ var _ = Describe("Deployment scheduling", func() {
 			ObjectMeta: metav1.ObjectMeta{Name: "topo-cluster", Namespace: ns},
 			Spec: v1alpha1.IdentityServerClusterSpec{
 				Version: "11.0",
-				TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
-					MaxSkew:           1,
-					TopologyKey:       "topology.kubernetes.io/zone",
-					WhenUnsatisfiable: corev1.ScheduleAnyway,
-					LabelSelector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"app": "curity"},
-					},
-				}},
+				CommonPodConfig: v1alpha1.CommonPodConfig{
+					TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+						MaxSkew:           1,
+						TopologyKey:       "topology.kubernetes.io/zone",
+						WhenUnsatisfiable: corev1.ScheduleAnyway,
+						LabelSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{"app": "curity"},
+						},
+					}},
+				},
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
@@ -186,8 +194,10 @@ var _ = Describe("Deployment scheduling", func() {
 		cluster := &v1alpha1.IdentityServerCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "update-cluster", Namespace: ns},
 			Spec: v1alpha1.IdentityServerClusterSpec{
-				Version:      "11.0",
-				NodeSelector: map[string]string{"env": "staging"},
+				Version: "11.0",
+				CommonPodConfig: v1alpha1.CommonPodConfig{
+					NodeSelector: map[string]string{"env": "staging"},
+				},
 			},
 		}
 		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())

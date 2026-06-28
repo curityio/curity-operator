@@ -792,8 +792,7 @@ type DatabaseJobTemplate struct {
 	// +kubebuilder:validation:MaxLength=253
 	PriorityClassName string `json:"priorityClassName,omitempty"`
 
-	// CommonPodConfig adds the shared pod/scheduling knobs (resources,
-	// nodeSelector, tolerations, affinity, securityContext, …).
+	// CommonPodConfig holds the shared pod/scheduling knobs.
 	CommonPodConfig `json:",inline"`
 
 	// PodAnnotations are annotations applied to the Job's pod template.

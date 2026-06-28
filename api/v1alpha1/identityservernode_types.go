@@ -81,8 +81,7 @@ type IdentityServerNodeSpec struct {
 	// PodDisruptionBudget configures the minimum available pods during disruptions.
 	PodDisruptionBudget *PDBSpec `json:"podDisruptionBudget,omitempty"`
 
-	// CommonPodConfig adds the shared pod/scheduling knobs (resources,
-	// nodeSelector, tolerations, affinity, securityContext, …).
+	// CommonPodConfig holds the shared pod/scheduling knobs; node values override the cluster's.
 	CommonPodConfig `json:",inline"`
 
 	// InitContainers are user-defined init containers run after the operator's

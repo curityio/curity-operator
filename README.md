@@ -223,6 +223,91 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 >
 > Avoid the container names the operator generates: **`curity`** (the main container — rejected at admission), **`package-fetch-<n>`** (one per `spec.packages`), and **one per `spec.logging.logs` entry** (the log sidecars, e.g. `request`). `curity` is blocked by CEL; the dynamic ones (package/log) can't be — a collision is caught at Deployment creation and surfaced as `Degraded=InvalidSpec` with a message naming the conflicting source.
 
+### IdentityServerDatabase (`isdb`)
+
+Manages the Curity Identity Server database schema. Creating one triggers a **run-once Job** that executes `/opt/idsvr/bin/idsvr -I` using the **same container image as the referenced `IdentityServerCluster`**. The Job is re-run whenever the resolved cluster image (a `version` bump or `image` override) **or** this resource's own spec changes — handy for re-pointing at a new database.
+
+| Field | Type | Description |
+|---|---|---|
+| `identityServerClusterRef` | object, required | `{name: "<cluster>"}` reference (same namespace). Supplies the image; a change to its `version`/`image` re-triggers the Job |
+| `connection` | object, required | JDBC settings projected onto `JDBC_URL`, `JDBC_USERNAME`, `JDBC_PASSWORD`. See below |
+| `jobTemplate` | object | Standard Kubernetes Job/Pod settings for the schema-management Job (all optional). See below |
+
+**`connection`** — JDBC settings may be set inline, per-field from a Secret, or sourced wholesale from one Secret:
+
+| Field | Type | Description |
+|---|---|---|
+| `secretRef` | string | Name of a Secret whose `JDBC_URL`/`JDBC_USERNAME`/`JDBC_PASSWORD` keys are loaded as env vars (`envFrom`, optional). Use it to keep the whole connection in one Secret |
+| `url` | object | Sets `JDBC_URL`. **Required unless `secretRef` is set** (enforced at admission). `{value: "..."}` or `{valueFrom: {secretKeyRef: {...}}}` |
+| `username` | object | Sets `JDBC_USERNAME`. Optional. Same value/valueFrom shape |
+| `password` | object | Sets `JDBC_PASSWORD`. Optional; prefer `valueFrom.secretKeyRef` over an inline value |
+
+A `ValueSource` (`url`/`username`/`password`) must set **exactly one** of `value`/`valueFrom`. Per-field settings are applied after `secretRef`, so an explicit field **overrides** the matching key from `secretRef`. When `secretRef` is the only URL source and the referenced Secret has no `JDBC_URL` key, the operator does not launch a Job and reports `Ready=False` with reason `JDBCURLMissing`.
+
+**`jobTemplate`** — every field optional:
+
+| Field | Type | Description |
+|---|---|---|
+| `resources` | object | CPU/memory requests/limits on the `idsvr` container |
+| `securityContext` | object | Pod-level security context; merged over operator defaults (`runAsUser 10001`, `runAsGroup`/`fsGroup 10000`) |
+| `containerSecurityContext` | object | Security context for the `idsvr` container |
+| `serviceAccountName` | string | ServiceAccount for the pod |
+| `automountServiceAccountToken` | bool | Defaults to `false` (no Kubernetes API access needed) |
+| `imagePullPolicy` | enum: `Always`/`Never`/`IfNotPresent` | Pull policy; unset → tag-aware default |
+| `imagePullSecret` | string | Image pull Secret; unset falls back to the cluster's `imagePullSecret` |
+| `env` | list | Extra env vars, appended after the `JDBC_*` vars. Redefining a `JDBC_*` var is rejected at admission |
+| `backoffLimit` | int32 (0–100) | Job retries before it is marked failed (default `3`) |
+| `activeDeadlineSeconds` | int64 | Hard time limit for the Job |
+| `ttlSecondsAfterFinished` | int32 | Garbage-collect the finished Job after this many seconds |
+| `nodeSelector` / `tolerations` / `affinity` / `topologySpreadConstraints` | map/list/object | Pod scheduling constraints |
+| `priorityClassName` | string | Pod PriorityClass |
+| `terminationGracePeriodSeconds` | int64 (0–3600) | Pod shutdown grace period |
+| `podAnnotations` / `podLabels` | map | Applied to the Job's pod template (operator-owned `curity.io/*` keys rejected in `podLabels`) |
+
+Status conditions: `Complete` (Job succeeded), `Failed` (Job exhausted retries), `Progressing` (running), and `Ready` (mirrors `Complete`). The Job is owned by the `IdentityServerDatabase`, so deleting the resource removes the Job.
+
+Minimal example (inline URL, password from a Secret):
+
+```yaml
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerDatabase
+metadata:
+  name: acct-schema
+  namespace: curity
+spec:
+  identityServerClusterRef:
+    name: demo
+  connection:
+    url:
+      value: "jdbc:postgresql://postgres:5432/curity"
+    username:
+      value: curity
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: db-credentials
+          key: password
+```
+
+Whole connection from one Secret (the Secret holds `JDBC_URL`, `JDBC_USERNAME`, `JDBC_PASSWORD`):
+
+```yaml
+spec:
+  identityServerClusterRef:
+    name: demo
+  connection:
+    secretRef: db-connection
+  jobTemplate:
+    serviceAccountName: db-migrator
+    resources:
+      requests:
+        cpu: 250m
+        memory: 256Mi
+    containerSecurityContext:
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+```
+
 ### How nodes inherit cluster settings
 
 Most cluster-level settings apply to every node and can be overridden per node. How a node value combines with the cluster value depends on the field's type:

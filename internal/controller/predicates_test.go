@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -1044,5 +1045,161 @@ func TestClusterConfigPodChangedPredicate_NilGuards(t *testing.T) {
 	}
 	if p.Update(event.UpdateEvent{ObjectOld: clusterConfigPod("p"), ObjectNew: nil}) {
 		t.Error("nil ObjectNew must drop")
+	}
+}
+
+// ============================================================================
+// databaseInitPodChangedPredicate (Pod watch for database-init Job pods)
+// ============================================================================
+
+func databaseInitPod(name string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "ns",
+			Labels:    map[string]string{componentLabel: databaseComponentValue},
+		},
+	}
+}
+
+func TestDatabaseInitPodChangedPredicate_LabelGateAndCreate(t *testing.T) {
+	p := databaseInitPodChangedPredicate{}
+	unlabeled := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "ns"}}
+	if p.Update(event.UpdateEvent{ObjectOld: unlabeled, ObjectNew: unlabeled}) {
+		t.Error("unlabeled Pod Update must drop")
+	}
+	if p.Delete(event.DeleteEvent{Object: unlabeled}) {
+		t.Error("unlabeled Pod Delete must drop")
+	}
+	if p.Create(event.CreateEvent{Object: databaseInitPod("p")}) {
+		t.Error("Create must always drop (no status yet)")
+	}
+	if !p.Delete(event.DeleteEvent{Object: databaseInitPod("p")}) {
+		t.Error("Delete must pass for labeled pod")
+	}
+}
+
+func TestDatabaseInitPodChangedPredicate_UpdateDiff(t *testing.T) {
+	p := databaseInitPodChangedPredicate{}
+
+	// Identical pods → drop (no kubelet-heartbeat churn).
+	same := databaseInitPod("p")
+	same.Status.Phase = corev1.PodPending
+	if p.Update(event.UpdateEvent{ObjectOld: same, ObjectNew: same}) {
+		t.Error("identical Update must drop")
+	}
+
+	// Phase change → pass.
+	oldP := databaseInitPod("p")
+	oldP.Status.Phase = corev1.PodPending
+	running := databaseInitPod("p")
+	running.Status.Phase = corev1.PodRunning
+	if !p.Update(event.UpdateEvent{ObjectOld: oldP, ObjectNew: running}) {
+		t.Error("phase change must pass")
+	}
+
+	// Init container waiting-state change → pass.
+	stuck := databaseInitPod("p")
+	stuck.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  databaseContainerName,
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+	}}
+	if !p.Update(event.UpdateEvent{ObjectOld: databaseInitPod("p"), ObjectNew: stuck}) {
+		t.Error("init container waiting-state change must pass")
+	}
+}
+
+func opaqueSecret(name string, data map[string][]byte, labels map[string]string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Labels: labels},
+		Type:       corev1.SecretTypeOpaque,
+		Data:       data,
+	}
+}
+
+func TestConnectionSecretChangedPredicate(t *testing.T) {
+	p := connectionSecretChangedPredicate{}
+
+	// Non-Opaque (e.g. SA token) is dropped.
+	tok := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "t", Namespace: "ns"}, Type: corev1.SecretTypeServiceAccountToken}
+	if p.Create(event.CreateEvent{Object: tok}) {
+		t.Error("non-Opaque Secret must drop")
+	}
+
+	// Create/Delete of an Opaque Secret pass.
+	s := opaqueSecret("db-conn", map[string][]byte{"JDBC_PASSWORD": []byte("x")}, nil)
+	if !p.Create(event.CreateEvent{Object: s}) {
+		t.Error("Opaque Create must pass")
+	}
+	if !p.Delete(event.DeleteEvent{Object: s}) {
+		t.Error("Opaque Delete must pass")
+	}
+
+	// Metadata-only edit (label added, same .data) → drop.
+	oldS := opaqueSecret("db-conn", map[string][]byte{"JDBC_PASSWORD": []byte("x")}, nil)
+	labeled := opaqueSecret("db-conn", map[string][]byte{"JDBC_PASSWORD": []byte("x")}, map[string]string{"team": "iam"})
+	if p.Update(event.UpdateEvent{ObjectOld: oldS, ObjectNew: labeled}) {
+		t.Error("metadata-only edit must drop (no .data change)")
+	}
+
+	// .data change → pass.
+	changed := opaqueSecret("db-conn", map[string][]byte{"JDBC_PASSWORD": []byte("fixed")}, nil)
+	if !p.Update(event.UpdateEvent{ObjectOld: oldS, ObjectNew: changed}) {
+		t.Error(".data change must pass")
+	}
+}
+
+func TestJobStatusDiffers(t *testing.T) {
+	base := &batchv1.Job{Status: batchv1.JobStatus{Active: 1}}
+
+	if jobStatusDiffers(base, base.DeepCopy()) {
+		t.Error("identical status should not differ")
+	}
+
+	succeeded := base.DeepCopy()
+	succeeded.Status.Active = 0
+	succeeded.Status.Succeeded = 1
+	if !jobStatusDiffers(base, succeeded) {
+		t.Error("succeeded-count change should differ")
+	}
+
+	failed := base.DeepCopy()
+	failed.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue}}
+	if !jobStatusDiffers(base, failed) {
+		t.Error("Failed condition appearing should differ")
+	}
+
+	readyOnly := base.DeepCopy()
+	readyOnly.Status.Ready = ptr.To(int32(1))
+	if !jobStatusDiffers(base, readyOnly) {
+		t.Error("ready-count change should differ")
+	}
+}
+
+func TestJobStatusChangedPredicate_Update(t *testing.T) {
+	p := jobStatusChangedPredicate{}
+	old := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"a": "1"}}}
+
+	labelOnly := old.DeepCopy()
+	labelOnly.Labels["a"] = "2"
+	if p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: labelOnly}) {
+		t.Error("label-only update should be dropped")
+	}
+
+	statusChange := old.DeepCopy()
+	statusChange.Status.Succeeded = 1
+	if !p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: statusChange}) {
+		t.Error("status change should pass")
+	}
+
+	deleting := old.DeepCopy()
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	if !p.Update(event.UpdateEvent{ObjectOld: old, ObjectNew: deleting}) {
+		t.Error("deletionTimestamp set should pass")
+	}
+
+	if p.Update(event.UpdateEvent{ObjectOld: &corev1.Pod{}, ObjectNew: &corev1.Pod{}}) {
+		t.Error("non-Job update should be dropped")
 	}
 }

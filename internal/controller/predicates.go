@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"strings"
 
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -398,6 +400,150 @@ func equalInitContainerStatus(a, b *corev1.ContainerStatus) bool {
 		return false
 	}
 	return equalContainerState(a.LastTerminationState, b.LastTerminationState)
+}
+
+// databaseInitPodChangedPredicate passes database-init Pod events the translator
+// cares about: drops Create (no status yet), passes Delete, passes Update only
+// when Phase/PodScheduled/container-state changed — no kubelet-heartbeat churn.
+type databaseInitPodChangedPredicate struct {
+	predicate.Funcs
+}
+
+func (p databaseInitPodChangedPredicate) Create(_ event.CreateEvent) bool { return false }
+
+func (p databaseInitPodChangedPredicate) Generic(_ event.GenericEvent) bool { return false }
+
+func (p databaseInitPodChangedPredicate) Delete(e event.DeleteEvent) bool {
+	return isDatabaseInitPod(e.Object)
+}
+
+func (p databaseInitPodChangedPredicate) Update(e event.UpdateEvent) bool {
+	newPod, ok := e.ObjectNew.(*corev1.Pod)
+	if !ok || !isDatabaseInitPod(newPod) {
+		return false
+	}
+	oldPod, ok := e.ObjectOld.(*corev1.Pod)
+	if !ok {
+		return false
+	}
+	return databaseInitPodStatusDiffers(oldPod, newPod)
+}
+
+func isDatabaseInitPod(obj client.Object) bool {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok || pod == nil {
+		return false
+	}
+	return pod.Labels[componentLabel] == databaseComponentValue
+}
+
+// connectionSecretChangedPredicate passes Opaque connection-Secret events whose
+// .data (or type) changed, so metadata-only edits don't wake a reconcile.
+// Create/Delete pass; the mapfunc confirms the reference.
+type connectionSecretChangedPredicate struct {
+	predicate.Funcs
+}
+
+func (p connectionSecretChangedPredicate) Create(e event.CreateEvent) bool {
+	return isConnectionSecretCandidate(e.Object)
+}
+
+func (p connectionSecretChangedPredicate) Delete(e event.DeleteEvent) bool {
+	return isConnectionSecretCandidate(e.Object)
+}
+
+func (p connectionSecretChangedPredicate) Generic(_ event.GenericEvent) bool { return false }
+
+func (p connectionSecretChangedPredicate) Update(e event.UpdateEvent) bool {
+	oldSecret, oldOK := e.ObjectOld.(*corev1.Secret)
+	newSecret, newOK := e.ObjectNew.(*corev1.Secret)
+	if !oldOK || !newOK || oldSecret == nil || newSecret == nil {
+		return false
+	}
+	if !isConnectionSecretCandidate(newSecret) {
+		return false
+	}
+	if oldSecret.Type != newSecret.Type {
+		return true
+	}
+	return !secretDataEqual(oldSecret.Data, newSecret.Data)
+}
+
+// isConnectionSecretCandidate passes Opaque/untyped Secrets — the kind a JDBC
+// connection uses — so SA-token/dockercfg/TLS churn is skipped.
+func isConnectionSecretCandidate(obj client.Object) bool {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok || secret == nil {
+		return false
+	}
+	return secret.Type == "" || secret.Type == corev1.SecretTypeOpaque
+}
+
+// databaseInitPodStatusDiffers mirrors clusterConfigPodStatusDiffers for the
+// database-init container: true only when Phase, the PodScheduled condition, or
+// the container's state changed.
+func databaseInitPodStatusDiffers(oldPod, newPod *corev1.Pod) bool {
+	if oldPod.Status.Phase != newPod.Status.Phase {
+		return true
+	}
+	if !equalPodScheduledCondition(oldPod.Status.Conditions, newPod.Status.Conditions) {
+		return true
+	}
+	oldByName := indexContainerStatusesByName(oldPod.Status.ContainerStatuses)
+	for i := range newPod.Status.ContainerStatuses {
+		newStat := &newPod.Status.ContainerStatuses[i]
+		if newStat.Name != databaseContainerName {
+			continue
+		}
+		oldStat, found := oldByName[newStat.Name]
+		if !found {
+			return true
+		}
+		return !equalInitContainerStatus(oldStat, newStat)
+	}
+	return false
+}
+
+// jobStatusChangedPredicate drops Job updates the reconciler doesn't read.
+// GenerationChangedPredicate can't be used: Job generation never bumps on
+// status, so it would drop the completion events the controller depends on.
+type jobStatusChangedPredicate struct {
+	predicate.Funcs
+}
+
+func (p jobStatusChangedPredicate) Update(e event.UpdateEvent) bool {
+	oldJob, ok := e.ObjectOld.(*batchv1.Job)
+	if !ok {
+		return false
+	}
+	newJob, ok := e.ObjectNew.(*batchv1.Job)
+	if !ok {
+		return false
+	}
+	if oldJob.DeletionTimestamp.IsZero() && !newJob.DeletionTimestamp.IsZero() {
+		return true
+	}
+	return jobStatusDiffers(oldJob, newJob)
+}
+
+func jobStatusDiffers(oldJob, newJob *batchv1.Job) bool {
+	if oldJob.Status.Active != newJob.Status.Active ||
+		oldJob.Status.Succeeded != newJob.Status.Succeeded ||
+		oldJob.Status.Failed != newJob.Status.Failed ||
+		ptr.Deref(oldJob.Status.Ready, -1) != ptr.Deref(newJob.Status.Ready, -1) {
+		return true
+	}
+	return jobConditionStatus(oldJob, batchv1.JobComplete) != jobConditionStatus(newJob, batchv1.JobComplete) ||
+		jobConditionStatus(oldJob, batchv1.JobFailed) != jobConditionStatus(newJob, batchv1.JobFailed)
+}
+
+func jobConditionStatus(job *batchv1.Job, condType batchv1.JobConditionType) corev1.ConditionStatus {
+	for i := range job.Status.Conditions {
+		if job.Status.Conditions[i].Type == condType {
+			return job.Status.Conditions[i].Status
+		}
+	}
+	return corev1.ConditionUnknown
 }
 
 // clusterConfigPodChangedPredicate filters Pod events down to genclust Job

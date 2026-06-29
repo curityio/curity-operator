@@ -43,6 +43,39 @@ const (
 	// while a source Secret is missing or a conversion fails. Omitted entirely
 	// when convertKeystore is empty.
 	ConditionConvertKeystoreReady = "ConvertKeystoreReady"
+	// ConditionComplete on an IdentityServerDatabase reports whether the
+	// database-init Job has finished successfully.
+	ConditionComplete = "Complete"
+	// ConditionFailed on an IdentityServerDatabase reports whether the
+	// database-init Job exhausted its retries without succeeding.
+	ConditionFailed = "Failed"
+)
+
+// Reason values for IdentityServerDatabase conditions.
+const (
+	// ReasonJobCreated is set on Progressing when the database-init Job has just
+	// been created (or recreated after an image/spec change).
+	ReasonJobCreated = "JobCreated"
+	// ReasonJobRunning is set on Progressing while the Job is running.
+	ReasonJobRunning = "JobRunning"
+	// ReasonJobComplete is set on Ready=True/Complete=True when the Job succeeded.
+	ReasonJobComplete = "JobComplete"
+	// ReasonJobFailed is set on Ready=False/Failed=True when the Job failed.
+	ReasonJobFailed = "JobFailed"
+	// ReasonJDBCURLMissing is set on Ready=False when connection.secretRef is the
+	// only declared URL source but the referenced Secret has no JDBC_URL key.
+	ReasonJDBCURLMissing = "JDBCURLMissing"
+	// ReasonConnectionSecretMissing is set on Ready=False when connection.secretRef
+	// points at a Secret that does not exist.
+	ReasonConnectionSecretMissing = "ConnectionSecretMissing"
+	// ReasonConnectionKeyMissing is set on Ready=False when a per-field
+	// connection secretKeyRef (username/password) names a key absent from the
+	// referenced Secret.
+	ReasonConnectionKeyMissing = "ConnectionKeyMissing"
+	// ReasonJobPodNotStarting is set on Progressing=True/Ready=False when the
+	// Job's pod cannot start (unschedulable, image pull failure, or container
+	// config error) — a state the Job itself never reports as complete or failed.
+	ReasonJobPodNotStarting = "JobPodNotStarting"
 )
 
 // Reason values used across multiple condition types. Each constant names
@@ -627,4 +660,166 @@ type NetworkPolicySpec struct {
 	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	APIGatewayNamespace string `json:"apiGatewayNamespace,omitempty"`
+}
+
+// ValueSource provides a string value either inline or from a Secret key.
+// Exactly one of value/secretKeyRef must be set. A non-secret value belongs in
+// value; secretKeyRef is for secrets like a JDBC password. (Unlike a raw env
+// var there is no fieldRef/resourceFieldRef — pod metadata and resource
+// quantities are meaningless for a connection setting.)
+// +kubebuilder:validation:XValidation:rule="has(self.value) != has(self.secretKeyRef)",message="exactly one of value or secretKeyRef must be set"
+type ValueSource struct {
+	// Value is the literal value. Mutually exclusive with secretKeyRef.
+	// +kubebuilder:validation:MaxLength=2048
+	Value string `json:"value,omitempty"`
+
+	// SecretKeyRef names the Secret and key holding the value. Mutually
+	// exclusive with value.
+	SecretKeyRef *ConnectionSecretKeyRef `json:"secretKeyRef,omitempty"`
+}
+
+// ConnectionSecretKeyRef selects one key in a Secret. It has no Optional knob:
+// a referenced key is always required, so the controller can reject a missing one.
+type ConnectionSecretKeyRef struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Key string `json:"key"`
+}
+
+// JDBCConnection describes how the database-init Job obtains its JDBC
+// connection settings. Each setting maps onto an environment variable read by
+// idsvr: url -> JDBC_URL, username -> JDBC_USERNAME, password -> JDBC_PASSWORD.
+//
+// Settings may be provided two ways, in increasing precedence:
+//  1. secretRef — a Secret whose JDBC_URL / JDBC_USERNAME / JDBC_PASSWORD keys
+//     are loaded as env vars (envFrom, optional so missing keys are tolerated).
+//  2. url/username/password — per-field inline value or secretKeyRef.
+//     These are appended after envFrom, so an explicit field overrides the
+//     matching key from secretRef.
+//
+// JDBC_URL must come from somewhere: if secretRef is unset, url is required.
+// CEL enforces that a source is declared; whether a secretRef Secret actually
+// carries a JDBC_URL key is verified by the controller at reconcile time.
+// +kubebuilder:validation:XValidation:rule="has(self.secretRef) || has(self.url)",message="connection.url is required unless connection.secretRef is set (JDBC_URL must come from somewhere)"
+type JDBCConnection struct {
+	// SecretRef is the name of a Secret in the same namespace whose
+	// JDBC_URL / JDBC_USERNAME / JDBC_PASSWORD keys are loaded into the Job's
+	// container as environment variables. Use it to keep the whole connection
+	// in one Secret. Missing keys are tolerated (envFrom optional).
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
+	SecretRef string `json:"secretRef,omitempty"`
+
+	// URL sets JDBC_URL. Required unless secretRef is set; overrides a
+	// JDBC_URL key from secretRef when both are present.
+	URL *ValueSource `json:"url,omitempty"`
+
+	// Username sets JDBC_USERNAME. Optional; overrides secretRef's JDBC_USERNAME.
+	Username *ValueSource `json:"username,omitempty"`
+
+	// Password sets JDBC_PASSWORD. Optional; overrides secretRef's JDBC_PASSWORD.
+	// Prefer secretKeyRef over an inline value.
+	Password *ValueSource `json:"password,omitempty"`
+}
+
+// DatabaseJobTemplate carries the standard Kubernetes Job/Pod knobs that may be
+// configured on the database-init Job. Every field is optional; unset fields
+// fall back to operator defaults (and, for image pull settings, to the
+// referenced cluster). It is intentionally close to the pod-level fields on
+// IdentityServerClusterSpec so the two read alike.
+type DatabaseJobTemplate struct {
+	// BackoffLimit is the number of retries before the Job is marked failed.
+	// Defaults to 3.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
+
+	// ActiveDeadlineSeconds bounds the Job's running time; it fails if it runs
+	// longer. Unset means no deadline.
+	// +kubebuilder:validation:Minimum=1
+	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
+
+	// TTLSecondsAfterFinished lets Kubernetes garbage-collect the finished Job
+	// (and its pods) after this many seconds. Unset means the Job is retained
+	// until its owning IdentityServerDatabase is deleted.
+	// +kubebuilder:validation:Minimum=0
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
+
+	// ServiceAccountName runs the Job's pod under this ServiceAccount. Unset
+	// uses the namespace default; the operator does not mount a token unless
+	// automountServiceAccountToken is explicitly true.
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// AutomountServiceAccountToken controls whether the SA token is mounted.
+	// Defaults to false (the Job needs no Kubernetes API access).
+	AutomountServiceAccountToken *bool `json:"automountServiceAccountToken,omitempty"`
+
+	// Resources sets CPU/memory requests and limits on the idsvr container.
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// SecurityContext sets the pod-level security context. Unset fields inherit
+	// the operator defaults (runAsUser 10001, runAsGroup/fsGroup 10000).
+	SecurityContext *corev1.PodSecurityContext `json:"securityContext,omitempty"`
+
+	// ContainerSecurityContext sets the security context of the idsvr container.
+	ContainerSecurityContext *corev1.SecurityContext `json:"containerSecurityContext,omitempty"`
+
+	// ImagePullPolicy overrides the pull policy of the idsvr container. Unset
+	// defaults like Kubernetes (Always for :latest/untagged, else IfNotPresent).
+	// +kubebuilder:validation:Enum=Always;Never;IfNotPresent
+	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
+
+	// ImagePullSecret names a Secret for pulling the image. Unset falls back to
+	// the referenced cluster's imagePullSecret.
+	// +kubebuilder:validation:MaxLength=253
+	ImagePullSecret string `json:"imagePullSecret,omitempty"`
+
+	// Env appends extra environment variables to the idsvr container, after the
+	// JDBC_* variables. Names colliding with JDBC_URL/JDBC_USERNAME/JDBC_PASSWORD
+	// are rejected at admission.
+	// +kubebuilder:validation:MaxItems=100
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !(e.name in ['JDBC_URL','JDBC_USERNAME','JDBC_PASSWORD']))",message="env must not redefine JDBC_URL, JDBC_USERNAME or JDBC_PASSWORD; use spec.connection instead"
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// NodeSelector constrains the pod to nodes with matching labels.
+	// +kubebuilder:validation:MaxProperties=100
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations allow the pod to schedule onto nodes with matching taints.
+	// +kubebuilder:validation:MaxItems=100
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// TopologySpreadConstraints describe how the pod spreads across topology domains.
+	// +kubebuilder:validation:MaxItems=32
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// Affinity defines scheduling constraints for the pod.
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// PriorityClassName sets the pod's PriorityClass.
+	// +kubebuilder:validation:MaxLength=253
+	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// TerminationGracePeriodSeconds overrides the pod termination grace period.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=3600
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
+
+	// PodAnnotations are annotations applied to the Job's pod template.
+	// +kubebuilder:validation:MaxProperties=100
+	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
+
+	// PodLabels are labels applied to the Job's pod template. Operator-owned
+	// keys (curity.io/cluster, curity.io/component, curity.io/database) are rejected.
+	// +kubebuilder:validation:MaxProperties=100
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !(k in ['curity.io/cluster', 'curity.io/component', 'curity.io/database']))",message="podLabels cannot include operator-owned curity.io/* keys: cluster, component, database"
+	PodLabels map[string]string `json:"podLabels,omitempty"`
 }

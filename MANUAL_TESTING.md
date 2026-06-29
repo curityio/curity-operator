@@ -325,7 +325,64 @@ Files are prefixed `cm_<name>_…` for ConfigMaps and `secret_<name>_…` for Se
 
 ---
 
-## 5. Iterating
+## 5. Database schema management (`IdentityServerDatabase`)
+
+Initialize the Curity database schema with a run-once Job (`idsvr -I`) that uses
+the same image as the cluster from step 3b.
+
+```bash
+cat <<'EOF' | kubectl apply -f -
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerDatabase
+metadata:
+  name: acct-schema
+  namespace: curity
+spec:
+  identityServerClusterRef:
+    name: example-cluster      # the IdentityServerCluster from step 3b
+  connection:
+    url:
+      value: "jdbc:postgresql://postgres:5432/curity"
+    username:
+      value: curity
+    password:
+      valueFrom:
+        secretKeyRef:
+          name: db-credentials
+          key: password
+EOF
+```
+
+Verify the Job was created and runs `idsvr -I` with the cluster's image:
+
+```bash
+kubectl -n curity get isdb
+kubectl -n curity get job acct-schema-db-init-job -o jsonpath='{.spec.template.spec.containers[0].command}{"\n"}'
+kubectl -n curity get isdb acct-schema -o jsonpath='{.status.conditions}{"\n"}' | jq .
+```
+
+Confirm it re-triggers on a version/image change — bump the cluster and watch the
+Job's trigger hash change (the old Job is replaced):
+
+```bash
+kubectl -n curity get job acct-schema-db-init-job -o jsonpath='{.metadata.annotations.curity\.io/database-job-hash}{"\n"}'
+kubectl -n curity patch isc example-cluster --type=merge -p '{"spec":{"image":"curity.azurecr.io/curity/idsvr:11.1"}}'
+# re-run the hash command above — it changes, and a fresh Job is created
+```
+
+Whole connection from one Secret instead of inline values:
+
+```bash
+kubectl -n curity create secret generic db-connection \
+  --from-literal=JDBC_URL='jdbc:postgresql://postgres:5432/curity' \
+  --from-literal=JDBC_USERNAME='curity' \
+  --from-literal=JDBC_PASSWORD='s3cret'
+# then set spec.connection.secretRef: db-connection (and drop spec.connection.url/username/password)
+```
+
+---
+
+## 6. Iterating
 
 Code change → reload the operator:
 
@@ -344,11 +401,12 @@ kubectl -n curity-operator logs -f deploy/curity-operator-controller-manager -c 
 
 ---
 
-## 6. Cleanup checklist
+## 7. Cleanup checklist
 
 ```bash
 # Application resources first (so finalizers can run while the operator is alive)
 kubectl delete -f runtime.yaml -f admin.yaml -f isc.yaml --ignore-not-found
+kubectl -n curity delete isdb --all --ignore-not-found
 
 # Then the operator
 make undeploy-helm     # or helm uninstall, for a remote cluster

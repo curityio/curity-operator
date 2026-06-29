@@ -133,6 +133,16 @@ func run(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to setup IdentityServerCluster controller: %w", err)
 	}
 
+	//nolint:staticcheck // TODO: migrate to events.EventRecorder
+	databaseRecorder := mgr.GetEventRecorderFor("identityserverdatabase-controller")
+	if err := (&controller.IdentityServerDatabaseReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: databaseRecorder,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("failed to setup IdentityServerDatabase controller: %w", err)
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("failed to setup health check: %w", err)
 	}

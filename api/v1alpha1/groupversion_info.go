@@ -21,6 +21,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&IdentityServerClusterList{},
 		&IdentityServerNode{},
 		&IdentityServerNodeList{},
+		&IdentityServerDatabase{},
+		&IdentityServerDatabaseList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

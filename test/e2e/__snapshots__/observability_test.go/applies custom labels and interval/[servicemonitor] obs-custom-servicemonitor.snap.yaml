@@ -1,0 +1,29 @@
+
+[IdentityServerCluster observability applies custom labels and interval - 1]
+metadata:
+  name: obs-custom-metrics-9ab891b7
+  namespace: e2e-observability
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    app.kubernetes.io/managed-by: curity-operator
+    curity.io/cluster: obs-custom
+    release: kube-prometheus-stack
+  ownerReferences: <Any value>
+  managedFields: <Any value>
+spec:
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: curity-operator
+      curity.io/cluster: obs-custom
+  namespaceSelector:
+    matchNames:
+      - e2e-observability
+
+---

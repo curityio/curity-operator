@@ -185,6 +185,7 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `affinity` | object | Advanced scheduling constraints |
 | `packages` | list | Remote ZIP archives downloaded and unpacked into every Curity container at startup. See [Packages](#packages) |
 | `convertKeystore` | list | Convert `kubernetes.io/tls` Secrets to base64 PKCS#12 keystores, published as env vars (e.g. `SSL_SERVER_KEY`) on every node. See [Converting TLS certificates to keystores](#converting-tls-certificates-to-keystores-convertkeystore) |
+| `observability.serviceMonitor` | object | Prometheus `ServiceMonitor` for the cluster's metrics. **On by default** where the Prometheus Operator is installed. See [Observability](#observability) |
 
 ### IdentityServerNode (`isn`)
 
@@ -466,6 +467,39 @@ spec:
 - **`logs`** drives the sidecars: a **non-empty list** adds one lightweight sidecar container per stream, each tailing the matching file from `/opt/idsvr/var/log/` so it appears in `kubectl logs <pod> -c <log-name>`. An empty or omitted list (or `level: OFF`) means no sidecars. Allowed values: `audit`, `request`, `cluster`, `confsvc`, `confsvc-internal`, `post-commit-scripts`.
 - Node-level `logging` overrides cluster-level entirely (not merged).
 - To replace Curity's log4j2 configuration wholesale, mount a `logging` config-type ConfigMap — see [Config Types](#config-types).
+
+## Observability
+
+Every Curity node exposes Prometheus metrics on port `4466` at `/metrics`. The operator can manage a Prometheus Operator [`ServiceMonitor`](https://prometheus-operator.dev/docs/api-reference/api/#monitoring.coreos.com/v1.ServiceMonitor) that scrapes the metrics endpoint of **all** nodes in the cluster (admin and runtime).
+
+**Scraping is on by default.** Wherever the Prometheus Operator (the `monitoring.coreos.com` CRDs) is installed, the operator creates one `ServiceMonitor` per cluster — you don't have to configure anything. Where the CRD is **not** installed, the feature is a silent no-op (no resource, no error).
+
+```yaml
+spec:
+  observability:
+    serviceMonitor:
+      enabled: true                    # default true; set false to opt out
+      interval: 30s                    # scrape interval (default 30s)
+      labels:                          # added to the ServiceMonitor metadata
+        release: kube-prometheus-stack # so a label-selecting Prometheus picks it up
+```
+
+- **`enabled`** — `true` by default; omit the whole block to keep scraping on. Set `enabled: false` to disable and delete the ServiceMonitor for this cluster.
+- **`labels`** — extra labels on the ServiceMonitor. A Prometheus deployed by the Prometheus Operator only scrapes ServiceMonitors matching its `serviceMonitorSelector`. `kube-prometheus-stack` defaults that selector to `release: <helm-release-name>`, so you usually need a matching `labels` entry; a Prometheus with an empty selector needs none. Keys in the operator-owned namespaces `curity.io/*` and `app.kubernetes.io/*` are rejected; removing a key later does not strip it from an existing ServiceMonitor.
+- **`interval`** — Prometheus scrape interval (`30s`, `1m`, …).
+
+The operator owns the ServiceMonitor (it is garbage-collected when the cluster is deleted) and selects node Services by the `curity.io/cluster=<name>` label, so nodes added or removed later are picked up automatically. The created ServiceMonitor's name is reported in `status.serviceMonitorName`.
+
+```sh
+# See the ServiceMonitor the operator created
+kubectl get servicemonitor -n <ns> -l app.kubernetes.io/managed-by=curity-operator
+
+# Or read its name from the cluster status
+kubectl get isc <cluster> -n <ns> -o jsonpath='{.status.serviceMonitorName}'
+```
+
+> **Prerequisite:** the Prometheus Operator must be installed (it provides the `ServiceMonitor` CRD). If you enable scraping explicitly (`enabled: true`) without it, the cluster emits a `ServiceMonitorCRDMissing` Warning event; with the default-on behavior and no CRD, the operator stays silent. Installing the Prometheus Operator after the fact requires restarting the operator pod (CRD discovery happens at startup).
+
 
 ## Packages
 

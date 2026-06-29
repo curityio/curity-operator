@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -16,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
@@ -3327,6 +3330,10 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 		// consumed via envFrom on nodes; it does not affect cluster.xml, so it
 		// must not trigger a genclust Job re-run.
 		"ConvertKeystore": true,
+		// Observability only governs a Prometheus ServiceMonitor; it has no
+		// bearing on cluster.xml or pod config, so it must not trigger a
+		// genclust Job re-run or a Deployment rollout.
+		"Observability": true,
 	}
 
 	// Recurse into anonymous embeds (CommonPodConfig) so each shared field is
@@ -4299,5 +4306,173 @@ func TestBuildVolumes_SkipsEnvTypedResources(t *testing.T) {
 		if m.Name != "cluster-config" {
 			t.Errorf("env-typed resource must not produce a mount; got %q", m.Name)
 		}
+	}
+}
+
+func clusterWithServiceMonitor(sm *v1alpha1.ServiceMonitorSpec) *v1alpha1.IdentityServerCluster {
+	c := newTestCluster()
+	c.Spec.Observability = &v1alpha1.ObservabilitySpec{ServiceMonitor: sm}
+	return c
+}
+
+func TestServiceMonitorEnabled_DefaultsOn(t *testing.T) {
+	tests := []struct {
+		name    string
+		cluster *v1alpha1.IdentityServerCluster
+		want    bool
+	}{
+		{"nil observability block", newTestCluster(), true},
+		{"nil serviceMonitor", clusterWithServiceMonitor(nil), true},
+		{"nil enabled", clusterWithServiceMonitor(&v1alpha1.ServiceMonitorSpec{}), true},
+		{"explicit true", clusterWithServiceMonitor(&v1alpha1.ServiceMonitorSpec{Enabled: ptr.To(true)}), true},
+		{"explicit false", clusterWithServiceMonitor(&v1alpha1.ServiceMonitorSpec{Enabled: ptr.To(false)}), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serviceMonitorEnabled(tt.cluster); got != tt.want {
+				t.Errorf("serviceMonitorEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExplicitlyEnabled_OnlyWhenWrittenTrue(t *testing.T) {
+	tests := []struct {
+		name    string
+		cluster *v1alpha1.IdentityServerCluster
+		want    bool
+	}{
+		{"nil observability block", newTestCluster(), false},
+		{"nil serviceMonitor", clusterWithServiceMonitor(nil), false},
+		{"nil enabled (defaulted on)", clusterWithServiceMonitor(&v1alpha1.ServiceMonitorSpec{}), false},
+		{"explicit true", clusterWithServiceMonitor(&v1alpha1.ServiceMonitorSpec{Enabled: ptr.To(true)}), true},
+		{"explicit false", clusterWithServiceMonitor(&v1alpha1.ServiceMonitorSpec{Enabled: ptr.To(false)}), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := explicitlyEnabled(tt.cluster); got != tt.want {
+				t.Errorf("explicitlyEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveServiceMonitorSpec_DefaultInterval(t *testing.T) {
+	if got := resolveServiceMonitorSpec(newTestCluster()); got.Interval != "30s" {
+		t.Errorf("default interval = %q, want 30s", got.Interval)
+	}
+	c := clusterWithServiceMonitor(&v1alpha1.ServiceMonitorSpec{Interval: "1m"})
+	if got := resolveServiceMonitorSpec(c); got.Interval != "1m" {
+		t.Errorf("set interval = %q, want 1m", got.Interval)
+	}
+}
+
+func TestBuildServiceMonitor_Shape(t *testing.T) {
+	cluster := newTestCluster()
+	sm := buildServiceMonitor(cluster, resolveServiceMonitorSpec(cluster))
+
+	wantName := OwnedResourceName(cluster.Name, "metrics")
+	if sm.Name != wantName {
+		t.Errorf("name = %q, want %q", sm.Name, wantName)
+	}
+	if sm.Namespace != cluster.Namespace {
+		t.Errorf("namespace = %q, want %q", sm.Namespace, cluster.Namespace)
+	}
+
+	wantSelector := map[string]string{
+		"curity.io/cluster":            cluster.Name,
+		"app.kubernetes.io/managed-by": "curity-operator",
+	}
+	if !reflect.DeepEqual(sm.Spec.Selector.MatchLabels, wantSelector) {
+		t.Errorf("selector = %v, want %v", sm.Spec.Selector.MatchLabels, wantSelector)
+	}
+	if !reflect.DeepEqual(sm.Spec.NamespaceSelector.MatchNames, []string{cluster.Namespace}) {
+		t.Errorf("namespaceSelector = %v, want [%s]", sm.Spec.NamespaceSelector.MatchNames, cluster.Namespace)
+	}
+
+	if len(sm.Spec.Endpoints) != 1 {
+		t.Fatalf("expected 1 endpoint, got %d", len(sm.Spec.Endpoints))
+	}
+	ep := sm.Spec.Endpoints[0]
+	if ep.Port != "metrics" {
+		t.Errorf("endpoint port = %q, want metrics", ep.Port)
+	}
+	if ep.Path != "/metrics" {
+		t.Errorf("endpoint path = %q, want /metrics", ep.Path)
+	}
+	if ep.Interval != monitoringv1.Duration("30s") {
+		t.Errorf("endpoint interval = %q, want 30s", ep.Interval)
+	}
+	if ep.Scheme != nil {
+		t.Errorf("endpoint scheme = %v, want nil (http default)", *ep.Scheme)
+	}
+}
+
+// TestReconcileServiceMonitor_CRDAbsent covers the warning/Degraded gate that
+// envtest can't reach (the ServiceMonitor CRD is always loaded there). The
+// CRD-absent branch returns before touching the client, so a bare Recorder is
+// enough.
+func TestReconcileServiceMonitor_CRDAbsent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("default_on_is_silent", func(t *testing.T) {
+		rec := record.NewFakeRecorder(5)
+		r := &IdentityServerClusterReconciler{Recorder: rec} // ServiceMonitorAvailable=false
+		name, deg, err := r.reconcileServiceMonitor(ctx, newTestCluster())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if name != "" || deg != nil {
+			t.Errorf("default-on with no CRD must be silent: name=%q deg=%+v", name, deg)
+		}
+		select {
+		case e := <-rec.Events:
+			t.Errorf("expected no event, got %q", e)
+		default:
+		}
+	})
+
+	t.Run("explicit_enabled_warns_and_degrades", func(t *testing.T) {
+		rec := record.NewFakeRecorder(5)
+		r := &IdentityServerClusterReconciler{Recorder: rec}
+		c := clusterWithServiceMonitor(&v1alpha1.ServiceMonitorSpec{Enabled: ptr.To(true)})
+		name, deg, err := r.reconcileServiceMonitor(ctx, c)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if name != "" {
+			t.Errorf("name = %q, want empty", name)
+		}
+		if deg == nil || deg.reason != "ServiceMonitorCRDMissing" {
+			t.Fatalf("deg = %+v, want reason ServiceMonitorCRDMissing", deg)
+		}
+		select {
+		case e := <-rec.Events:
+			if !strings.Contains(e, "ServiceMonitorCRDMissing") {
+				t.Errorf("event = %q, want ServiceMonitorCRDMissing", e)
+			}
+		default:
+			t.Error("expected a ServiceMonitorCRDMissing Warning event")
+		}
+	})
+}
+
+func TestBuildServiceMonitor_LabelsMergeOperatorWins(t *testing.T) {
+	cluster := clusterWithServiceMonitor(&v1alpha1.ServiceMonitorSpec{
+		Labels: map[string]string{
+			"release":                      "kube-prometheus-stack",
+			"app.kubernetes.io/managed-by": "user-should-lose", // operator must win
+		},
+	})
+	sm := buildServiceMonitor(cluster, resolveServiceMonitorSpec(cluster))
+
+	if sm.Labels["release"] != "kube-prometheus-stack" {
+		t.Errorf("user label dropped: %v", sm.Labels)
+	}
+	if sm.Labels["app.kubernetes.io/managed-by"] != "curity-operator" {
+		t.Errorf("operator label must win on collision, got %q", sm.Labels["app.kubernetes.io/managed-by"])
+	}
+	if sm.Labels["curity.io/cluster"] != cluster.Name {
+		t.Errorf("missing cluster label, got %v", sm.Labels)
 	}
 }

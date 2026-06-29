@@ -1,0 +1,12 @@
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: {{ .name }}
+  namespace: {{ .namespace }}
+spec:
+  version: "11.0"
+  observability:
+    serviceMonitor:
+      interval: 15s
+      labels:
+        release: kube-prometheus-stack

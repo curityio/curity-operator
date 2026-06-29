@@ -394,6 +394,33 @@ type PDBSpec struct {
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
+// ObservabilitySpec configures observability integrations. Omitting it is
+// equivalent to serviceMonitor.enabled=true (scraping on by default).
+type ObservabilitySpec struct {
+	// ServiceMonitor configures a Prometheus Operator ServiceMonitor scraping
+	// every node's metrics. Requires the ServiceMonitor CRD; skipped when absent.
+	ServiceMonitor *ServiceMonitorSpec `json:"serviceMonitor,omitempty"`
+}
+
+// ServiceMonitorSpec configures the operator-managed ServiceMonitor.
+type ServiceMonitorSpec struct {
+	// Enabled turns the ServiceMonitor on or off. Defaults to true.
+	// +kubebuilder:default=true
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// Labels are added to the ServiceMonitor metadata — set these to match your
+	// Prometheus serviceMonitorSelector (e.g. release: kube-prometheus-stack).
+	// Keys in the operator-owned curity.io/* and app.kubernetes.io/* namespaces are rejected.
+	// +kubebuilder:validation:MaxProperties=64
+	// +kubebuilder:validation:XValidation:rule="self.all(k, !k.startsWith('curity.io/') && !k.startsWith('app.kubernetes.io/'))",message="labels cannot include operator-owned keys (curity.io/* or app.kubernetes.io/*)"
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// Interval is the Prometheus scrape interval (for example 30s, 1m).
+	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:Pattern=`^([0-9]+(ms|s|m|h))+$`
+	Interval string `json:"interval,omitempty"`
+}
+
 // AppliedManagedResource describes a managed ConfigMap or Secret
 // (curity.io/managed=true) that the operator has mounted on a node.
 // +kubebuilder:object:generate=true

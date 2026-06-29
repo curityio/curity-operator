@@ -99,6 +99,10 @@ type IdentityServerClusterSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self.all(p1, self.exists_one(p2, p2.sourceTls.keyName == p1.sourceTls.keyName))",message="each convertKeystore keyName must be unique"
 	// +kubebuilder:validation:XValidation:rule="self.all(p, !(p.sourceTls.keyName in ['ADMIN_PASSWORD','PASSWORD','CONFIG_ENCRYPTION_KEY','LOGGING_LEVEL','STATUS_CMD_PORT','ADMIN_UI_HTTP_MODE','SKIP_INSTALL']) && (!has(p.sourceTls.cert) || !(p.sourceTls.cert in ['ADMIN_PASSWORD','PASSWORD','CONFIG_ENCRYPTION_KEY','LOGGING_LEVEL','STATUS_CMD_PORT','ADMIN_UI_HTTP_MODE','SKIP_INSTALL'])))",message="keyName/cert must not be an operator-managed variable (ADMIN_PASSWORD, PASSWORD, CONFIG_ENCRYPTION_KEY, LOGGING_LEVEL, STATUS_CMD_PORT, ADMIN_UI_HTTP_MODE, SKIP_INSTALL)"
 	ConvertKeystore []ConvertKeystoreItem `json:"convertKeystore,omitempty"`
+
+	// Observability configures metrics/observability integrations. Omitting it
+	// is equivalent to observability.serviceMonitor.enabled=true.
+	Observability *ObservabilitySpec `json:"observability,omitempty"`
 }
 
 // IdentityServerClusterStatus defines the observed state of IdentityServerCluster.
@@ -123,6 +127,10 @@ type IdentityServerClusterStatus struct {
 
 	// ClusterConfigSecretName is the name of the Secret containing cluster.xml.
 	ClusterConfigSecretName string `json:"clusterConfigSecretName,omitempty"`
+
+	// ServiceMonitorName is the managed ServiceMonitor's name, or empty when
+	// scraping is disabled or the CRD is not installed.
+	ServiceMonitorName string `json:"serviceMonitorName,omitempty"`
 
 	// ManagedResourceIssueCount mirrors len(ManagedResourceIssues) for the
 	// printer column (kubebuilder JSONPath has no length()). Writers must

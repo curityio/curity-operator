@@ -6,6 +6,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
@@ -47,7 +48,9 @@ var _ = BeforeSuite(func() {
 	ctx, cancel = context.WithCancel(context.Background())
 
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths: []string{"../../config/crd/bases"},
+		// config/crd/bases holds our CRDs; test/crds holds the third-party
+		// ServiceMonitor CRD so the cluster controller's observability path runs.
+		CRDDirectoryPaths: []string{"../../config/crd/bases", "../../test/crds"},
 	}
 
 	cfg, err := testEnv.Start()
@@ -61,6 +64,7 @@ var _ = BeforeSuite(func() {
 	Expect(autoscalingv2.AddToScheme(scheme)).To(Succeed())
 	Expect(policyv1.AddToScheme(scheme)).To(Succeed())
 	Expect(networkingv1.AddToScheme(scheme)).To(Succeed())
+	Expect(monitoringv1.AddToScheme(scheme)).To(Succeed())
 	Expect(v1alpha1.AddToScheme(scheme)).To(Succeed())
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})

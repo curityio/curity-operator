@@ -1346,8 +1346,10 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		cluster := &v1alpha1.IdentityServerCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "cluster-ns-101", Namespace: ns},
 			Spec: v1alpha1.IdentityServerClusterSpec{
-				Version:      "11.0",
-				NodeSelector: sel,
+				Version: "11.0",
+				CommonPodConfig: v1alpha1.CommonPodConfig{
+					NodeSelector: sel,
+				},
 			},
 		}
 		err := k8sClient.Create(ctx, cluster)
@@ -1369,7 +1371,9 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-tol101"},
 				Replicas:                 ptr.To(int32(1)),
 				Service:                  defaultTestService(),
-				Tolerations:              tols,
+				CommonPodConfig: v1alpha1.CommonPodConfig{
+					Tolerations: tols,
+				},
 			},
 		}
 		err := k8sClient.Create(ctx, node)
@@ -1390,12 +1394,14 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 		node := &v1alpha1.IdentityServerNode{
 			ObjectMeta: metav1.ObjectMeta{Name: "node-tsc-33", Namespace: ns},
 			Spec: v1alpha1.IdentityServerNodeSpec{
-				Type:                      v1alpha1.NodeTypeRuntime,
-				Role:                      "tsc33-role",
-				IdentityServerClusterRef:  v1alpha1.ObjectReference{Name: "val-cluster-tsc33"},
-				Replicas:                  ptr.To(int32(1)),
-				Service:                   defaultTestService(),
-				TopologySpreadConstraints: tscs,
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "tsc33-role",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: "val-cluster-tsc33"},
+				Replicas:                 ptr.To(int32(1)),
+				Service:                  defaultTestService(),
+				CommonPodConfig: v1alpha1.CommonPodConfig{
+					TopologySpreadConstraints: tscs,
+				},
 			},
 		}
 		err := k8sClient.Create(ctx, node)

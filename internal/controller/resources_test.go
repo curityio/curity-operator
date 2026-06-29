@@ -3336,17 +3336,25 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 		"Observability": true,
 	}
 
-	specType := reflect.TypeOf(v1alpha1.IdentityServerClusterSpec{})
-	for i := 0; i < specType.NumField(); i++ {
-		f := specType.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		name := f.Name
-		if !includedInHash[name] && !excludedFromHash[name] {
-			t.Errorf("spec field %q must be in includedInHash or excludedFromHash", name)
+	// Recurse into anonymous embeds (CommonPodConfig) so each shared field is
+	// still categorized individually — a field added there must be classified too.
+	var check func(reflect.Type)
+	check = func(st reflect.Type) {
+		for i := 0; i < st.NumField(); i++ {
+			f := st.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			if f.Anonymous && f.Type.Kind() == reflect.Struct {
+				check(f.Type)
+				continue
+			}
+			if !includedInHash[f.Name] && !excludedFromHash[f.Name] {
+				t.Errorf("spec field %q must be in includedInHash or excludedFromHash", f.Name)
+			}
 		}
 	}
+	check(reflect.TypeOf(v1alpha1.IdentityServerClusterSpec{}))
 }
 
 // N4: hash is non-empty even when every input is empty.

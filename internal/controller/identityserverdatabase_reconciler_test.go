@@ -182,17 +182,19 @@ func TestBuildDatabaseJob_AppliesJobTemplate(t *testing.T) {
 		ActiveDeadlineSeconds:   ptr.To(int64(600)),
 		TTLSecondsAfterFinished: ptr.To(int32(120)),
 		ServiceAccountName:      "db-migrator",
-		Resources: &corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+		ImagePullSecret:         "tmpl-pull",
+		PriorityClassName:       "high",
+		Env:                     []corev1.EnvVar{{Name: "EXTRA", Value: "1"}},
+		PodLabels:               map[string]string{"team": "iam"},
+		CommonPodConfig: v1alpha1.CommonPodConfig{
+			Resources: &corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+			},
+			ContainerSecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(true)},
+			SecurityContext:          &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)},
+			ImagePullPolicy:          corev1.PullAlways,
+			NodeSelector:             map[string]string{"disktype": "ssd"},
 		},
-		ContainerSecurityContext: &corev1.SecurityContext{ReadOnlyRootFilesystem: ptr.To(true)},
-		SecurityContext:          &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)},
-		ImagePullPolicy:          corev1.PullAlways,
-		ImagePullSecret:          "tmpl-pull",
-		NodeSelector:             map[string]string{"disktype": "ssd"},
-		PriorityClassName:        "high",
-		Env:                      []corev1.EnvVar{{Name: "EXTRA", Value: "1"}},
-		PodLabels:                map[string]string{"team": "iam"},
 	}
 	db := testDatabase("acct", v1alpha1.JDBCConnection{URL: inlineURL("jdbc:x")}, tmpl)
 	job := buildDatabaseJob(db, cluster, buildImage(cluster), "h", "ch")
@@ -296,7 +298,7 @@ func TestComputeDatabaseJobHash(t *testing.T) {
 }
 
 func TestResolveDatabaseImagePullPolicy(t *testing.T) {
-	if got := resolveDatabaseImagePullPolicy(&v1alpha1.DatabaseJobTemplate{ImagePullPolicy: corev1.PullNever}, "img:1"); got != corev1.PullNever {
+	if got := resolveDatabaseImagePullPolicy(&v1alpha1.DatabaseJobTemplate{CommonPodConfig: v1alpha1.CommonPodConfig{ImagePullPolicy: corev1.PullNever}}, "img:1"); got != corev1.PullNever {
 		t.Errorf("explicit policy not honored: %q", got)
 	}
 	if got := resolveDatabaseImagePullPolicy(&v1alpha1.DatabaseJobTemplate{}, "img:latest"); got != corev1.PullAlways {

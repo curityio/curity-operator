@@ -128,9 +128,11 @@ var _ = Describe("IdentityServerNode Reconciler / HPA hardening", func() {
 				// Resources.Requests.cpu satisfies Gate D's pre-flight check.
 				// Tests that exercise the missing-request path strip this
 				// inline before Create.
-				Resources: &corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceCPU: resource.MustParse("100m"),
+				CommonPodConfig: v1alpha1.CommonPodConfig{
+					Resources: &corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU: resource.MustParse("100m"),
+						},
 					},
 				},
 				Service: defaultTestService(),

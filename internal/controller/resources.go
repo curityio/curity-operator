@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +31,9 @@ const (
 	portHealthCheck        = 4465
 	portMetrics            = 4466
 	portAdminUI            = 6749
+
+	// portNameMetrics is referenced by name by the ServiceMonitor; single-source it.
+	portNameMetrics = "metrics"
 
 	containerName = "curity"
 
@@ -227,6 +231,67 @@ func buildService(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identi
 	}
 }
 
+// clusterManagedLabels select this cluster's node Services.
+func clusterManagedLabels(cluster *v1alpha1.IdentityServerCluster) map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/managed-by": "curity-operator",
+		"curity.io/cluster":            cluster.Name,
+	}
+}
+
+// buildServiceMonitor scrapes every node's metrics endpoint. Scheme is nil (http) — Curity serves plain HTTP.
+func buildServiceMonitor(cluster *v1alpha1.IdentityServerCluster, sm *v1alpha1.ServiceMonitorSpec) *monitoringv1.ServiceMonitor {
+	return &monitoringv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      OwnedResourceName(cluster.Name, portNameMetrics),
+			Namespace: cluster.Namespace,
+			Labels:    mergeMaps(sm.Labels, clusterManagedLabels(cluster)),
+		},
+		Spec: monitoringv1.ServiceMonitorSpec{
+			Selector:          metav1.LabelSelector{MatchLabels: clusterManagedLabels(cluster)},
+			NamespaceSelector: monitoringv1.NamespaceSelector{MatchNames: []string{cluster.Namespace}},
+			Endpoints: []monitoringv1.Endpoint{{
+				Port:     portNameMetrics,
+				Path:     "/metrics",
+				Interval: monitoringv1.Duration(sm.Interval),
+			}},
+		},
+	}
+}
+
+// serviceMonitorEnabledPtr returns the user's enabled *bool, or nil when unset.
+func serviceMonitorEnabledPtr(cluster *v1alpha1.IdentityServerCluster) *bool {
+	if o := cluster.Spec.Observability; o != nil && o.ServiceMonitor != nil {
+		return o.ServiceMonitor.Enabled
+	}
+	return nil
+}
+
+// serviceMonitorEnabled reports whether scraping is on (default-on: unset = enabled).
+func serviceMonitorEnabled(cluster *v1alpha1.IdentityServerCluster) bool {
+	e := serviceMonitorEnabledPtr(cluster)
+	return e == nil || *e
+}
+
+// explicitlyEnabled is true only when the user wrote enabled=true verbatim.
+func explicitlyEnabled(cluster *v1alpha1.IdentityServerCluster) bool {
+	e := serviceMonitorEnabledPtr(cluster)
+	return e != nil && *e
+}
+
+// resolveServiceMonitorSpec applies defaults (interval 30s) for in-process
+// callers that bypass CRD defaulting.
+func resolveServiceMonitorSpec(cluster *v1alpha1.IdentityServerCluster) *v1alpha1.ServiceMonitorSpec {
+	sm := &v1alpha1.ServiceMonitorSpec{}
+	if o := cluster.Spec.Observability; o != nil && o.ServiceMonitor != nil {
+		sm = o.ServiceMonitor.DeepCopy()
+	}
+	if sm.Interval == "" {
+		sm.Interval = "30s"
+	}
+	return sm
+}
+
 // buildImage returns the container image string.
 func buildImage(cluster *v1alpha1.IdentityServerCluster) string {
 	if cluster.Spec.Image != "" {
@@ -302,7 +367,7 @@ func adminUIExposed(node *v1alpha1.IdentityServerNode) bool {
 func buildContainerPorts(node *v1alpha1.IdentityServerNode) []corev1.ContainerPort {
 	ports := []corev1.ContainerPort{
 		{Name: "health-check", ContainerPort: portHealthCheck, Protocol: corev1.ProtocolTCP},
-		{Name: "metrics", ContainerPort: portMetrics, Protocol: corev1.ProtocolTCP},
+		{Name: portNameMetrics, ContainerPort: portMetrics, Protocol: corev1.ProtocolTCP},
 	}
 
 	if node.Spec.Type == v1alpha1.NodeTypeAdmin {
@@ -331,7 +396,7 @@ func buildContainerPorts(node *v1alpha1.IdentityServerNode) []corev1.ContainerPo
 func buildServicePorts(node *v1alpha1.IdentityServerNode) []corev1.ServicePort {
 	ports := []corev1.ServicePort{
 		{Name: "health-check", Port: portHealthCheck, TargetPort: intstr.FromString("health-check"), Protocol: corev1.ProtocolTCP},
-		{Name: "metrics", Port: portMetrics, TargetPort: intstr.FromString("metrics"), Protocol: corev1.ProtocolTCP},
+		{Name: portNameMetrics, Port: portMetrics, TargetPort: intstr.FromString(portNameMetrics), Protocol: corev1.ProtocolTCP},
 	}
 
 	if node.Spec.Type == v1alpha1.NodeTypeAdmin {

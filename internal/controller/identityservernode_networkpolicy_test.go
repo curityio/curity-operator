@@ -168,16 +168,18 @@ var _ = Describe("IdentityServerNode Reconciler / NetworkPolicy", func() {
 		runtime := &v1alpha1.IdentityServerNode{
 			ObjectMeta: metav1.ObjectMeta{Name: runtimeName, Namespace: ns},
 			Spec: v1alpha1.IdentityServerNodeSpec{
-				Type:                          v1alpha1.NodeTypeRuntime,
-				Role:                          "default",
-				IdentityServerClusterRef:      v1alpha1.ObjectReference{Name: clusterName},
-				Replicas:                      ptr.To(int32(1)),
-				Service:                       &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443},
-				ImagePullPolicy:               corev1.PullAlways,
-				TerminationGracePeriodSeconds: ptr.To(int64(120)),
-				SecurityContext:               &corev1.PodSecurityContext{FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch)},
-				ContainerSecurityContext:      &corev1.SecurityContext{AllowPrivilegeEscalation: ptr.To(false)},
-				InitContainers:                []corev1.Container{{Name: "wait", Image: "busybox:1.36", Command: []string{"sh", "-c", "true"}}},
+				Type:                     v1alpha1.NodeTypeRuntime,
+				Role:                     "default",
+				IdentityServerClusterRef: v1alpha1.ObjectReference{Name: clusterName},
+				Replicas:                 ptr.To(int32(1)),
+				Service:                  &v1alpha1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Port: 8443},
+				CommonPodConfig: v1alpha1.CommonPodConfig{
+					ImagePullPolicy:               corev1.PullAlways,
+					TerminationGracePeriodSeconds: ptr.To(int64(120)),
+					SecurityContext:               &corev1.PodSecurityContext{FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch)},
+					ContainerSecurityContext:      &corev1.SecurityContext{AllowPrivilegeEscalation: ptr.To(false)},
+				},
+				InitContainers: []corev1.Container{{Name: "wait", Image: "busybox:1.36", Command: []string{"sh", "-c", "true"}}},
 				// Rich container (port + probe + lifecycle httpGet) exercises the full
 				// container-defaulting path; over-defaulting shows up here as generation drift.
 				ExtraContainers: []corev1.Container{{

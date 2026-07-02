@@ -54,12 +54,27 @@ var excludeCRDFields = []string{
 	"$.status.nodeCount",
 }
 
+// excludeServiceMonitorFields strips only volatile metadata — selector,
+// endpoints, namespaceSelector, and labels are deterministic and worth
+// snapshotting (the default excludeFields drops spec.selector, which is the
+// crux of a ServiceMonitor).
+var excludeServiceMonitorFields = []string{
+	"$.metadata.uid",
+	"$.metadata.resourceVersion",
+	"$.metadata.generation",
+	"$.metadata.creationTimestamp",
+	"$.metadata.annotations",
+	"$.metadata.managedFields",
+	"$.metadata.ownerReferences",
+}
+
 var excludeFieldMap = map[string][]string{
 	"job":                     excludeJobFields,
 	"horizontalpodautoscaler": excludeFields,
 	"poddisruptionbudget":     excludeFields,
 	"identityservercluster":   excludeCRDFields,
 	"identityservernode":      excludeCRDFields,
+	"servicemonitor":          excludeServiceMonitorFields,
 }
 
 // MatchYAMLResource takes a snapshot of the resource and compares it.
@@ -103,6 +118,9 @@ func MatchCRDResource(resource interface{}, snapshotName ...string) {
 		c.Annotations = nil
 		c.Status.NodeCount = 0
 		c.Status.ReadyNodes = 0
+		// Populated only where the ServiceMonitor CRD is installed — varies by
+		// environment (Kind vs AKS), so zero it for deterministic snapshots.
+		c.Status.ServiceMonitorName = ""
 		sanitized = c
 	case *v1alpha1.IdentityServerNode:
 		c := r.DeepCopy()

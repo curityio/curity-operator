@@ -13,12 +13,14 @@ import (
 	"strings"
 	"time"
 
+	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -42,6 +44,9 @@ type IdentityServerClusterReconciler struct {
 	Scheme     *runtime.Scheme
 	Recorder   record.EventRecorder
 	RestConfig *rest.Config
+
+	// ServiceMonitorAvailable is whether the ServiceMonitor CRD existed at startup (set by SetupWithManager).
+	ServiceMonitorAvailable bool
 }
 
 // +kubebuilder:rbac:groups=curity.io,resources=identityserverclusters,verbs=get;list;watch;create;update;patch;delete
@@ -54,6 +59,7 @@ type IdentityServerClusterReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=core,resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile handles a single reconciliation loop for an IdentityServerCluster.
 func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -173,6 +179,17 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
+	// 6b. Reconcile the Prometheus ServiceMonitor (on by default). The name is
+	// persisted below; smDeg (if any) is overlaid after the condition rebuild.
+	smName, smDeg, err := r.reconcileServiceMonitor(ctx, &cluster)
+	if err != nil {
+		if res, handled, helperErr := r.handlePermanentWriteError(ctx, &cluster, err); handled {
+			return res, helperErr
+		}
+		return ctrl.Result{}, err
+	}
+	cluster.Status.ServiceMonitorName = smName
+
 	// 7. Compute and update status
 	readyCount := int32(0)
 	for i := range childNodes {
@@ -203,6 +220,16 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 	applyConvertKeystoreDegraded(&cluster)
+
+	// Overlay the ServiceMonitor Degraded after the condition rebuild, but yield
+	// to any more-severe cause already set (node/admin/keystore) — metrics is the
+	// lowest-priority degradation. The Warning event still fires unconditionally.
+	if smDeg != nil {
+		if deg := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionDegraded); deg == nil || deg.Status != metav1.ConditionTrue {
+			setCondition(&cluster.Status.Conditions, v1alpha1.ConditionDegraded, metav1.ConditionTrue,
+				smDeg.reason, smDeg.message, cluster.Generation)
+		}
+	}
 
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.NodeCount = int32(len(childNodes))
@@ -331,9 +358,84 @@ func defaultAdminCredentials(clusterName string) *v1alpha1.CredentialsSource {
 	}
 }
 
+// smDegraded is a Degraded overlay applied after the cluster conditions rebuild.
+type smDegraded struct {
+	reason  string
+	message string
+}
+
+// reconcileServiceMonitor creates/updates/deletes the cluster's ServiceMonitor,
+// returning its name ("" if none) and a Degraded overlay (nil if none).
+func (r *IdentityServerClusterReconciler) reconcileServiceMonitor(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) (string, *smDegraded, error) {
+	log := ctrl.LoggerFrom(ctx)
+	name := OwnedResourceName(cluster.Name, portNameMetrics)
+	key := client.ObjectKey{Name: name, Namespace: cluster.Namespace}
+
+	// CRD absent: warn + Degraded only if explicitly enabled; default-on stays silent.
+	if !r.ServiceMonitorAvailable {
+		if explicitlyEnabled(cluster) {
+			msg := "observability.serviceMonitor.enabled is true but the ServiceMonitor CRD (monitoring.coreos.com) is not installed; install the Prometheus Operator to enable scraping"
+			r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ServiceMonitorCRDMissing", "%s", msg)
+			return "", &smDegraded{"ServiceMonitorCRDMissing", msg}, nil
+		}
+		return "", nil, nil
+	}
+
+	existing := &monitoringv1.ServiceMonitor{}
+	getErr := r.Get(ctx, key, existing)
+	if getErr != nil && !apierrors.IsNotFound(getErr) {
+		return "", nil, fmt.Errorf("failed to get ServiceMonitor %q: %w", name, getErr)
+	}
+	found := getErr == nil
+
+	// Don't hijack a foreign ServiceMonitor; surface the collision as Degraded.
+	if found && !metav1.IsControlledBy(existing, cluster) {
+		msg := fmt.Sprintf("ServiceMonitor %q exists but is not managed by this cluster; metrics are not scraped until it is removed", name)
+		r.Recorder.Eventf(cluster, corev1.EventTypeWarning, "ServiceMonitorNotOwned", "%s", msg)
+		return "", &smDegraded{"ServiceMonitorNotOwned", msg}, nil
+	}
+
+	if !serviceMonitorEnabled(cluster) {
+		if !found {
+			return "", nil, nil
+		}
+		if err := r.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
+			return "", nil, fmt.Errorf("failed to delete ServiceMonitor %q: %w", name, err)
+		}
+		log.Info("ServiceMonitor deleted", "name", name)
+		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ServiceMonitorDeleted", "ServiceMonitor %q deleted", name)
+		return "", nil, nil
+	}
+
+	desired := buildServiceMonitor(cluster, resolveServiceMonitorSpec(cluster))
+	target := &monitoringv1.ServiceMonitor{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: cluster.Namespace}}
+	result, err := controllerutil.CreateOrUpdate(ctx, r.Client, target, func() error {
+		target.Labels = mergeManagedLabels(target.Labels, desired.Labels)
+		target.Spec = desired.Spec
+		return controllerutil.SetControllerReference(cluster, target, r.Scheme)
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to reconcile ServiceMonitor %q: %w", name, err)
+	}
+	if result != controllerutil.OperationResultNone {
+		log.Info("ServiceMonitor reconciled", "operation", result, "name", name)
+		r.Recorder.Eventf(cluster, corev1.EventTypeNormal, "ServiceMonitorReconciled", "ServiceMonitor %q %s", name, result)
+	}
+	return name, nil, nil
+}
+
 // SetupWithManager registers the controller with the manager.
 func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	// Owning a watch on a missing CRD fails the cache start, so gate the Owns on
+	// a one-time CRD check; installing the CRD later needs an operator restart.
+	r.ServiceMonitorAvailable = serviceMonitorCRDInstalled(mgr.GetRESTMapper())
+	if r.ServiceMonitorAvailable {
+		mgr.GetLogger().Info("ServiceMonitor CRD present; metrics ServiceMonitor reconciliation enabled")
+	} else {
+		mgr.GetLogger().Info("ServiceMonitor CRD (monitoring.coreos.com) not installed; metrics ServiceMonitors disabled — install the Prometheus Operator to enable")
+	}
+
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.IdentityServerCluster{},
 			builder.WithPredicates(predicate.Or(
 				predicate.GenerationChangedPredicate{},
@@ -376,8 +478,20 @@ func (r *IdentityServerClusterReconciler) SetupWithManager(mgr ctrl.Manager) err
 			&corev1.Secret{},
 			newClusterManagedConfigHandler(r.findClustersForManagedConfig),
 			builder.WithPredicates(managedConfigPredicate{}),
-		).
-		Complete(r)
+		)
+
+	if r.ServiceMonitorAvailable {
+		b = b.Owns(&monitoringv1.ServiceMonitor{})
+	}
+
+	return b.Complete(r)
+}
+
+// serviceMonitorCRDInstalled reports whether the monitoring.coreos.com
+// ServiceMonitor kind resolves in the cluster at startup.
+func serviceMonitorCRDInstalled(rm apimeta.RESTMapper) bool {
+	_, err := rm.RESTMapping(schema.GroupKind{Group: "monitoring.coreos.com", Kind: "ServiceMonitor"}, "v1")
+	return err == nil
 }
 
 // findClusterForNode maps an IdentityServerNode change to reconcile requests

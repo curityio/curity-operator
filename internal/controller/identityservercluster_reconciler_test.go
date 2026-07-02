@@ -384,10 +384,12 @@ var _ = Describe("IdentityServerCluster Reconciler", func() {
 			cluster := &v1alpha1.IdentityServerCluster{
 				ObjectMeta: metav1.ObjectMeta{Name: "sched-cluster", Namespace: ns},
 				Spec: v1alpha1.IdentityServerClusterSpec{
-					Version:      "11.0",
-					NodeSelector: map[string]string{"disk": "ssd"},
-					Tolerations: []corev1.Toleration{
-						{Key: "special", Operator: corev1.TolerationOpExists},
+					Version: "11.0",
+					CommonPodConfig: v1alpha1.CommonPodConfig{
+						NodeSelector: map[string]string{"disk": "ssd"},
+						Tolerations: []corev1.Toleration{
+							{Key: "special", Operator: corev1.TolerationOpExists},
+						},
 					},
 				},
 			}

@@ -1,0 +1,28 @@
+
+[IdentityServerCluster observability creates a ServiceMonitor by default and records its name in status - 1]
+metadata:
+  name: obs-default-metrics-aa4d182a
+  namespace: e2e-observability
+  uid: <Any value>
+  resourceVersion: <Any value>
+  generation: <Any value>
+  creationTimestamp: <Any value>
+  labels:
+    app.kubernetes.io/managed-by: curity-operator
+    curity.io/cluster: obs-default
+  ownerReferences: <Any value>
+  managedFields: <Any value>
+spec:
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+  selector:
+    matchLabels:
+      app.kubernetes.io/managed-by: curity-operator
+      curity.io/cluster: obs-default
+  namespaceSelector:
+    matchNames:
+      - e2e-observability
+
+---

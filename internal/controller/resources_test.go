@@ -71,6 +71,30 @@ func TestBuildDeployment_RuntimeArgs(t *testing.T) {
 	assertNotContains(t, args, "-N")
 }
 
+func TestBuildDeployment_FIPSModeDefaultOff(t *testing.T) {
+	cluster := newTestCluster()
+	for _, nodeType := range []v1alpha1.NodeType{v1alpha1.NodeTypeAdmin, v1alpha1.NodeTypeRuntime} {
+		node := newTestNode(nodeType)
+		deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+		args := deploy.Spec.Template.Spec.Containers[0].Args
+		assertNotContains(t, args, "--fips-mode")
+	}
+}
+
+func TestBuildDeployment_FIPSModeAppendsFlag(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.FIPSMode = true
+
+	for _, nodeType := range []v1alpha1.NodeType{v1alpha1.NodeTypeAdmin, v1alpha1.NodeTypeRuntime} {
+		node := newTestNode(nodeType)
+		deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+		args := deploy.Spec.Template.Spec.Containers[0].Args
+		assertContains(t, args, "--fips-mode")
+		// The base idsvr invocation is preserved.
+		assertContains(t, args, "/opt/idsvr/bin/idsvr")
+	}
+}
+
 func TestBuildDeployment_AdminPorts(t *testing.T) {
 	cluster := newTestCluster()
 	node := newTestNode(v1alpha1.NodeTypeAdmin)
@@ -3330,6 +3354,10 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 		// consumed via envFrom on nodes; it does not affect cluster.xml, so it
 		// must not trigger a genclust Job re-run.
 		"ConvertKeystore": true,
+		// FIPSMode only appends the --fips-mode flag to the node idsvr args; it
+		// does not affect cluster.xml generation. Flipping it rolls the node
+		// Deployments via the normal Deployment diff, not a genclust Job re-run.
+		"FIPSMode": true,
 		// Observability only governs a Prometheus ServiceMonitor; it has no
 		// bearing on cluster.xml or pod config, so it must not trigger a
 		// genclust Job re-run or a Deployment rollout.

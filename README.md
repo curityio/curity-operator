@@ -164,6 +164,7 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 | `version` | string, required | Curity Identity Server version |
 | `image` | string | Override container image (for private mirrors) |
 | `imagePullSecret` | string | Secret name for pulling images |
+| `fipsMode` | bool | Flag to enable/disable FIPS mode (`--fips-mode`). Requires a special license and FIPS enabled docker image, contact sales@curity.io for more details. Defaults to `false` |
 | `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`; auto-generated if omitted |
 | `logging` | object | Log level, log streams to tail, sidecar config |
 | `resources` | object | Default CPU/memory requests/limits |

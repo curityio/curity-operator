@@ -100,7 +100,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 		Name:            containerName,
 		Image:           buildImage(cluster),
 		ImagePullPolicy: resolveImagePullPolicy(cluster, node),
-		Args:            buildContainerArgs(node),
+		Args:            buildContainerArgs(cluster, node),
 		Ports:           buildContainerPorts(node),
 		Env:             buildEnvVars(cluster, node),
 		EnvFrom:         buildEnvFrom(configs),
@@ -301,20 +301,28 @@ func buildImage(cluster *v1alpha1.IdentityServerCluster) string {
 }
 
 // buildContainerArgs returns the command arguments for the Curity container.
-func buildContainerArgs(node *v1alpha1.IdentityServerNode) []string {
+// When the cluster enables FIPS mode, --fips-mode is appended for both admin
+// and runtime nodes.
+func buildContainerArgs(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []string {
+	var args []string
 	if node.Spec.Type == v1alpha1.NodeTypeAdmin {
-		return []string{
+		args = []string{
 			"/opt/idsvr/bin/idsvr",
 			"-s", node.Spec.Role,
 			"-N", node.Name,
 			"--admin",
 		}
+	} else {
+		args = []string{
+			"/opt/idsvr/bin/idsvr",
+			"-s", node.Spec.Role,
+			"--no-admin",
+		}
 	}
-	return []string{
-		"/opt/idsvr/bin/idsvr",
-		"-s", node.Spec.Role,
-		"--no-admin",
+	if cluster.Spec.FIPSMode {
+		args = append(args, "--fips-mode")
 	}
+	return args
 }
 
 // resolveHTTPPort returns the runtime http Service port: service.port when set,

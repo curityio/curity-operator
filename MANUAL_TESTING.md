@@ -1,6 +1,6 @@
 # Manual Testing Guide
 
-A walkthrough for building, running, and exercising the operator by hand — locally on Kind and against a remote/public cluster. For automated unit and E2E suites, see the `Running Tests` section in [README.md](README.md).
+A walkthrough for building, running, and exercising the operator by hand — locally on Kind and against a remote/public cluster. For automated unit and E2E suites, see the [Tests](DEVELOPMENT.md#tests) section in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ---
 
@@ -160,7 +160,7 @@ kubectl -n demo get isc
 
 The operator creates a Secret `my-cluster-admin-creds` with `ADMIN_PASSWORD` and `CONFIG_ENCRYPTION_KEY`.
 
-To use a pre-existing Secret instead, set `spec.adminCredentials` — see [README §Create a Curity Identity Server Deployment](README.md#create-a-curity-identity-server-deployment).
+To use a pre-existing Secret instead, set `spec.adminCredentials` — see [README §Quick start](README.md#quick-start).
 
 ### 3c. Admin IdentityServerNode (with UI)
 

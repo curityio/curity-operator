@@ -83,7 +83,7 @@ Useful values:
 | Value | Default | Description |
 |---|---|---|
 | `controllerManager.manager.image.repository` | `curity.azurecr.io/curity/operator` | Operator image; point at a mirror for air-gapped clusters |
-| `controllerManager.manager.image.tag` | matching the chart version | Operator image tag |
+| `controllerManager.manager.image.tag` | `v<chart version>` (e.g. `v0.0.1`) | Operator image tag |
 | `controllerManager.manager.env.packageFetcherImage` | `alpine:3.19` | Image used by the package init containers, see [Packages](#packages-plugins) |
 | `controllerManager.replicas` | `1` | Operator replicas |
 | `controllerManager.manager.resources` | 10m/128Mi requests | Operator resource requests and limits |

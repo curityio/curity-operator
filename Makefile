@@ -12,9 +12,12 @@ else
 endif
 
 VERSION ?= 0.0.1
-OPERATOR_NAME ?= curity-operator
+# OPERATOR_NAME is the image repository name only (the binary is BINARY_NAME,
+# the chart is HELM_CHART_NAME, the namespace is OPERATOR_NS). Kept short so it
+# reads as a pair with the Identity Server image: curity/idsvr, curity/operator.
+OPERATOR_NAME ?= operator
 OPERATOR_NS ?= curity-operator
-DOCKER_REPO_BASE ?= ghcr.io/curityio
+DOCKER_REPO_BASE ?= curity.azurecr.io/curity
 IMG ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME):v$(VERSION)
 CONTAINER_TOOL ?= docker
 
@@ -42,7 +45,7 @@ ENVTEST ?= $(LOCALBIN)/setup-envtest
 ## Helm
 HELM_CHART_DIR ?= charts/curity-operator
 HELM_CHART_NAME ?= curity-operator
-HELM_REGISTRY ?= ghcr.io/curityio/charts
+HELM_REGISTRY ?= curity.azurecr.io/charts
 HELMIFY_POSTPROCESS ?= hack/helm/postprocess.sh
 
 .PHONY: all

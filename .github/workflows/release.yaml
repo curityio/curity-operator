@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   release:
@@ -35,19 +34,21 @@ jobs:
           make manifests generate
           make test
 
-      - name: Login to GHCR
+      # Also authenticates `helm push` below — Helm reads the Docker config
+      # this action writes, and the chart lives in the same registry.
+      - name: Login to ACR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: curity.azurecr.io
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build and push multi-arch image
         run: |
           make docker-buildx VERSION=${{ steps.version.outputs.version }}
           docker buildx imagetools create \
-            ghcr.io/curityio/curity-operator:v${{ steps.version.outputs.version }} \
-            --tag ghcr.io/curityio/curity-operator:latest
+            curity.azurecr.io/curity/operator:v${{ steps.version.outputs.version }} \
+            --tag curity.azurecr.io/curity/operator:latest
 
       - name: Generate and version Helm chart
         run: |

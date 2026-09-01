@@ -66,12 +66,13 @@ behalf).
 
 ### Helm (recommended)
 
-The chart is published as an OCI artifact on GHCR. Check the
+The chart is published as an OCI artifact alongside the operator image on `curity.azurecr.io`,
+which allows anonymous pulls — no registry login needed. Check the
 [releases page](https://github.com/curityio/curity-operator/releases) for the latest version and
 substitute it below.
 
 ```bash
-helm install curity-operator oci://ghcr.io/curityio/charts/curity-operator \
+helm install curity-operator oci://curity.azurecr.io/charts/curity-operator \
   --version 0.0.1 \
   --namespace curity-operator \
   --create-namespace
@@ -81,7 +82,7 @@ Useful values:
 
 | Value | Default | Description |
 |---|---|---|
-| `controllerManager.manager.image.repository` | `ghcr.io/curityio/curity-operator` | Operator image; point at a mirror for air-gapped clusters |
+| `controllerManager.manager.image.repository` | `curity.azurecr.io/curity/operator` | Operator image; point at a mirror for air-gapped clusters |
 | `controllerManager.manager.image.tag` | matching the chart version | Operator image tag |
 | `controllerManager.manager.env.packageFetcherImage` | `alpine:3.19` | Image used by the package init containers, see [Packages](#packages-plugins) |
 | `controllerManager.replicas` | `1` | Operator replicas |
@@ -89,19 +90,20 @@ Useful values:
 | `imagePullSecrets` | `[]` | Pull secrets for the operator image |
 | `crds.keep` | `true` | Keep the CRDs (and therefore your resources) on `helm uninstall` |
 
-If the operator image is not publicly readable from your cluster, create a pull secret and
-reference it:
+`curity.azurecr.io` allows anonymous pulls, so no pull secret is needed for a default install. If
+you mirror the image into a private registry, create a pull secret and reference it:
 
 ```bash
-kubectl create secret docker-registry ghcr-pull-secret \
-  --docker-server=ghcr.io \
+kubectl create secret docker-registry operator-pull-secret \
+  --docker-server=my-registry.example.com \
   --docker-username=<user> \
   --docker-password=<token> \
   --namespace curity-operator
 
-helm install curity-operator oci://ghcr.io/curityio/charts/curity-operator \
+helm install curity-operator oci://curity.azurecr.io/charts/curity-operator \
   --version 0.0.1 --namespace curity-operator --create-namespace \
-  --set imagePullSecrets[0].name=ghcr-pull-secret
+  --set controllerManager.manager.image.repository=my-registry.example.com/curity/operator \
+  --set imagePullSecrets[0].name=operator-pull-secret
 ```
 
 ### Plain manifests
@@ -726,7 +728,7 @@ spec:
   `PACKAGE_FETCHER_IMAGE` env var on the operator pod — there is no per-CR override. The Helm chart
   exposes it as `controllerManager.manager.env.packageFetcherImage`:
   ```bash
-  helm upgrade --install curity-operator oci://ghcr.io/curityio/charts/curity-operator \
+  helm upgrade --install curity-operator oci://curity.azurecr.io/charts/curity-operator \
     --set controllerManager.manager.env.packageFetcherImage=my-registry.example.com/alpine:3.19
   ```
 - **Each package volume is capped at 256MiB** (emptyDir `sizeLimit`) to bound zip-bomb /

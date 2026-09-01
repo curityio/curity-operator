@@ -8,7 +8,10 @@ see [README.md](README.md). For a hands-on walkthrough against Kind and remote c
 ## Architecture
 
 The operator is written in Go on top of [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime)
-(scaffolded with Kubebuilder), and is distributed as a container image and a Helm chart on GHCR.
+(scaffolded with Kubebuilder), and is distributed as a container image
+(`curity.azurecr.io/curity/operator`) and a Helm chart
+(`oci://curity.azurecr.io/charts/curity-operator`), both published to the same ACR as the Identity
+Server images and both anonymously pullable.
 
 ```
 api/v1alpha1/           CRD types (+kubebuilder markers, CEL validation rules)
@@ -83,7 +86,7 @@ make test-e2e   # Full E2E: builds, creates Kind cluster, installs CRDs, runs te
 Against a remote cluster (AKS/EKS) — builds and pushes the image instead of loading it into Kind:
 
 ```bash
-make test-e2e-remote IMG=ghcr.io/curityio/curity-operator:<tag>
+make test-e2e-remote IMG=curity.azurecr.io/curity/operator:<tag>
 ```
 
 Update E2E snapshots (go-snaps reads `UPDATE_SNAPS` from the environment, so it has to be set on
@@ -128,11 +131,48 @@ make vet   # Run go vet
 | `release.yaml` | tag `vX.Y.Z` | multi-arch image (+ `latest`), versioned chart, `dist/install.yaml`, GitHub release |
 
 To cut a release, push a `vX.Y.Z` tag on `main`. The workflow derives the version from the tag,
-runs `make version-sync`, publishes `ghcr.io/curityio/curity-operator:vX.Y.Z` and
-`oci://ghcr.io/curityio/charts/curity-operator`, and attaches `install.yaml` to the GitHub release.
+runs `make version-sync`, publishes `curity.azurecr.io/curity/operator:vX.Y.Z` (and `:latest`) and
+`oci://curity.azurecr.io/charts/curity-operator`, and attaches `install.yaml` to the GitHub release.
 
 Add `[skip-ci]` to a commit message to skip the push workflow. Markdown-only changes are already
 ignored by the PR and push workflows.
+
+### Registry
+
+Both artifacts live in the same ACR as the Identity Server images
+(`curity.azurecr.io/curity/idsvr`), and the registry allows anonymous pulls, so no credentials are
+needed to *consume* either one:
+
+| Artifact | Location | Makefile variable |
+|---|---|---|
+| Operator image | `curity.azurecr.io/curity/operator` | `DOCKER_REPO_BASE` + `OPERATOR_NAME` |
+| Helm chart | `oci://curity.azurecr.io/charts/curity-operator` | `HELM_REGISTRY` |
+
+Pushing needs credentials. Every workflow authenticates with `docker/login-action` against
+`curity.azurecr.io` using the `ACR_USERNAME` / `ACR_PASSWORD` repository secrets (a service
+principal or a repository-scoped ACR token with `AcrPush`). Helm reads the same Docker config, so
+one login covers both the image and the chart push.
+
+To move to workload-identity federation instead — no stored secrets — replace that step with:
+
+```yaml
+      - name: Login to ACR
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - run: az acr login --name curity
+```
+
+and add `id-token: write` to that job's `permissions`.
+
+To override the registry for a local build, set the variables on the command line — everything else
+derives from them:
+
+```bash
+make docker-build DOCKER_REPO_BASE=my-registry.example.com/curity
+```
 
 ## Cleanup
 

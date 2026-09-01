@@ -55,7 +55,7 @@ make cluster-destroy      # delete the Kind cluster
 
 ## 2. Run on a cluster
 
-`make deploy-helm` is Kind-only. For a real cluster, install the published chart and image from GHCR.
+`make deploy-helm` is Kind-only. For a real cluster, install the published chart and image from ACR.
 
 Point `kubectl` at the target cluster first (your user needs cluster-admin for CRDs + RBAC + namespaces):
 
@@ -64,37 +64,20 @@ kubectl config use-context <my-cluster>
 kubectl config current-context        # verify
 ```
 
-### Install the published chart from GHCR
+### Install the published chart from ACR
 
-Installs a tagged release from `oci://ghcr.io/curityio/charts/curity-operator` with the matching image at `ghcr.io/curityio/curity-operator`. No local build required.
+Installs a tagged release from `oci://curity.azurecr.io/charts/curity-operator` with the matching image at `curity.azurecr.io/curity/operator`. No local build required.
 
-> **Note:** The chart and image are currently published as **private** GHCR packages. You need a GitHub Personal Access Token (PAT) with `read:packages` scope (create one at <https://github.com/settings/tokens>) for both the Helm login and the pull secret below.
+`curity.azurecr.io` allows anonymous pulls, so there is no `helm registry login` and no image pull secret — same as the Identity Server images.
 
 **Steps:**
 
 ```bash
-# 1. Authenticate Helm to ghcr.io
-export GHCR_USERNAME=<github-username>
-read -s GHCR_TOKEN                          # paste PAT, hidden input, press enter
-export GHCR_TOKEN
-echo "$GHCR_TOKEN" | helm registry login ghcr.io -u "$GHCR_USERNAME" --password-stdin
-
-# 2. Create the operator namespace
-kubectl create namespace curity-operator
-
-# 3. Create the image pull secret
-kubectl create secret docker-registry ghcr-pull \
-  --docker-server=ghcr.io \
-  --docker-username="$GHCR_USERNAME" \
-  --docker-password="$GHCR_TOKEN" \
-  -n curity-operator
-
-# 4. Install from the OCI chart
 helm install curity-operator \
-  oci://ghcr.io/curityio/charts/curity-operator \
+  oci://curity.azurecr.io/charts/curity-operator \
   --version 0.0.1 \
   --namespace curity-operator \
-  --set 'imagePullSecrets[0].name=ghcr-pull'
+  --create-namespace
 ```
 
 ### Verify the install

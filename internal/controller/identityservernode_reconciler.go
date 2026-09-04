@@ -376,7 +376,17 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	var existingDeployForDefer *appsv1.Deployment
 	if adminExists {
 		configReady := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
-		if configReady == nil || configReady.Status != metav1.ConditionTrue {
+		notReady := configReady == nil || configReady.Status != metav1.ConditionTrue
+		// ClusterConfigReady is flipped by the cluster reconciler, and a cluster
+		// spec edit wakes both reconcilers at once. Until that one wins the race,
+		// the condition still reads True from the previous generation and we
+		// would write the very Deployment this gate exists to hold back. Derive
+		// staleness from observed state too — that needs no other controller to
+		// have acted first.
+		if !notReady && r.clusterConfigStale(ctx, &cluster, nodeList.Items) {
+			notReady = true
+		}
+		if notReady {
 			var existingDeploy appsv1.Deployment
 			deployName := OwnedResourceName(cluster.Name, node.Name)
 			err := r.Get(ctx, client.ObjectKey{Name: deployName, Namespace: node.Namespace}, &existingDeploy)
@@ -1158,6 +1168,48 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// clusterConfigStale reports whether the cluster-config Secret still reflects
+// the cluster's current spec. When it does not, cluster.xml regeneration is
+// either pending or in flight and Deployment writes must be deferred.
+//
+// It reads only the Secret and the spec this reconcile already holds, so unlike
+// the ClusterConfigReady condition it does not depend on the cluster reconciler
+// having run first. That closes the window where a spec edit wakes both
+// reconcilers and this one observes a condition still True from the previous
+// generation.
+//
+// A missing or un-annotated Secret returns false: creating and backfilling it
+// belongs to the cluster reconciler, and the ClusterConfigReady check already
+// covers the first-create path.
+func (r *IdentityServerNodeReconciler) clusterConfigStale(
+	ctx context.Context,
+	cluster *v1alpha1.IdentityServerCluster,
+	childNodes []v1alpha1.IdentityServerNode,
+) bool {
+	var secret corev1.Secret
+	key := client.ObjectKey{
+		Name:      cluster.Name + clusterConfigSecretSuffix,
+		Namespace: cluster.Namespace,
+	}
+	if err := r.Get(ctx, key, &secret); err != nil {
+		// NotFound means the cluster reconciler has not created it yet, which
+		// the ClusterConfigReady check already covers. Any other error is
+		// treated the same way deliberately: fall back to the condition rather
+		// than block Deployment writes on a transient API failure.
+		return false
+	}
+	// Secret already reset to the placeholder — regeneration is under way even
+	// if the condition has not caught up.
+	if !isClusterConfigReady(&secret) {
+		return true
+	}
+	stored := secret.Annotations["curity.io/cluster-config-hash"]
+	if stored == "" {
+		return false
+	}
+	return stored != computeClusterConfigHash(cluster, findAdminNodeName(childNodes), findAdminConfigPort(childNodes))
 }
 
 // SetupWithManager registers the controller with the manager.

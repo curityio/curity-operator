@@ -123,12 +123,16 @@ make vet   # Run go vet
 
 ## CI and releases
 
-| Workflow | Trigger | What it does |
-|---|---|---|
-| `pull_request.yaml` | PRs to `main` | generate, lint, unit tests, build, push a PR-tagged image, `helm lint` |
-| `e2e.yaml` | `ok-to-test/e2e` label on a PR | runs the E2E suite against the shared AKS cluster |
-| `push.yaml` | push to `main` | tests, build, push image, generate + push the Helm chart |
-| `release.yaml` | tag `vX.Y.Z` | multi-arch image (+ `latest`), versioned chart, `dist/install.yaml`, GitHub release |
+| Workflow | Trigger | What it does | Publishes to |
+|---|---|---|---|
+| `pull_request.yaml` | PRs to `main` | generate, lint, unit tests, build, `docker build`, `helm lint` | nothing |
+| `e2e.yaml` | `ok-to-test/e2e` label on a PR | runs the E2E suite against the shared AKS cluster | GHCR |
+| `push.yaml` | push to `main` | tests, build, push image, generate + push the Helm chart | GHCR |
+| `release.yaml` | tag `vX.Y.Z` | multi-arch image (+ `latest`), versioned chart, `dist/install.yaml`, GitHub release | ACR |
+
+PR builds publish nothing: the image is built to prove it compiles and then discarded. `e2e.yaml`
+builds and pushes its own image (`test-e2e-remote` → `deploy-remote`), so a PR-stage push would only
+add a throwaway tag per commit.
 
 To cut a release, push a `vX.Y.Z` tag on `main`. The workflow derives the version from the tag,
 runs `make version-sync`, publishes `curity.azurecr.io/curity/operator:vX.Y.Z` (and `:latest`) and
@@ -137,23 +141,41 @@ runs `make version-sync`, publishes `curity.azurecr.io/curity/operator:vX.Y.Z` (
 Add `[skip-ci]` to a commit message to skip the push workflow. Markdown-only changes are already
 ignored by the PR and push workflows.
 
-### Registry
+### Registries
 
-Both artifacts live in the same ACR as the Identity Server images
-(`curity.azurecr.io/curity/idsvr`), and the registry allows anonymous pulls, so no credentials are
-needed to *consume* either one:
+Two registries, split by purpose: **ACR holds releases only, GHCR holds CI artifacts.** Nothing but
+a `vX.Y.Z` tag ever writes to `curity.azurecr.io`, so the public registry stays free of throwaway
+builds.
 
-| Artifact | Location | Makefile variable |
-|---|---|---|
-| Operator image | `curity.azurecr.io/curity/operator` | `DOCKER_REPO_BASE` + `OPERATOR_NAME` |
-| Helm chart | `oci://curity.azurecr.io/charts/curity-operator` | `HELM_REGISTRY` |
+| Artifact | Location | Visibility | Set by |
+|---|---|---|---|
+| Released image | `curity.azurecr.io/curity/operator:vX.Y.Z`, `:latest` | anonymous pull | `DOCKER_REPO_BASE` + `OPERATOR_NAME` |
+| Released chart | `oci://curity.azurecr.io/charts/curity-operator` | anonymous pull | `HELM_REGISTRY` |
+| CI image (main, e2e) | `ghcr.io/curityio/curity-operator:<tag>` | private | `IMAGE_REPO` / `IMG` override |
+| CI chart (main) | `oci://ghcr.io/curityio/charts/curity-operator` | private | `HELM_REGISTRY` override |
 
-Pushing needs credentials. Every workflow authenticates with `docker/login-action` against
+Release artifacts are anonymously pullable, so consuming them needs no credentials. ACR's anonymous
+pull is a **registry-wide** setting — there is no per-repository private mode — which is the reason
+CI artifacts live on GHCR instead of a `ci/` path in the same registry.
+
+Because the GHCR package is private, the e2e cluster needs an image pull secret. That must not leak
+into the released `install.yaml`, so it lives in a CI-only overlay: `config/e2e` wraps
+`config/default` and patches `imagePullSecrets` onto the controller-manager. `DEPLOY_OVERLAY`
+selects it (`config/default` by default), and the e2e suite inherits the variable when it shells out
+to `make kustomize-deploy`.
+
+`IMAGE_REPO` is the image reference baked into the chart and `install.yaml` by `make version-sync`.
+It tracks `IMG` by default; `push.yaml` overrides it so the main-branch chart points at the GHCR
+image it actually published rather than a release tag that does not exist in ACR.
+
+Pushing needs credentials. Release workflows authenticate with `docker/login-action` against
 `curity.azurecr.io` using the `ACR_USERNAME` / `ACR_PASSWORD` repository secrets (a service
-principal or a repository-scoped ACR token with `AcrPush`). Helm reads the same Docker config, so
-one login covers both the image and the chart push.
+principal or a repository-scoped ACR token with `AcrPush`). CI workflows use the built-in
+`GITHUB_TOKEN` with `packages: write` — no secrets to manage. Helm reads the same Docker config in
+both cases, so one login covers the image and the chart.
 
-To move to workload-identity federation instead — no stored secrets — replace that step with:
+To move the ACR login to workload-identity federation instead — no stored secrets — replace that
+step with:
 
 ```yaml
       - name: Login to ACR

@@ -1,0 +1,15 @@
+# CI-only overlay. The e2e suite runs against a private GHCR image, so the
+# controller-manager needs an imagePullSecret; the released layout
+# (config/default) must not carry one, because releases are pulled anonymously
+# from curity.azurecr.io.
+#
+# Selected via DEPLOY_OVERLAY=config/e2e — see the Makefile. The referenced
+# Secret is created by .github/workflows/e2e.yaml before the suite runs.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- ../default
+
+patches:
+- path: manager_pull_secret_patch.yaml

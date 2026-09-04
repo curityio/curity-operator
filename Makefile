@@ -18,7 +18,11 @@ VERSION ?= 0.0.1
 OPERATOR_NAME ?= operator
 OPERATOR_NS ?= curity-operator
 DOCKER_REPO_BASE ?= curity.azurecr.io/curity
-IMG ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME):v$(VERSION)
+# IMAGE_REPO is the image reference baked into the chart and install.yaml by
+# version-sync. It tracks IMG by default; CI overrides both when publishing
+# main-branch builds to GHCR instead of the release registry.
+IMAGE_REPO ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME)
+IMG ?= $(IMAGE_REPO):v$(VERSION)
 CONTAINER_TOOL ?= docker
 
 BINARY_NAME ?= curity-operator
@@ -154,14 +158,21 @@ install: manifests kustomize ## Install CRDs into the K8s cluster.
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
+# Kustomize overlay used by kustomize-deploy/undeploy. config/default is the
+# released layout (public registry, no pull secret); CI sets DEPLOY_OVERLAY to
+# config/e2e, which adds the pull secret for the private GHCR test image. The
+# e2e suite shells out to `make kustomize-deploy` and inherits the environment,
+# so exporting DEPLOY_OVERLAY in the workflow is enough to select the overlay.
+DEPLOY_OVERLAY ?= config/default
+
 .PHONY: kustomize-deploy
 kustomize-deploy: manifests kustomize ## Deploy operator to the K8s cluster via Kustomize.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
-	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
+	$(KUSTOMIZE) build $(DEPLOY_OVERLAY) | $(KUBECTL) apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy operator from the K8s cluster.
-	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+	$(KUSTOMIZE) build $(DEPLOY_OVERLAY) | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: build-installer
 build-installer: manifests kustomize ## Generate a consolidated install.yaml.
@@ -197,11 +208,13 @@ helm-push: helm-package ## Push Helm chart to OCI registry.
 	helm push $(HELM_CHART_NAME)-*.tgz oci://$(HELM_REGISTRY)
 
 .PHONY: version-sync
-version-sync: yq ## Patch all version references to VERSION.
+version-sync: yq ## Patch all version and image-repository references to VERSION/IMAGE_REPO.
 	$(SED) -i 's/^version: .*/version: $(VERSION)/' $(HELM_CHART_DIR)/Chart.yaml
 	$(SED) -i 's/^appVersion: .*/appVersion: "$(VERSION)"/' $(HELM_CHART_DIR)/Chart.yaml
 	$(YQ) -i '.controllerManager.manager.image.tag = "v$(VERSION)"' $(HELM_CHART_DIR)/values.yaml
+	$(YQ) -i '.controllerManager.manager.image.repository = "$(IMAGE_REPO)"' $(HELM_CHART_DIR)/values.yaml
 	$(SED) -i 's/newTag: .*/newTag: v$(VERSION)/' config/manager/kustomization.yaml
+	$(SED) -i 's|newName: .*|newName: $(IMAGE_REPO)|' config/manager/kustomization.yaml
 
 ##@ Cluster
 

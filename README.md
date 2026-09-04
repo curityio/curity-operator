@@ -934,3 +934,4 @@ kubectl delete crd identityserverclusters.curity.io \
 
 Working on the operator itself? See [DEVELOPMENT.md](DEVELOPMENT.md) for the build, test and
 release workflow, and [MANUAL_TESTING.md](MANUAL_TESTING.md) for a hands-on walkthrough.
+

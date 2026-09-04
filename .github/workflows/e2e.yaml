@@ -105,4 +105,5 @@ jobs:
         if: always()
         run: |
           make undeploy ignore-not-found=true || true
+          kubectl delete secret ghcr-pull-secret -n curity-operator --ignore-not-found
           kubectl delete namespace curity-e2e --ignore-not-found

@@ -27,6 +27,12 @@ DOCKER_REPO_BASE ?= curity.azurecr.io/curity
 # registry.
 IMAGE_REPO ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME)
 IMG ?= $(IMAGE_REPO):v$(VERSION)
+# The e2e suite shells out to `make kustomize-deploy` (test/utils/utils.go Run),
+# which must deploy the image under test rather than the default tag. A
+# command-line IMG= already reaches it through MAKEOVERRIDES/MAKEFLAGS, which
+# make exports to every recipe child; exporting it as well makes that path
+# explicit and keeps it working if IMG is ever set some other way.
+export IMG
 CONTAINER_TOOL ?= docker
 
 BINARY_NAME ?= curity-operator

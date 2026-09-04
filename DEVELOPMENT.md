@@ -164,9 +164,18 @@ into the released `install.yaml`, so it lives in a CI-only overlay: `config/e2e`
 selects it (`config/default` by default), and the e2e suite inherits the variable when it shells out
 to `make kustomize-deploy`.
 
-`IMAGE_REPO` is the image reference baked into the chart and `install.yaml` by `make version-sync`.
-It tracks `IMG` by default; `push.yaml` overrides it so the main-branch chart points at the GHCR
-image it actually published rather than a release tag that does not exist in ACR.
+`IMAGE_REPO` is the repository both publishing paths start from — `IMG` is derived from it
+(`IMG ?= $(IMAGE_REPO):v$(VERSION)`), not the reverse, so overriding `IMAGE_REPO` moves everything
+while overriding `IMG` alone only retags the build. It reaches the published artifacts by two
+routes:
+
+- `make build-installer` runs `kustomize edit set image controller=$(IMG)`, so `install.yaml` takes
+  its image from **`IMG`**.
+- `make version-sync` writes the repository into the chart's `values.yaml` and the kustomize base,
+  so the **chart** takes it from `IMAGE_REPO` directly.
+
+`push.yaml` overrides `IMAGE_REPO` so the main-branch chart points at the GHCR image it actually
+published rather than a release tag that does not exist in ACR.
 
 Pushing needs credentials. Release workflows authenticate with `docker/login-action` against
 `curity.azurecr.io` using the `ACR_USERNAME` / `ACR_PASSWORD` repository secrets (a service

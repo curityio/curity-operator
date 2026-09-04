@@ -18,9 +18,13 @@ VERSION ?= 0.0.1
 OPERATOR_NAME ?= operator
 OPERATOR_NS ?= curity-operator
 DOCKER_REPO_BASE ?= curity.azurecr.io/curity
-# IMAGE_REPO is the image reference baked into the chart and install.yaml by
-# version-sync. It tracks IMG by default; CI overrides both when publishing
-# main-branch builds to GHCR instead of the release registry.
+# IMAGE_REPO is the source of truth for the image repository: IMG derives from
+# it below, not the reverse. It reaches published artifacts two ways —
+# build-installer bakes IMG into install.yaml via `kustomize edit set image`,
+# and version-sync writes IMAGE_REPO into the chart's values.yaml and the
+# kustomize base. Override IMAGE_REPO (not IMG) to move both; CI does exactly
+# that when publishing main-branch builds to GHCR instead of the release
+# registry.
 IMAGE_REPO ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME)
 IMG ?= $(IMAGE_REPO):v$(VERSION)
 CONTAINER_TOOL ?= docker

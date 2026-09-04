@@ -87,7 +87,10 @@ jobs:
             --namespace=curity-operator
 
       - name: Run E2E Tests
-        run: make test-e2e-remote IMG=ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.tag }}
+        run: |
+          make test-e2e-remote \
+            IMG=ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.tag }} \
+            VERSION=${{ steps.tag.outputs.version }}
 
       - name: Collect operator logs
         if: failure()

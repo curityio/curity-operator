@@ -53,8 +53,12 @@ jobs:
       - name: Docker Build and Push
         env:
           IMG: ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.tag }}
+          # Feeds the Dockerfile's VERSION build-arg, i.e. the image's
+          # org.opencontainers version label. Without it every CI image would
+          # be labelled with the Makefile default rather than its own tag.
+          VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          make docker-build IMG=$IMG
+          make docker-build IMG=$IMG VERSION=$VERSION
           make docker-push IMG=$IMG
 
       - name: Generate and Push Helm Chart

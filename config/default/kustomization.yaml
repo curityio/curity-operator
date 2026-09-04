@@ -13,5 +13,7 @@ resources:
 patches:
 # Protect the /metrics endpoint by putting it behind auth.
 - path: manager_auth_proxy_patch.yaml
-# Add imagePullSecrets for pulling from private registries.
-- path: manager_pull_secret_patch.yaml
+# No imagePullSecrets patch: the operator image is published to
+# curity.azurecr.io, which has anonymous pull enabled. To deploy from a private
+# mirror instead, add imagePullSecrets via your own patch (Kustomize) or
+# --set imagePullSecrets[0].name=<secret> (Helm).

@@ -14,7 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,12 +37,12 @@ jobs:
       - name: Build
         run: make build
 
-      - name: Login to GHCR
+      - name: Login to ACR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: curity.azurecr.io
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Compute image tag
         id: tag
@@ -53,7 +52,7 @@ jobs:
 
       - name: Docker Build and Push
         env:
-          IMG: ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.tag }}
+          IMG: curity.azurecr.io/curity/operator:${{ steps.tag.outputs.tag }}
         run: |
           make docker-build IMG=$IMG
           make docker-push IMG=$IMG

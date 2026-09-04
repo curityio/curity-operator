@@ -126,13 +126,12 @@ make vet   # Run go vet
 | Workflow | Trigger | What it does | Publishes to |
 |---|---|---|---|
 | `pull_request.yaml` | PRs to `main` | generate, lint, unit tests, build, `docker build`, `helm lint` | nothing |
-| `e2e.yaml` | `ok-to-test/e2e` label on a PR | runs the E2E suite against the shared AKS cluster | GHCR |
+| `e2e.yaml` | `ok-to-test/e2e` label on a PR | `build-image` publishes the test image, then `e2e-tests` runs the suite against the shared AKS cluster | GHCR |
 | `push.yaml` | push to `main` | tests, build, push image, generate + push the Helm chart | GHCR |
 | `release.yaml` | tag `vX.Y.Z` | multi-arch image (+ `latest`), versioned chart, `dist/install.yaml`, GitHub release | ACR |
 
 PR builds publish nothing: the image is built to prove it compiles and then discarded. `e2e.yaml`
-builds and pushes its own image (`test-e2e-remote` → `deploy-remote`), so a PR-stage push would only
-add a throwaway tag per commit.
+publishes its own test image, so a PR-stage push would only add a throwaway tag per commit.
 
 To cut a release, push a `vX.Y.Z` tag on `main`. The workflow derives the version from the tag,
 runs `make version-sync`, publishes `curity.azurecr.io/curity/operator:vX.Y.Z` (and `:latest`) and
@@ -163,6 +162,14 @@ into the released `install.yaml`, so it lives in a CI-only overlay: `config/e2e`
 `config/default` and patches `imagePullSecrets` onto the controller-manager. `DEPLOY_OVERLAY`
 selects it (`config/default` by default), and the e2e suite inherits the variable when it shells out
 to `make kustomize-deploy`.
+
+That pull secret is also why `e2e.yaml` is two jobs. Publishing the test image needs
+`packages: write`, but the job that runs the suite stores its `GITHUB_TOKEN` in a Secret on a shared
+cluster — and the operator under test holds cluster-wide secret read in its own RBAC, so it can read
+that token back. `build-image` therefore holds the write permission and publishes; `e2e-tests` runs
+with `packages: read` and `make test-e2e-run` (the half of `test-e2e-remote` that skips
+`deploy-remote`), so the credential that reaches the cluster can pull and nothing more. Running
+`make test-e2e-remote` locally still does the whole thing in one go.
 
 `IMAGE_REPO` is the repository both publishing paths start from — `IMG` is derived from it
 (`IMG ?= $(IMAGE_REPO):v$(VERSION)`), not the reverse, so overriding `IMAGE_REPO` moves everything

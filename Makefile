@@ -121,7 +121,13 @@ test-e2e: generate deploy-kind install ## Build, load into Kind, install CRDs, r
 	go test -v -timeout 1200s ./test/e2e/...
 
 .PHONY: test-e2e-remote
-test-e2e-remote: generate deploy-remote install ## Build, push to registry, install CRDs, run e2e tests.
+test-e2e-remote: generate deploy-remote test-e2e-run ## Build, push to registry, install CRDs, run e2e tests.
+
+# Split out of test-e2e-remote so CI can publish the image in one job and run
+# the suite in another. The running job then needs only packages:read, which
+# matters because its GITHUB_TOKEN is what lands in the in-cluster pull secret.
+.PHONY: test-e2e-run
+test-e2e-run: generate install ## Run e2e tests against an image already published to the registry.
 	E2E_REMOTE=true go test -v -timeout 1200s ./test/e2e/...
 
 .PHONY: test-e2e-update-snapshots

@@ -18,7 +18,21 @@ VERSION ?= 0.0.1
 OPERATOR_NAME ?= operator
 OPERATOR_NS ?= curity-operator
 DOCKER_REPO_BASE ?= curity.azurecr.io/curity
-IMG ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME):v$(VERSION)
+# IMAGE_REPO is the source of truth for the image repository: IMG derives from
+# it below, not the reverse. It reaches published artifacts two ways —
+# build-installer bakes IMG into install.yaml via `kustomize edit set image`,
+# and version-sync writes IMAGE_REPO into the chart's values.yaml and the
+# kustomize base. Override IMAGE_REPO (not IMG) to move both; CI does exactly
+# that when publishing main-branch builds to GHCR instead of the release
+# registry.
+IMAGE_REPO ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME)
+IMG ?= $(IMAGE_REPO):v$(VERSION)
+# The e2e suite shells out to `make kustomize-deploy` (test/utils/utils.go Run),
+# which must deploy the image under test rather than the default tag. A
+# command-line IMG= already reaches it through MAKEOVERRIDES/MAKEFLAGS, which
+# make exports to every recipe child; exporting it as well makes that path
+# explicit and keeps it working if IMG is ever set some other way.
+export IMG
 CONTAINER_TOOL ?= docker
 
 BINARY_NAME ?= curity-operator
@@ -113,7 +127,13 @@ test-e2e: generate deploy-kind install ## Build, load into Kind, install CRDs, r
 	go test -v -timeout 1200s ./test/e2e/...
 
 .PHONY: test-e2e-remote
-test-e2e-remote: generate deploy-remote install ## Build, push to registry, install CRDs, run e2e tests.
+test-e2e-remote: generate deploy-remote test-e2e-run ## Build, push to registry, install CRDs, run e2e tests.
+
+# Split out of test-e2e-remote so CI can publish the image in one job and run
+# the suite in another. The running job then needs only packages:read, which
+# matters because its GITHUB_TOKEN is what lands in the in-cluster pull secret.
+.PHONY: test-e2e-run
+test-e2e-run: generate install ## Run e2e tests against an image already published to the registry.
 	E2E_REMOTE=true go test -v -timeout 1200s ./test/e2e/...
 
 .PHONY: test-e2e-update-snapshots
@@ -154,14 +174,21 @@ install: manifests kustomize ## Install CRDs into the K8s cluster.
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
+# Kustomize overlay used by kustomize-deploy/undeploy. config/default is the
+# released layout (public registry, no pull secret); CI sets DEPLOY_OVERLAY to
+# config/e2e, which adds the pull secret for the private GHCR test image. The
+# e2e suite shells out to `make kustomize-deploy` and inherits the environment,
+# so exporting DEPLOY_OVERLAY in the workflow is enough to select the overlay.
+DEPLOY_OVERLAY ?= config/default
+
 .PHONY: kustomize-deploy
 kustomize-deploy: manifests kustomize ## Deploy operator to the K8s cluster via Kustomize.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
-	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
+	$(KUSTOMIZE) build $(DEPLOY_OVERLAY) | $(KUBECTL) apply -f -
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy operator from the K8s cluster.
-	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+	$(KUSTOMIZE) build $(DEPLOY_OVERLAY) | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: build-installer
 build-installer: manifests kustomize ## Generate a consolidated install.yaml.
@@ -197,11 +224,13 @@ helm-push: helm-package ## Push Helm chart to OCI registry.
 	helm push $(HELM_CHART_NAME)-*.tgz oci://$(HELM_REGISTRY)
 
 .PHONY: version-sync
-version-sync: yq ## Patch all version references to VERSION.
+version-sync: yq ## Patch all version and image-repository references to VERSION/IMAGE_REPO.
 	$(SED) -i 's/^version: .*/version: $(VERSION)/' $(HELM_CHART_DIR)/Chart.yaml
 	$(SED) -i 's/^appVersion: .*/appVersion: "$(VERSION)"/' $(HELM_CHART_DIR)/Chart.yaml
 	$(YQ) -i '.controllerManager.manager.image.tag = "v$(VERSION)"' $(HELM_CHART_DIR)/values.yaml
+	$(YQ) -i '.controllerManager.manager.image.repository = "$(IMAGE_REPO)"' $(HELM_CHART_DIR)/values.yaml
 	$(SED) -i 's/newTag: .*/newTag: v$(VERSION)/' config/manager/kustomization.yaml
+	$(SED) -i 's|newName: .*|newName: $(IMAGE_REPO)|' config/manager/kustomization.yaml
 
 ##@ Cluster
 

@@ -37,25 +37,11 @@ jobs:
       - name: Build
         run: make build
 
-      - name: Login to ACR
-        uses: docker/login-action@v3
-        with:
-          registry: curity.azurecr.io
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
-
-      - name: Compute image tag
-        id: tag
-        uses: ./.github/actions/compute-tag
-        with:
-          pr-number: ${{ github.event.pull_request.number }}
-
-      - name: Docker Build and Push
-        env:
-          IMG: curity.azurecr.io/curity/operator:${{ steps.tag.outputs.tag }}
-        run: |
-          make docker-build IMG=$IMG
-          make docker-push IMG=$IMG
+      # Build only — nothing is published from a PR. The e2e workflow builds and
+      # pushes its own image (test-e2e-remote -> deploy-remote), so a push here
+      # would only add a throwaway tag per commit.
+      - name: Docker Build
+        run: make docker-build IMG=curity-operator:pr-${{ github.event.pull_request.number }}
 
       - name: Generate Helm Chart
         run: make helmify

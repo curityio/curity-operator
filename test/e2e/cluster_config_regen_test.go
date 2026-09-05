@@ -200,28 +200,41 @@ var _ = Describe("cluster.xml regeneration", func() {
 			}, e2eTimeout, e2eInterval).Should(Succeed())
 
 			By("observing Branch C fire — Secret resets to placeholder with the Deployment held back")
-			// The Deployment is sampled inside the same poll that proves the Secret
-			// is a placeholder, and is read *first*: the Secret only travels
-			// placeholder->real here, so seeing the placeholder afterwards proves the
-			// gate was shut at the moment the Deployment was captured. Observing the
-			// two in separate phases would race — regeneration can finish in the gap
-			// on a fast cluster, leaving nothing to assert against.
+			// The Deployment read is bracketed by two reads of the placeholder Secret
+			// at the same resourceVersion. That proves the sample was taken strictly
+			// inside the placeholder window, which both directions of the race need:
+			//
+			//   - reading the Deployment first and the Secret after would let a buggy
+			//     write slip through, since that write lands *before* the reset and a
+			//     pre-write snapshot would still look clean;
+			//   - reading the Secret first and the Deployment after would go the other
+			//     way and fail spuriously, because regeneration can complete in the gap
+			//     and the legitimate deferred update then lands.
+			//
+			// If the Secret moves mid-sample the bracket is discarded and Eventually
+			// simply retries.
 			//
 			// Keyed on the Secret rather than ClusterConfigReady deliberately: the
 			// cluster reconciler writes the placeholder before it flips the condition,
 			// and a node reconcile landing in between is exactly the race this guards.
 			// Asserting on the condition would let that regression through.
+			secretKey := client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}
 			var deployAtPlaceholder *appsv1.Deployment
 			Eventually(func(g Gomega) {
+				before := &corev1.Secret{}
+				g.Expect(k().Get(ctx, secretKey, before)).To(Succeed())
+				g.Expect(before.Annotations["curity.io/cluster-config-hash"]).NotTo(Equal(hashBefore),
+					"cluster-config-hash must change after spec.packages edit")
+				g.Expect(string(before.Data["cluster.xml"])).To(Equal("placeholder"),
+					"Secret data must reset to placeholder during regen")
+
 				d := &appsv1.Deployment{}
 				g.Expect(k().Get(ctx, deployKey, d)).To(Succeed())
 
-				s := &corev1.Secret{}
-				g.Expect(k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}, s)).To(Succeed())
-				g.Expect(s.Annotations["curity.io/cluster-config-hash"]).NotTo(Equal(hashBefore),
-					"cluster-config-hash must change after spec.packages edit")
-				g.Expect(string(s.Data["cluster.xml"])).To(Equal("placeholder"),
-					"Secret data must reset to placeholder during regen")
+				after := &corev1.Secret{}
+				g.Expect(k().Get(ctx, secretKey, after)).To(Succeed())
+				g.Expect(after.ResourceVersion).To(Equal(before.ResourceVersion),
+					"cluster-config Secret changed while the Deployment was sampled; retrying for a clean bracket")
 
 				deployAtPlaceholder = d
 			}, e2eTimeout, e2eInterval).Should(Succeed())

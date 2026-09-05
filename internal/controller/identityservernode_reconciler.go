@@ -377,12 +377,14 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if adminExists {
 		configReady := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
 		notReady := configReady == nil || configReady.Status != metav1.ConditionTrue
-		// ClusterConfigReady is flipped by the cluster reconciler, and a cluster
-		// spec edit wakes both reconcilers at once. Until that one wins the race,
-		// the condition still reads True from the previous generation and we
-		// would write the very Deployment this gate exists to hold back. Derive
-		// staleness from observed state too — that needs no other controller to
-		// have acted first.
+		// The condition alone is not enough. Branch C flips it to False before it
+		// resets the Secret, but this reconcile was woken by the spec change,
+		// which precedes both writes — so the cluster object served from cache
+		// here can still carry ClusterConfigReady=True from the previous
+		// generation, and we would write the very Deployment this gate exists to
+		// hold back. The staleness check below is computed from the spec already
+		// in hand, so it holds even when neither of those writes has reached this
+		// reconciler's cache yet.
 		if !notReady {
 			stale, err := r.clusterConfigStale(ctx, &cluster, nodeList.Items)
 			if err != nil {
@@ -1178,11 +1180,12 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 // the cluster's current spec. When it does not, cluster.xml regeneration is
 // either pending or in flight and Deployment writes must be deferred.
 //
-// It reads only the Secret and the spec this reconcile already holds, so unlike
-// the ClusterConfigReady condition it does not depend on the cluster reconciler
-// having run first. That closes the window where a spec edit wakes both
-// reconcilers and this one observes a condition still True from the previous
-// generation.
+// The hash comparison is computed from the spec this reconcile already holds,
+// so unlike the ClusterConfigReady condition it does not depend on the cluster
+// reconciler's writes having propagated to this reconciler's cache. A spec edit
+// wakes this reconciler before the status flip and Secret reset it triggers, so
+// both may still read as their previous generation here — the new spec hashing
+// differently from the stored one is what gives the answer away.
 //
 // A missing Secret counts as stale. This is only consulted once
 // ClusterConfigReady is already True, and that condition is set only after the

@@ -214,10 +214,11 @@ var _ = Describe("cluster.xml regeneration", func() {
 			// If the Secret moves mid-sample the bracket is discarded and Eventually
 			// simply retries.
 			//
-			// Keyed on the Secret rather than ClusterConfigReady deliberately: the
-			// cluster reconciler writes the placeholder before it flips the condition,
-			// and a node reconcile landing in between is exactly the race this guards.
-			// Asserting on the condition would let that regression through.
+			// Keyed on the Secret rather than ClusterConfigReady because the
+			// placeholder is the state the gate protects against mounting, and it is
+			// the signal the operator's own staleness check reads. Branch C flips the
+			// condition before it resets the Secret, so from the API server either
+			// would bound the window — the Secret is simply the thing under test.
 			secretKey := client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}
 			var deployAtPlaceholder *appsv1.Deployment
 			Eventually(func(g Gomega) {

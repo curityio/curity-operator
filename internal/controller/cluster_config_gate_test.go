@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -67,10 +69,38 @@ func TestClusterConfigStale(t *testing.T) {
 
 	realXML := []byte("<config/>")
 
+	// Branch A fixtures: a cluster whose adminCredentials point at a Secret
+	// carrying CONFIG_ENCRYPTION_KEY, and the hash Branch A stamps for it.
+	const credsName = "c1-creds"
+	clusterWithCreds := func() *v1alpha1.IdentityServerCluster {
+		c := clusterWithPackages(nil)
+		c.Spec.AdminCredentials = &v1alpha1.CredentialsSource{
+			ValueFrom: v1alpha1.CredentialsValueFrom{
+				SecretKeyRef: v1alpha1.SecretKeyRefSource{Name: credsName},
+			},
+		}
+		return c
+	}
+	credsSecret := func(key string) *corev1.Secret {
+		return &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: credsName, Namespace: ns},
+			Data:       map[string][]byte{"CONFIG_ENCRYPTION_KEY": []byte(key)},
+		}
+	}
+	keyHash := func(key string) string {
+		h := sha256.Sum256([]byte(key))
+		return hex.EncodeToString(h[:])
+	}
+	withKeyHash := func(s *corev1.Secret, hash string) *corev1.Secret {
+		s.Annotations["curity.io/encryption-key-hash"] = hash
+		return s
+	}
+
 	tests := []struct {
 		name    string
 		cluster *v1alpha1.IdentityServerCluster
 		secret  *corev1.Secret
+		creds   *corev1.Secret
 		want    bool
 	}{
 		{
@@ -113,6 +143,41 @@ func TestClusterConfigStale(t *testing.T) {
 			secret: configSecret(realXML, baseHash),
 			want:   true,
 		},
+		{
+			// Branch A's race: computeClusterConfigHash omits the key on
+			// purpose, so a rotated CONFIG_ENCRYPTION_KEY leaves the config hash
+			// matching. Only the encryption-key-hash annotation gives it away.
+			name:    "rotated encryption key is stale",
+			cluster: clusterWithCreds(),
+			secret:  withKeyHash(configSecret(realXML, baseHash), keyHash("old-key")),
+			creds:   credsSecret("new-key"),
+			want:    true,
+		},
+		{
+			name:    "matching encryption key is fresh",
+			cluster: clusterWithCreds(),
+			secret:  withKeyHash(configSecret(realXML, baseHash), keyHash("same-key")),
+			creds:   credsSecret("same-key"),
+			want:    false,
+		},
+		{
+			// Mirrors Branch A's empty-guard: a credentials Secret not yet
+			// visible in cache must not read as a rotation.
+			name:    "missing credentials Secret defers to the condition",
+			cluster: clusterWithCreds(),
+			secret:  withKeyHash(configSecret(realXML, baseHash), keyHash("old-key")),
+			creds:   nil,
+			want:    false,
+		},
+		{
+			// No stored key hash means nothing to compare against — and no
+			// credentials read is attempted at all.
+			name:    "un-annotated key hash is fresh",
+			cluster: clusterWithCreds(),
+			secret:  configSecret(realXML, baseHash),
+			creds:   credsSecret("whatever"),
+			want:    false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -125,6 +190,9 @@ func TestClusterConfigStale(t *testing.T) {
 			builder := fake.NewClientBuilder().WithScheme(s).WithObjects(tc.cluster)
 			if tc.secret != nil {
 				builder = builder.WithObjects(tc.secret)
+			}
+			if tc.creds != nil {
+				builder = builder.WithObjects(tc.creds)
 			}
 
 			r := &IdentityServerNodeReconciler{Client: builder.Build(), Scheme: s}

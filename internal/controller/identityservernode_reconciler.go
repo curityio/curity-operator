@@ -1177,8 +1177,10 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 }
 
 // clusterConfigStale reports whether the cluster-config Secret still reflects
-// the cluster's current spec. When it does not, cluster.xml regeneration is
-// either pending or in flight and Deployment writes must be deferred.
+// the cluster's current spec and credentials. When it does not, cluster.xml
+// regeneration is either pending or in flight and Deployment writes must be
+// deferred. It mirrors every input the cluster reconciler regenerates on:
+// Branch C's config hash and Branch A's encryption-key hash.
 //
 // The hash comparison is computed from the spec this reconcile already holds,
 // so unlike the ClusterConfigReady condition it does not depend on the cluster
@@ -1216,11 +1218,28 @@ func (r *IdentityServerNodeReconciler) clusterConfigStale(
 	if !isClusterConfigReady(&secret) {
 		return true, nil
 	}
-	stored := secret.Annotations["curity.io/cluster-config-hash"]
-	if stored == "" {
+
+	// Branch C inputs: image, pull secret, admin node, packages, config port.
+	if stored := secret.Annotations["curity.io/cluster-config-hash"]; stored != "" &&
+		stored != computeClusterConfigHash(cluster, findAdminNodeName(childNodes), findAdminConfigPort(childNodes)) {
+		return true, nil
+	}
+
+	// Branch A input: the encryption key, which computeClusterConfigHash omits
+	// on purpose. Same empty-guards as Branch A — an absent stored hash or a
+	// credentials Secret not yet visible in cache must not read as rotation.
+	storedKey := secret.Annotations["curity.io/encryption-key-hash"]
+	if storedKey == "" {
 		return false, nil
 	}
-	return stored != computeClusterConfigHash(cluster, findAdminNodeName(childNodes), findAdminConfigPort(childNodes)), nil
+	currentKey, err := encryptionKeyHash(ctx, r.Client, cluster)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return currentKey != "" && currentKey != storedKey, nil
 }
 
 // SetupWithManager registers the controller with the manager.

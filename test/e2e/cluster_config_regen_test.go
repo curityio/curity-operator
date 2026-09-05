@@ -248,9 +248,57 @@ var _ = Describe("cluster.xml regeneration", func() {
 					"package init container must not appear while the gate defers updates")
 			}
 
-			By("observing a fresh genclust Job created against the new spec")
-			Eventually(func() error {
-				return k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}, &batchv1.Job{})
+			By("holding that invariant for the remainder of the placeholder window")
+			// One clean sample proves the gate was shut at an instant. It does not
+			// rule out a late write: a node reconcile that read the stale ready
+			// state can still land its update *after* that sample while the Secret
+			// is the same placeholder — the original CI failure did exactly this,
+			// about 200ms after the placeholder appeared. Keep taking bracketed
+			// samples until one observes the gate open, asserting on every clean
+			// placeholder sample. Bounded, and not requiring the gate to open, so a
+			// slower cluster where regeneration outlives the window still passes.
+			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+				before := &corev1.Secret{}
+				Expect(k().Get(ctx, secretKey, before)).To(Succeed())
+				if string(before.Data["cluster.xml"]) != "placeholder" {
+					break // gate opened; the deferred update may legitimately land now
+				}
+
+				d := &appsv1.Deployment{}
+				Expect(k().Get(ctx, deployKey, d)).To(Succeed())
+
+				after := &corev1.Secret{}
+				Expect(k().Get(ctx, secretKey, after)).To(Succeed())
+				if after.ResourceVersion != before.ResourceVersion {
+					continue // Secret moved mid-sample; bracket is not clean
+				}
+
+				Expect(d.Generation).To(Equal(generationBefore),
+					"Deployment.Generation must stay flat while the gate defers updates")
+				for _, ic := range d.Spec.Template.Spec.InitContainers {
+					Expect(ic.Name).NotTo(Equal("package-fetch-0"),
+						"package init container must not appear while the gate defers updates")
+				}
+				time.Sleep(e2eInterval)
+			}
+
+			By("observing that regeneration was triggered against the new spec")
+			// Either the genclust Job is present, or it has already run to
+			// completion: real cluster.xml under the post-edit hash. On a fast
+			// cluster the Job finishes within seconds of the reset and does not
+			// outlive the window sampled above, so requiring the Job object itself
+			// would race its own lifetime. A completed regeneration proves the
+			// trigger fired at least as well as an in-flight Job does.
+			Eventually(func(g Gomega) {
+				if err := k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}, &batchv1.Job{}); err == nil {
+					return
+				}
+				s := &corev1.Secret{}
+				g.Expect(k().Get(ctx, secretKey, s)).To(Succeed())
+				g.Expect(s.Annotations["curity.io/cluster-config-hash"]).NotTo(Equal(hashBefore),
+					"regeneration must have been triggered: no Job and hash still pre-edit")
+				g.Expect(string(s.Data["cluster.xml"])).NotTo(Equal("placeholder"),
+					"regeneration must have been triggered: no Job yet Secret still a placeholder")
 			}, e2eTimeout, e2eInterval).Should(Succeed())
 
 			By("restoring ClusterConfigReady=True (simulates genclust Job completion in Kind)")

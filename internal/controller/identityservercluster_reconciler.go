@@ -570,12 +570,20 @@ func isClusterConfigReady(secret *corev1.Secret) bool {
 // ("", nil) when there's no key. A read error returns ("", err) so callers requeue
 // rather than create an un-annotated Job that strands key-drift recovery.
 func (r *IdentityServerClusterReconciler) computeEncryptionKeyHash(ctx context.Context, cluster *v1alpha1.IdentityServerCluster) (string, error) {
+	return encryptionKeyHash(ctx, r.Client, cluster)
+}
+
+// encryptionKeyHash is the shared implementation behind
+// computeEncryptionKeyHash. The node reconciler's deferral gate uses it too, so
+// that both sides hash the same credentials the same way — Branch A regenerates
+// on this hash, and the gate must recognise that regeneration as pending.
+func encryptionKeyHash(ctx context.Context, c client.Reader, cluster *v1alpha1.IdentityServerCluster) (string, error) {
 	if cluster.Spec.AdminCredentials == nil {
 		return "", nil
 	}
 	secretName := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
 	var credSecret corev1.Secret
-	if err := r.Get(ctx, client.ObjectKey{Name: secretName, Namespace: cluster.Namespace}, &credSecret); err != nil {
+	if err := c.Get(ctx, client.ObjectKey{Name: secretName, Namespace: cluster.Namespace}, &credSecret); err != nil {
 		return "", err
 	}
 	key, ok := credSecret.Data["CONFIG_ENCRYPTION_KEY"]

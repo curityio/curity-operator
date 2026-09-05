@@ -428,7 +428,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			deferRequeue = 30 * time.Second
 			log.V(1).Info("deferring Deployment update until cluster config is current", "cluster", cluster.Name, "deployment", deployName)
 			r.Recorder.Eventf(&node, corev1.EventTypeNormal, "DeferringDeploymentUpdate",
-				"Deferring Deployment update until cluster %q ClusterConfigReady=True", cluster.Name)
+				"Deferring Deployment update until cluster %q config is current (cluster.xml regenerated and its hashes match the spec)", cluster.Name)
 		}
 	}
 
@@ -1214,8 +1214,10 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 // was deleted after being ready, not that it has yet to be created. Writing a
 // Deployment then would mount a Secret that no longer exists.
 //
-// An un-annotated Secret returns false: backfilling the hash belongs to the
-// cluster reconciler, and the data check above already covers regeneration.
+// A Secret with no config hash also counts as stale: it predates the hash and
+// cannot be verified against the spec until the cluster reconciler backfills
+// it. The only annotation whose absence reads as fresh is the encryption-key
+// hash, because there is then nothing to compare the credentials against.
 func (r *IdentityServerNodeReconciler) clusterConfigStale(
 	ctx context.Context,
 	cluster *v1alpha1.IdentityServerCluster,

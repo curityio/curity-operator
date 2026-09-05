@@ -373,6 +373,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// holds a placeholder during that window, and subPath mounts crashloop on
 	// it. First-time create still returns early (no Deployment to keep alive).
 	deferDeploymentUpdate := false
+	var deferRequeue time.Duration
 	var existingDeployForDefer *appsv1.Deployment
 	if adminExists {
 		configReady := apimeta.FindStatusCondition(cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady)
@@ -417,7 +418,15 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			}
 			deferDeploymentUpdate = true
 			existingDeployForDefer = existingDeploy.DeepCopy()
-			log.V(1).Info("deferring Deployment update until ClusterConfigReady=True", "cluster", cluster.Name, "deployment", deployName)
+			// Liveness for the observed-state checks. The condition transition
+			// re-enqueues us for the normal regen path, but some deferrals have
+			// no transition to wait for: Branch B rewrites the Secret in place
+			// with ClusterConfigReady left True, and a credentials Secret that
+			// is missing may simply appear later. Neither is watched here, so
+			// without this a deferred Deployment could stay on its old spec
+			// indefinitely. Matches the other gates' requeue interval.
+			deferRequeue = 30 * time.Second
+			log.V(1).Info("deferring Deployment update until cluster config is current", "cluster", cluster.Name, "deployment", deployName)
 			r.Recorder.Eventf(&node, corev1.EventTypeNormal, "DeferringDeploymentUpdate",
 				"Deferring Deployment update until cluster %q ClusterConfigReady=True", cluster.Name)
 		}
@@ -1173,7 +1182,9 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, fmt.Errorf("failed to update node status: %w", err)
 	}
 
-	return ctrl.Result{}, nil
+	// Zero unless the Deployment update was deferred; a zero RequeueAfter is
+	// the same as no requeue.
+	return ctrl.Result{RequeueAfter: deferRequeue}, nil
 }
 
 // clusterConfigStale reports whether the cluster-config Secret still reflects
@@ -1181,6 +1192,14 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 // regeneration is either pending or in flight and Deployment writes must be
 // deferred. It mirrors every input the cluster reconciler regenerates on:
 // Branch C's config hash and Branch A's encryption-key hash.
+//
+// It deliberately errs towards stale. Branch B (an admin-only rename) rewrites
+// the Secret in place with ClusterConfigReady left True, and is reported stale
+// here because the admin name is part of the config hash; a pre-upgrade Secret
+// awaiting its hash backfill and a missing credentials Secret are reported
+// stale too. None of these produces a condition transition to wake this
+// reconciler, so the caller sets a requeue whenever it defers — a wrong or
+// transient "stale" costs one interval, never a stalled Deployment.
 //
 // The hash comparison is computed from the spec this reconcile already holds,
 // so unlike the ClusterConfigReady condition it does not depend on the cluster
@@ -1220,25 +1239,36 @@ func (r *IdentityServerNodeReconciler) clusterConfigStale(
 	}
 
 	// Branch C inputs: image, pull secret, admin node, packages, config port.
-	if stored := secret.Annotations["curity.io/cluster-config-hash"]; stored != "" &&
-		stored != computeClusterConfigHash(cluster, findAdminNodeName(childNodes), findAdminConfigPort(childNodes)) {
+	// An absent hash is a pre-upgrade Secret the cluster reconciler has yet to
+	// backfill; until it does, this Secret cannot be verified against the spec
+	// in hand, so it is stale. The backfill produces no condition transition,
+	// so the caller's requeue is what re-checks it.
+	stored := secret.Annotations["curity.io/cluster-config-hash"]
+	if stored == "" || stored != computeClusterConfigHash(cluster, findAdminNodeName(childNodes), findAdminConfigPort(childNodes)) {
 		return true, nil
 	}
 
 	// Branch A input: the encryption key, which computeClusterConfigHash omits
-	// on purpose. Same empty-guards as Branch A — an absent stored hash or a
-	// credentials Secret not yet visible in cache must not read as rotation.
+	// on purpose. An absent stored hash means there is nothing to compare
+	// against, so nothing is read.
 	storedKey := secret.Annotations["curity.io/encryption-key-hash"]
 	if storedKey == "" {
 		return false, nil
 	}
 	currentKey, err := encryptionKeyHash(ctx, r.Client, cluster)
 	if err != nil {
+		// A missing credentials Secret is stale, not unknown: with a stored
+		// hash present the cluster was working, so the reference has been
+		// repointed at something that does not exist (or the Secret removed).
+		// Rolling the Deployment would give it env references to a Secret it
+		// cannot mount. The requeue set by the caller retries until it appears.
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return true, nil
 		}
 		return false, err
 	}
+	// Same guard as Branch A: a present Secret without the key is not a
+	// rotation, and the cluster reconciler would not regenerate for it.
 	return currentKey != "" && currentKey != storedKey, nil
 }
 

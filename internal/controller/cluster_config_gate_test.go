@@ -119,10 +119,13 @@ func TestClusterConfigStale(t *testing.T) {
 			want:    true,
 		},
 		{
-			name:    "un-annotated Secret defers to the condition",
+			// A pre-upgrade Secret the cluster reconciler has yet to backfill.
+			// It cannot be verified against the spec, so it is stale until the
+			// backfill lands; the gate's requeue re-checks it.
+			name:    "un-annotated config hash is stale until backfilled",
 			cluster: baseCluster,
 			secret:  configSecret(realXML, ""),
-			want:    false,
+			want:    true,
 		},
 		{
 			name:    "hash matching the spec is fresh",
@@ -161,13 +164,16 @@ func TestClusterConfigStale(t *testing.T) {
 			want:    false,
 		},
 		{
-			// Mirrors Branch A's empty-guard: a credentials Secret not yet
-			// visible in cache must not read as a rotation.
-			name:    "missing credentials Secret defers to the condition",
+			// A stored key hash means the cluster was working with credentials
+			// that resolved. Their Secret being gone now means the reference
+			// was repointed at nothing, or the Secret deleted; either way a
+			// Deployment rolled now would reference a Secret it cannot mount.
+			// The gate's requeue retries until it appears.
+			name:    "missing credentials Secret is stale",
 			cluster: clusterWithCreds(),
 			secret:  withKeyHash(configSecret(realXML, baseHash), keyHash("old-key")),
 			creds:   nil,
-			want:    false,
+			want:    true,
 		},
 		{
 			// No stored key hash means nothing to compare against — and no

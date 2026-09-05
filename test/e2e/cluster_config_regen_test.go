@@ -199,60 +199,45 @@ var _ = Describe("cluster.xml regeneration", func() {
 				return k().Update(ctx, cluster)
 			}, e2eTimeout, e2eInterval).Should(Succeed())
 
-			By("observing Branch C fire — Secret data resets and hash changes")
+			By("observing Branch C fire — Secret resets to placeholder with the Deployment held back")
+			// The Deployment is sampled inside the same poll that proves the Secret
+			// is a placeholder, and is read *first*: the Secret only travels
+			// placeholder->real here, so seeing the placeholder afterwards proves the
+			// gate was shut at the moment the Deployment was captured. Observing the
+			// two in separate phases would race — regeneration can finish in the gap
+			// on a fast cluster, leaving nothing to assert against.
+			//
+			// Keyed on the Secret rather than ClusterConfigReady deliberately: the
+			// cluster reconciler writes the placeholder before it flips the condition,
+			// and a node reconcile landing in between is exactly the race this guards.
+			// Asserting on the condition would let that regression through.
+			var deployAtPlaceholder *appsv1.Deployment
 			Eventually(func(g Gomega) {
+				d := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, deployKey, d)).To(Succeed())
+
 				s := &corev1.Secret{}
 				g.Expect(k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}, s)).To(Succeed())
 				g.Expect(s.Annotations["curity.io/cluster-config-hash"]).NotTo(Equal(hashBefore),
 					"cluster-config-hash must change after spec.packages edit")
 				g.Expect(string(s.Data["cluster.xml"])).To(Equal("placeholder"),
 					"Secret data must reset to placeholder during regen")
+
+				deployAtPlaceholder = d
 			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("verifying the runtime Deployment update was deferred while cluster.xml was a placeholder")
+			Expect(deployAtPlaceholder.Generation).To(Equal(generationBefore),
+				"Deployment.Generation must stay flat while the gate defers updates")
+			for _, ic := range deployAtPlaceholder.Spec.Template.Spec.InitContainers {
+				Expect(ic.Name).NotTo(Equal("package-fetch-0"),
+					"package init container must not appear while the gate defers updates")
+			}
 
 			By("observing a fresh genclust Job created against the new spec")
 			Eventually(func() error {
 				return k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}, &batchv1.Job{})
 			}, e2eTimeout, e2eInterval).Should(Succeed())
-
-			By("verifying the runtime Deployment update is deferred while cluster.xml is a placeholder")
-			// Hold the invariant for exactly as long as the gate is shut, rather
-			// than for a fixed window: the genclust Job can finish in a couple of
-			// seconds on a fast cluster, after which the deferred update is *supposed*
-			// to land. A Consistently longer than regeneration takes fails on correct
-			// behaviour. Equally, this does not require regeneration to finish — on a
-			// slower cluster the placeholder simply outlives the window.
-			//
-			// Keyed on the Secret rather than ClusterConfigReady: the cluster
-			// reconciler writes the placeholder before it flips the condition, and a
-			// node reconcile landing in between is exactly the race this guards.
-			// Asserting on the condition would let that regression through.
-			//
-			// The Deployment is read before the Secret: the Secret only travels
-			// placeholder->real here, so seeing the placeholder after the read proves
-			// it was still the placeholder when the Deployment was sampled.
-			observedGateShut := false
-			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
-				d := &appsv1.Deployment{}
-				Expect(k().Get(ctx, deployKey, d)).To(Succeed())
-
-				s := &corev1.Secret{}
-				Expect(k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}, s)).To(Succeed())
-				if string(s.Data["cluster.xml"]) != "placeholder" {
-					// Regeneration finished; the deferred update may now land.
-					break
-				}
-				observedGateShut = true
-
-				Expect(d.Generation).To(Equal(generationBefore),
-					"Deployment.Generation must stay flat while the gate defers updates")
-				for _, ic := range d.Spec.Template.Spec.InitContainers {
-					Expect(ic.Name).NotTo(Equal("package-fetch-0"),
-						"package init container must not appear while the gate defers updates")
-				}
-				time.Sleep(e2eInterval)
-			}
-			Expect(observedGateShut).To(BeTrue(),
-				"never observed the cluster.xml placeholder, so the deferral gate was never exercised")
 
 			By("restoring ClusterConfigReady=True (simulates genclust Job completion in Kind)")
 			utils.SimulateClusterConfigReady(ns, clusterName, e2eTimeout, e2eInterval)

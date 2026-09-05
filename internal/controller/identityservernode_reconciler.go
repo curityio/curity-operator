@@ -383,8 +383,12 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// would write the very Deployment this gate exists to hold back. Derive
 		// staleness from observed state too — that needs no other controller to
 		// have acted first.
-		if !notReady && r.clusterConfigStale(ctx, &cluster, nodeList.Items) {
-			notReady = true
+		if !notReady {
+			stale, err := r.clusterConfigStale(ctx, &cluster, nodeList.Items)
+			if err != nil {
+				return ctrl.Result{}, fmt.Errorf("checking cluster config staleness for config gate: %w", err)
+			}
+			notReady = stale
 		}
 		if notReady {
 			var existingDeploy appsv1.Deployment
@@ -1180,36 +1184,40 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 // reconcilers and this one observes a condition still True from the previous
 // generation.
 //
-// A missing or un-annotated Secret returns false: creating and backfilling it
-// belongs to the cluster reconciler, and the ClusterConfigReady check already
-// covers the first-create path.
+// A missing Secret counts as stale. This is only consulted once
+// ClusterConfigReady is already True, and that condition is set only after the
+// cluster reconciler has seen a ready Secret — so NotFound here means the Secret
+// was deleted after being ready, not that it has yet to be created. Writing a
+// Deployment then would mount a Secret that no longer exists.
+//
+// An un-annotated Secret returns false: backfilling the hash belongs to the
+// cluster reconciler, and the data check above already covers regeneration.
 func (r *IdentityServerNodeReconciler) clusterConfigStale(
 	ctx context.Context,
 	cluster *v1alpha1.IdentityServerCluster,
 	childNodes []v1alpha1.IdentityServerNode,
-) bool {
+) (bool, error) {
 	var secret corev1.Secret
 	key := client.ObjectKey{
 		Name:      cluster.Name + clusterConfigSecretSuffix,
 		Namespace: cluster.Namespace,
 	}
 	if err := r.Get(ctx, key, &secret); err != nil {
-		// NotFound means the cluster reconciler has not created it yet, which
-		// the ClusterConfigReady check already covers. Any other error is
-		// treated the same way deliberately: fall back to the condition rather
-		// than block Deployment writes on a transient API failure.
-		return false
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
 	}
 	// Secret already reset to the placeholder — regeneration is under way even
 	// if the condition has not caught up.
 	if !isClusterConfigReady(&secret) {
-		return true
+		return true, nil
 	}
 	stored := secret.Annotations["curity.io/cluster-config-hash"]
 	if stored == "" {
-		return false
+		return false, nil
 	}
-	return stored != computeClusterConfigHash(cluster, findAdminNodeName(childNodes), findAdminConfigPort(childNodes))
+	return stored != computeClusterConfigHash(cluster, findAdminNodeName(childNodes), findAdminConfigPort(childNodes)), nil
 }
 
 // SetupWithManager registers the controller with the manager.

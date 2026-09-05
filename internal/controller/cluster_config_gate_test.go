@@ -2,11 +2,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	v1alpha1 "github.com/curityio/curity-operator/api/v1alpha1"
 )
@@ -71,10 +74,13 @@ func TestClusterConfigStale(t *testing.T) {
 		want    bool
 	}{
 		{
-			name:    "no Secret yet defers to the condition",
+			// Only reached with ClusterConfigReady already True, which the
+			// cluster reconciler sets only after seeing a ready Secret — so a
+			// missing Secret means it was deleted, not that it is yet to appear.
+			name:    "deleted Secret is stale",
 			cluster: baseCluster,
 			secret:  nil,
-			want:    false,
+			want:    true,
 		},
 		{
 			name:    "placeholder data means regeneration is under way",
@@ -122,9 +128,49 @@ func TestClusterConfigStale(t *testing.T) {
 			}
 
 			r := &IdentityServerNodeReconciler{Client: builder.Build(), Scheme: s}
-			if got := r.clusterConfigStale(context.Background(), tc.cluster, adminNodes); got != tc.want {
+			got, err := r.clusterConfigStale(context.Background(), tc.cluster, adminNodes)
+			if err != nil {
+				t.Fatalf("clusterConfigStale() unexpected error: %v", err)
+			}
+			if got != tc.want {
 				t.Errorf("clusterConfigStale() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestClusterConfigStale_ReadErrorPropagates asserts a non-NotFound read failure
+// surfaces to the caller rather than being reported as "not stale". Swallowing
+// it would open the same window the helper exists to close: a transient API
+// error would let the node write a Deployment against unverified config.
+func TestClusterConfigStale_ReadErrorPropagates(t *testing.T) {
+	s := newScheme(t)
+	if err := v1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("adding v1alpha1 to scheme: %v", err)
+	}
+
+	cluster := &v1alpha1.IdentityServerCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c1", Namespace: "ns"},
+		Spec:       v1alpha1.IdentityServerClusterSpec{Version: "11.0"},
+	}
+	readErr := errors.New("boom")
+
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(cluster).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Secret); ok {
+					return readErr
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+
+	r := &IdentityServerNodeReconciler{Client: c, Scheme: s}
+	stale, err := r.clusterConfigStale(context.Background(), cluster, nil)
+	if !errors.Is(err, readErr) {
+		t.Fatalf("clusterConfigStale() error = %v, want %v", err, readErr)
+	}
+	if stale {
+		t.Errorf("clusterConfigStale() = true on read error, want false alongside the error")
 	}
 }

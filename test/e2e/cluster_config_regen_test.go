@@ -72,10 +72,8 @@ var _ = Describe("cluster.xml regeneration", func() {
 					"Secret data must reset to placeholder during regen")
 			}, e2eTimeout, e2eInterval).Should(Succeed())
 
-			By("observing a fresh genclust Job created against the new spec")
-			Eventually(func() error {
-				return k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}, &batchv1.Job{})
-			}, e2eTimeout, e2eInterval).Should(Succeed())
+			By("observing that regeneration was triggered against the new spec")
+			expectRegenerationTriggered(ctx, ns, clusterName, hashBefore)
 
 			By("snapshot — cluster CR status mid-regen (Job recreated for new version)")
 			Expect(k().Get(ctx, client.ObjectKey{Name: clusterName, Namespace: ns}, cluster)).To(Succeed())
@@ -283,23 +281,7 @@ var _ = Describe("cluster.xml regeneration", func() {
 			}
 
 			By("observing that regeneration was triggered against the new spec")
-			// Either the genclust Job is present, or it has already run to
-			// completion: real cluster.xml under the post-edit hash. On a fast
-			// cluster the Job finishes within seconds of the reset and does not
-			// outlive the window sampled above, so requiring the Job object itself
-			// would race its own lifetime. A completed regeneration proves the
-			// trigger fired at least as well as an in-flight Job does.
-			Eventually(func(g Gomega) {
-				if err := k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}, &batchv1.Job{}); err == nil {
-					return
-				}
-				s := &corev1.Secret{}
-				g.Expect(k().Get(ctx, secretKey, s)).To(Succeed())
-				g.Expect(s.Annotations["curity.io/cluster-config-hash"]).NotTo(Equal(hashBefore),
-					"regeneration must have been triggered: no Job and hash still pre-edit")
-				g.Expect(string(s.Data["cluster.xml"])).NotTo(Equal("placeholder"),
-					"regeneration must have been triggered: no Job yet Secret still a placeholder")
-			}, e2eTimeout, e2eInterval).Should(Succeed())
+			expectRegenerationTriggered(ctx, ns, clusterName, hashBefore)
 
 			By("restoring ClusterConfigReady=True (simulates genclust Job completion in Kind)")
 			utils.SimulateClusterConfigReady(ns, clusterName, e2eTimeout, e2eInterval)
@@ -448,3 +430,44 @@ var _ = Describe("cluster.xml regeneration", func() {
 		})
 	})
 })
+
+// expectRegenerationTriggered asserts that a cluster spec edit has kicked off
+// cluster.xml regeneration for the *edited* spec. Two observations prove it, and
+// either suffices:
+//
+//   - a live genclust Job whose cluster-config-hash annotation matches the
+//     Secret's post-edit hash. The Job's name alone proves nothing:
+//     SimulateClusterConfigReady only patches the Secret and the steady-state
+//     branch never deletes the pre-edit Job, so on a slow cluster that stale Job
+//     can still be returned by name while Branch C deletes and recreates it. The
+//     hash match and a nil deletionTimestamp pin the Job to the edited spec;
+//   - or a completed regeneration: real cluster.xml under the post-edit hash. On
+//     a fast cluster the new Job finishes within seconds and the operator deletes
+//     it on completion, so requiring the Job object would race its own lifetime.
+//     This is sound because the cluster reconciler checks a Job's hash for drift
+//     before accepting its output, so real data under the new hash can only have
+//     come from a new-spec Job.
+func expectRegenerationTriggered(ctx context.Context, ns, clusterName, hashBefore string) {
+	GinkgoHelper()
+	secretKey := client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}
+	jobKey := client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}
+	Eventually(func(g Gomega) {
+		s := &corev1.Secret{}
+		g.Expect(k().Get(ctx, secretKey, s)).To(Succeed())
+		currentHash := s.Annotations["curity.io/cluster-config-hash"]
+		g.Expect(currentHash).NotTo(Equal(hashBefore),
+			"cluster-config-hash must reflect the edited spec")
+
+		job := &batchv1.Job{}
+		err := k().Get(ctx, jobKey, job)
+		if err == nil && job.DeletionTimestamp == nil &&
+			job.Annotations["curity.io/cluster-config-hash"] == currentHash {
+			return
+		}
+		if err != nil {
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "unexpected error reading genclust Job: %v", err)
+		}
+		g.Expect(string(s.Data["cluster.xml"])).NotTo(Equal("placeholder"),
+			"no live genclust Job for the edited spec, and cluster.xml is still a placeholder")
+	}, e2eTimeout, e2eInterval).Should(Succeed())
+}

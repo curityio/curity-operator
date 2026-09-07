@@ -1,5 +1,7 @@
 # Curity Operator
 
+[![Latest release](https://img.shields.io/github/v/release/curityio/curity-operator?sort=semver)](https://github.com/curityio/curity-operator/releases/latest)
+
 A Kubernetes operator that deploys and manages the [Curity Identity Server](https://curity.io/docs/).
 
 Describe the Identity Server cluster you want with a handful of custom resources, and the operator
@@ -66,14 +68,12 @@ behalf).
 
 ### Helm (recommended)
 
-The chart is published as an OCI artifact alongside the operator image on `curity.azurecr.io`,
-which allows anonymous pulls — no registry login needed. Check the
-[releases page](https://github.com/curityio/curity-operator/releases) for the latest version and
-substitute it below.
+The chart is published as an OCI artifact alongside the operator image on `curity.azurecr.io`.
+Without `--version`, Helm installs the latest release; add `--version X.Y.Z` to pin one (see the
+[releases page](https://github.com/curityio/curity-operator/releases) for the available versions).
 
 ```bash
 helm install curity-operator oci://curity.azurecr.io/charts/curity-operator \
-  --version 0.0.1 \
   --namespace curity-operator \
   --create-namespace
 ```
@@ -83,7 +83,7 @@ Useful values:
 | Value | Default | Description |
 |---|---|---|
 | `controllerManager.manager.image.repository` | `curity.azurecr.io/curity/operator` | Operator image; point at a mirror for air-gapped clusters |
-| `controllerManager.manager.image.tag` | `v<chart version>` (e.g. `v0.0.1`) | Operator image tag |
+| `controllerManager.manager.image.tag` | `<chart version>` | Operator image tag |
 | `controllerManager.manager.env.packageFetcherImage` | `alpine:3.19` | Image used by the package init containers, see [Packages](#packages-plugins) |
 | `controllerManager.replicas` | `1` | Operator replicas |
 | `controllerManager.manager.resources` | 10m/128Mi requests | Operator resource requests and limits |
@@ -101,17 +101,18 @@ kubectl create secret docker-registry operator-pull-secret \
   --namespace curity-operator
 
 helm install curity-operator oci://curity.azurecr.io/charts/curity-operator \
-  --version 0.0.1 --namespace curity-operator --create-namespace \
+  --namespace curity-operator --create-namespace \
   --set controllerManager.manager.image.repository=my-registry.example.com/curity/operator \
   --set imagePullSecrets[0].name=operator-pull-secret
 ```
 
 ### Plain manifests
 
-Every release also ships a single consolidated manifest:
+Every release also ships a single consolidated manifest. The URL below always resolves to the
+latest release; to pin a version, replace `latest/download` with `download/X.Y.Z`:
 
 ```bash
-kubectl apply -f https://github.com/curityio/curity-operator/releases/download/v0.0.1/install.yaml
+kubectl apply -f https://github.com/curityio/curity-operator/releases/latest/download/install.yaml
 ```
 
 ### Verify

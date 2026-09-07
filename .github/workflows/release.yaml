@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: write
@@ -18,11 +18,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The tag is the version: X.Y.Z, no prefix. The same string names the
+      # image tag, the chart version and the GitHub release.
       - name: Extract version from tag
         id: version
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -47,7 +47,7 @@ jobs:
         run: |
           make docker-buildx VERSION=${{ steps.version.outputs.version }}
           docker buildx imagetools create \
-            curity.azurecr.io/curity/operator:v${{ steps.version.outputs.version }} \
+            curity.azurecr.io/curity/operator:${{ steps.version.outputs.version }} \
             --tag curity.azurecr.io/curity/operator:latest
 
       - name: Generate and version Helm chart

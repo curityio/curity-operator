@@ -128,13 +128,14 @@ make vet   # Run go vet
 | `pull_request.yaml` | PRs to `main` | generate, lint, unit tests, build, `docker build`, `helm lint` | nothing |
 | `e2e.yaml` | `ok-to-test/e2e` label on a PR | `build-image` publishes the test image, then `e2e-tests` runs the suite against the shared AKS cluster | GHCR |
 | `push.yaml` | push to `main` | tests, build, push image, generate + push the Helm chart | GHCR |
-| `release.yaml` | tag `vX.Y.Z` | multi-arch image (+ `latest`), versioned chart, `dist/install.yaml`, GitHub release | ACR |
+| `release.yaml` | tag `X.Y.Z` | multi-arch image (+ `latest`), versioned chart, `dist/install.yaml`, GitHub release | ACR |
 
 PR builds publish nothing: the image is built to prove it compiles and then discarded. `e2e.yaml`
 publishes its own test image, so a PR-stage push would only add a throwaway tag per commit.
 
-To cut a release, push a `vX.Y.Z` tag on `main`. The workflow derives the version from the tag,
-runs `make version-sync`, publishes `curity.azurecr.io/curity/operator:vX.Y.Z` (and `:latest`) and
+To cut a release, push an `X.Y.Z` tag on `main` — no `v` prefix. The tag is used verbatim as the
+version everywhere: the workflow runs `make version-sync`, publishes
+`curity.azurecr.io/curity/operator:X.Y.Z` (and `:latest`) and chart version `X.Y.Z` at
 `oci://curity.azurecr.io/charts/curity-operator`, and attaches `install.yaml` to the GitHub release.
 
 Add `[skip-ci]` to a commit message to skip the push workflow. Markdown-only changes are already
@@ -143,12 +144,12 @@ ignored by the PR and push workflows.
 ### Registries
 
 Two registries, split by purpose: **ACR holds releases only, GHCR holds CI artifacts.** Nothing but
-a `vX.Y.Z` tag ever writes to `curity.azurecr.io`, so the public registry stays free of throwaway
+an `X.Y.Z` tag ever writes to `curity.azurecr.io`, so the public registry stays free of throwaway
 builds.
 
 | Artifact | Location | Visibility | Set by |
 |---|---|---|---|
-| Released image | `curity.azurecr.io/curity/operator:vX.Y.Z`, `:latest` | anonymous pull | `DOCKER_REPO_BASE` + `OPERATOR_NAME` |
+| Released image | `curity.azurecr.io/curity/operator:X.Y.Z`, `:latest` | anonymous pull | `DOCKER_REPO_BASE` + `OPERATOR_NAME` |
 | Released chart | `oci://curity.azurecr.io/charts/curity-operator` | anonymous pull | `HELM_REGISTRY` |
 | CI image (main, e2e) | `ghcr.io/curityio/curity-operator:<tag>` | private | `IMAGE_REPO` / `IMG` override |
 | CI chart (main) | `oci://ghcr.io/curityio/charts/curity-operator` | private | `HELM_REGISTRY` override |
@@ -172,7 +173,7 @@ with `packages: read` and `make test-e2e-run` (the half of `test-e2e-remote` tha
 `make test-e2e-remote` locally still does the whole thing in one go.
 
 `IMAGE_REPO` is the repository both publishing paths start from — `IMG` is derived from it
-(`IMG ?= $(IMAGE_REPO):v$(VERSION)`), not the reverse, so overriding `IMAGE_REPO` moves everything
+(`IMG ?= $(IMAGE_REPO):$(VERSION)`), not the reverse, so overriding `IMAGE_REPO` moves everything
 while overriding `IMG` alone only retags the build. It reaches the published artifacts by two
 routes:
 

@@ -52,7 +52,7 @@ jobs:
 
       - name: Docker Build and Push
         env:
-          IMG: ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.tag }}
+          IMG: ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.version }}
           # Feeds the Dockerfile's VERSION build-arg, i.e. the image's
           # org.opencontainers version label. Without it every CI image would
           # be labelled with the Makefile default rather than its own tag.

@@ -26,7 +26,7 @@ DOCKER_REPO_BASE ?= curity.azurecr.io/curity
 # that when publishing main-branch builds to GHCR instead of the release
 # registry.
 IMAGE_REPO ?= $(DOCKER_REPO_BASE)/$(OPERATOR_NAME)
-IMG ?= $(IMAGE_REPO):v$(VERSION)
+IMG ?= $(IMAGE_REPO):$(VERSION)
 # The e2e suite shells out to `make kustomize-deploy` (test/utils/utils.go Run),
 # which must deploy the image under test rather than the default tag. A
 # command-line IMG= already reaches it through MAKEOVERRIDES/MAKEFLAGS, which
@@ -227,9 +227,9 @@ helm-push: helm-package ## Push Helm chart to OCI registry.
 version-sync: yq ## Patch all version and image-repository references to VERSION/IMAGE_REPO.
 	$(SED) -i 's/^version: .*/version: $(VERSION)/' $(HELM_CHART_DIR)/Chart.yaml
 	$(SED) -i 's/^appVersion: .*/appVersion: "$(VERSION)"/' $(HELM_CHART_DIR)/Chart.yaml
-	$(YQ) -i '.controllerManager.manager.image.tag = "v$(VERSION)"' $(HELM_CHART_DIR)/values.yaml
+	$(YQ) -i '.controllerManager.manager.image.tag = "$(VERSION)"' $(HELM_CHART_DIR)/values.yaml
 	$(YQ) -i '.controllerManager.manager.image.repository = "$(IMAGE_REPO)"' $(HELM_CHART_DIR)/values.yaml
-	$(SED) -i 's/newTag: .*/newTag: v$(VERSION)/' config/manager/kustomization.yaml
+	$(SED) -i 's/newTag: .*/newTag: $(VERSION)/' config/manager/kustomization.yaml
 	$(SED) -i 's|newName: .*|newName: $(IMAGE_REPO)|' config/manager/kustomization.yaml
 
 ##@ Cluster
@@ -281,7 +281,7 @@ deploy-helm: deploy-kind helmify ## Build, load into Kind, and deploy via Helm.
 		--namespace $(OPERATOR_NS) \
 		--create-namespace \
 		--set controllerManager.manager.image.repository=$(DOCKER_REPO_BASE)/$(OPERATOR_NAME) \
-		--set controllerManager.manager.image.tag=v$(VERSION) \
+		--set controllerManager.manager.image.tag=$(VERSION) \
 		--wait --timeout 120s
 
 .PHONY: undeploy-helm

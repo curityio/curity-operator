@@ -24,7 +24,6 @@ jobs:
       packages: write
       pull-requests: write
     outputs:
-      tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
     steps:
       - name: Remove test label
@@ -60,7 +59,7 @@ jobs:
 
       - name: Build and Push
         env:
-          IMG: ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.tag }}
+          IMG: ghcr.io/curityio/curity-operator:${{ steps.tag.outputs.version }}
           VERSION: ${{ steps.tag.outputs.version }}
         run: |
           make generate
@@ -129,7 +128,7 @@ jobs:
       # test-e2e-run, not test-e2e-remote: the image was published by the
       # build-image job, so this one only installs CRDs and runs the suite.
       - name: Run E2E Tests
-        run: make test-e2e-run IMG=ghcr.io/curityio/curity-operator:${{ needs.build-image.outputs.tag }}
+        run: make test-e2e-run IMG=ghcr.io/curityio/curity-operator:${{ needs.build-image.outputs.version }}
 
       - name: Collect operator logs
         if: failure()

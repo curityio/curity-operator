@@ -5,4 +5,4 @@ resources:
 images:
 - name: controller
   newName: curity.azurecr.io/curity/operator
-  newTag: v0.0.1
+  newTag: 0.0.1

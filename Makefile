@@ -254,7 +254,12 @@ cluster: kind ## Create a Kind cluster for e2e testing.
 		echo "Creating Kind cluster '$(TEST_CLUSTER_NAME)'..."; \
 		$(KIND) create cluster --name $(TEST_CLUSTER_NAME) --wait 60s; \
 	fi
-	@kubectl cluster-info --context kind-$(TEST_CLUSTER_NAME)
+	@# `kind create cluster` switches the active context, but it is skipped when
+	@# the cluster already exists — and `cluster-info --context` does not switch
+	@# anything. Without this, a re-run deploys the operator and CRDs into
+	@# whatever context happens to be active (e.g. docker-desktop).
+	@$(KUBECTL) config use-context kind-$(TEST_CLUSTER_NAME)
+	@$(KUBECTL) cluster-info --context kind-$(TEST_CLUSTER_NAME)
 
 .PHONY: cluster-destroy
 cluster-destroy: kind ## Destroy the Kind e2e cluster.

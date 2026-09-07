@@ -72,10 +72,8 @@ var _ = Describe("cluster.xml regeneration", func() {
 					"Secret data must reset to placeholder during regen")
 			}, e2eTimeout, e2eInterval).Should(Succeed())
 
-			By("observing a fresh genclust Job created against the new spec")
-			Eventually(func() error {
-				return k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}, &batchv1.Job{})
-			}, e2eTimeout, e2eInterval).Should(Succeed())
+			By("observing that regeneration was triggered against the new spec")
+			expectRegenerationTriggered(ctx, ns, clusterName, hashBefore)
 
 			By("snapshot — cluster CR status mid-regen (Job recreated for new version)")
 			Expect(k().Get(ctx, client.ObjectKey{Name: clusterName, Namespace: ns}, cluster)).To(Succeed())
@@ -199,32 +197,91 @@ var _ = Describe("cluster.xml regeneration", func() {
 				return k().Update(ctx, cluster)
 			}, e2eTimeout, e2eInterval).Should(Succeed())
 
-			By("observing Branch C fire — Secret data resets and hash changes")
+			By("observing Branch C fire — Secret resets to placeholder with the Deployment held back")
+			// The Deployment read is bracketed by two reads of the placeholder Secret
+			// at the same resourceVersion. That proves the sample was taken strictly
+			// inside the placeholder window, which both directions of the race need:
+			//
+			//   - reading the Deployment first and the Secret after would let a buggy
+			//     write slip through, since that write lands *before* the reset and a
+			//     pre-write snapshot would still look clean;
+			//   - reading the Secret first and the Deployment after would go the other
+			//     way and fail spuriously, because regeneration can complete in the gap
+			//     and the legitimate deferred update then lands.
+			//
+			// If the Secret moves mid-sample the bracket is discarded and Eventually
+			// simply retries.
+			//
+			// Keyed on the Secret rather than ClusterConfigReady because the
+			// placeholder is the state the gate protects against mounting, and it is
+			// the signal the operator's own staleness check reads. Branch C flips the
+			// condition before it resets the Secret, so from the API server either
+			// would bound the window — the Secret is simply the thing under test.
+			secretKey := client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}
+			var deployAtPlaceholder *appsv1.Deployment
 			Eventually(func(g Gomega) {
-				s := &corev1.Secret{}
-				g.Expect(k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}, s)).To(Succeed())
-				g.Expect(s.Annotations["curity.io/cluster-config-hash"]).NotTo(Equal(hashBefore),
+				before := &corev1.Secret{}
+				g.Expect(k().Get(ctx, secretKey, before)).To(Succeed())
+				g.Expect(before.Annotations["curity.io/cluster-config-hash"]).NotTo(Equal(hashBefore),
 					"cluster-config-hash must change after spec.packages edit")
-				g.Expect(string(s.Data["cluster.xml"])).To(Equal("placeholder"),
+				g.Expect(string(before.Data["cluster.xml"])).To(Equal("placeholder"),
 					"Secret data must reset to placeholder during regen")
-			}, e2eTimeout, e2eInterval).Should(Succeed())
 
-			By("observing a fresh genclust Job created against the new spec")
-			Eventually(func() error {
-				return k().Get(ctx, client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}, &batchv1.Job{})
-			}, e2eTimeout, e2eInterval).Should(Succeed())
-
-			By("verifying the runtime Deployment update is deferred while ClusterConfigReady is False")
-			Consistently(func(g Gomega) {
 				d := &appsv1.Deployment{}
 				g.Expect(k().Get(ctx, deployKey, d)).To(Succeed())
-				g.Expect(d.Generation).To(Equal(generationBefore),
+
+				after := &corev1.Secret{}
+				g.Expect(k().Get(ctx, secretKey, after)).To(Succeed())
+				g.Expect(after.ResourceVersion).To(Equal(before.ResourceVersion),
+					"cluster-config Secret changed while the Deployment was sampled; retrying for a clean bracket")
+
+				deployAtPlaceholder = d
+			}, e2eTimeout, e2eInterval).Should(Succeed())
+
+			By("verifying the runtime Deployment update was deferred while cluster.xml was a placeholder")
+			Expect(deployAtPlaceholder.Generation).To(Equal(generationBefore),
+				"Deployment.Generation must stay flat while the gate defers updates")
+			for _, ic := range deployAtPlaceholder.Spec.Template.Spec.InitContainers {
+				Expect(ic.Name).NotTo(Equal("package-fetch-0"),
+					"package init container must not appear while the gate defers updates")
+			}
+
+			By("holding that invariant for the remainder of the placeholder window")
+			// One clean sample proves the gate was shut at an instant. It does not
+			// rule out a late write: a node reconcile that read the stale ready
+			// state can still land its update *after* that sample while the Secret
+			// is the same placeholder — the original CI failure did exactly this,
+			// about 200ms after the placeholder appeared. Keep taking bracketed
+			// samples until one observes the gate open, asserting on every clean
+			// placeholder sample. Bounded, and not requiring the gate to open, so a
+			// slower cluster where regeneration outlives the window still passes.
+			for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+				before := &corev1.Secret{}
+				Expect(k().Get(ctx, secretKey, before)).To(Succeed())
+				if string(before.Data["cluster.xml"]) != "placeholder" {
+					break // gate opened; the deferred update may legitimately land now
+				}
+
+				d := &appsv1.Deployment{}
+				Expect(k().Get(ctx, deployKey, d)).To(Succeed())
+
+				after := &corev1.Secret{}
+				Expect(k().Get(ctx, secretKey, after)).To(Succeed())
+				if after.ResourceVersion != before.ResourceVersion {
+					continue // Secret moved mid-sample; bracket is not clean
+				}
+
+				Expect(d.Generation).To(Equal(generationBefore),
 					"Deployment.Generation must stay flat while the gate defers updates")
 				for _, ic := range d.Spec.Template.Spec.InitContainers {
-					g.Expect(ic.Name).NotTo(Equal("package-fetch-0"),
-						"package init container must not appear until ClusterConfigReady=True")
+					Expect(ic.Name).NotTo(Equal("package-fetch-0"),
+						"package init container must not appear while the gate defers updates")
 				}
-			}, 5*time.Second, e2eInterval).Should(Succeed())
+				time.Sleep(e2eInterval)
+			}
+
+			By("observing that regeneration was triggered against the new spec")
+			expectRegenerationTriggered(ctx, ns, clusterName, hashBefore)
 
 			By("restoring ClusterConfigReady=True (simulates genclust Job completion in Kind)")
 			utils.SimulateClusterConfigReady(ns, clusterName, e2eTimeout, e2eInterval)
@@ -373,3 +430,44 @@ var _ = Describe("cluster.xml regeneration", func() {
 		})
 	})
 })
+
+// expectRegenerationTriggered asserts that a cluster spec edit has kicked off
+// cluster.xml regeneration for the *edited* spec. Two observations prove it, and
+// either suffices:
+//
+//   - a live genclust Job whose cluster-config-hash annotation matches the
+//     Secret's post-edit hash. The Job's name alone proves nothing:
+//     SimulateClusterConfigReady only patches the Secret and the steady-state
+//     branch never deletes the pre-edit Job, so on a slow cluster that stale Job
+//     can still be returned by name while Branch C deletes and recreates it. The
+//     hash match and a nil deletionTimestamp pin the Job to the edited spec;
+//   - or a completed regeneration: real cluster.xml under the post-edit hash. On
+//     a fast cluster the new Job finishes within seconds and the operator deletes
+//     it on completion, so requiring the Job object would race its own lifetime.
+//     This is sound because the cluster reconciler checks a Job's hash for drift
+//     before accepting its output, so real data under the new hash can only have
+//     come from a new-spec Job.
+func expectRegenerationTriggered(ctx context.Context, ns, clusterName, hashBefore string) {
+	GinkgoHelper()
+	secretKey := client.ObjectKey{Name: clusterName + "-cluster-config", Namespace: ns}
+	jobKey := client.ObjectKey{Name: clusterName + "-cluster-config-job", Namespace: ns}
+	Eventually(func(g Gomega) {
+		s := &corev1.Secret{}
+		g.Expect(k().Get(ctx, secretKey, s)).To(Succeed())
+		currentHash := s.Annotations["curity.io/cluster-config-hash"]
+		g.Expect(currentHash).NotTo(Equal(hashBefore),
+			"cluster-config-hash must reflect the edited spec")
+
+		job := &batchv1.Job{}
+		err := k().Get(ctx, jobKey, job)
+		if err == nil && job.DeletionTimestamp == nil &&
+			job.Annotations["curity.io/cluster-config-hash"] == currentHash {
+			return
+		}
+		if err != nil {
+			g.Expect(apierrors.IsNotFound(err)).To(BeTrue(), "unexpected error reading genclust Job: %v", err)
+		}
+		g.Expect(string(s.Data["cluster.xml"])).NotTo(Equal("placeholder"),
+			"no live genclust Job for the edited spec, and cluster.xml is still a placeholder")
+	}, e2eTimeout, e2eInterval).Should(Succeed())
+}

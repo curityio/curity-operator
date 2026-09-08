@@ -32,7 +32,7 @@ kubectl --context kind-e2e-test-cluster -n curity-operator get pods,deploy
 kubectl get crd | grep curity
 ```
 
-Expected: `curity-operator-controller-manager` pod `2/2 Running`, plus `identityserverclusters.curity.io` and `identityservernodes.curity.io` CRDs.
+Expected: `curity-operator-controller-manager` pod `2/2 Running`, plus the `identityserverclusters.curity.io`, `identityservernodes.curity.io` and `identityserverdatabases.curity.io` CRDs.
 
 ### Alternative: Kustomize instead of Helm
 
@@ -88,7 +88,7 @@ kubectl get crd | grep curity
 kubectl -n curity-operator logs deploy/curity-operator-controller-manager -c manager --tail=50
 ```
 
-Expected: `curity-operator-controller-manager` pod `2/2 Running`, plus `identityserverclusters.curity.io` and `identityservernodes.curity.io` CRDs.
+Expected: `curity-operator-controller-manager` pod `2/2 Running`, plus the `identityserverclusters.curity.io`, `identityservernodes.curity.io` and `identityserverdatabases.curity.io` CRDs.
 
 ### Tear down the remote install
 
@@ -97,10 +97,10 @@ helm uninstall curity-operator -n curity-operator
 kubectl delete namespace curity-operator
 ```
 
-`helm uninstall` does **not** delete the Curity CRDs — they ship with `helm.sh/resource-policy: keep` (gated by `crds.keep=true`, default). Existing `IdentityServerCluster` and `IdentityServerNode` resources survive a reinstall. To delete the CRDs and cascade-delete every CR cluster-wide:
+`helm uninstall` does **not** delete the Curity CRDs — they ship with `helm.sh/resource-policy: keep` (gated by `crds.keep=true`, default). Existing `IdentityServerCluster`, `IdentityServerNode` and `IdentityServerDatabase` resources survive a reinstall. To delete the CRDs and cascade-delete every CR cluster-wide:
 
 ```bash
-kubectl delete crd identityserverclusters.curity.io identityservernodes.curity.io
+kubectl delete crd identityserverclusters.curity.io identityservernodes.curity.io identityserverdatabases.curity.io
 ```
 
 To opt out of the keep behavior at install time (test/throwaway clusters only):
@@ -211,8 +211,10 @@ Expected: `admin` and `runtime` Deployments, matching Services, pods Running and
 
 ### 3f. Access the admin UI
 
+Children of a node are named `<cluster>-<node>-<8 hex chars>`, so select the Service by label:
+
 ```bash
-kubectl -n demo port-forward svc/admin 6749:6749
+kubectl -n demo port-forward "$(kubectl -n demo get svc -l curity.io/role=admin -o name)" 6749:6749
 ```
 
 Open `http://localhost:6749/admin` (or `https://` if `ui.secure: true`). Username: `admin`. Password:
@@ -300,8 +302,9 @@ kubectl -n demo describe configmap curity-base-config
 kubectl -n demo get events --field-selector type=Warning
 
 # Inside the admin pod (configs are routed there when an admin node exists)
-kubectl -n demo exec deploy/admin -- ls -la /opt/idsvr/etc/init/
-kubectl -n demo exec deploy/admin -- ls -la /opt/idsvr/etc/init/license/
+ADMIN_DEPLOY=$(kubectl -n demo get deploy -l curity.io/role=admin -o name)
+kubectl -n demo exec "$ADMIN_DEPLOY" -- ls -la /opt/idsvr/etc/init/
+kubectl -n demo exec "$ADMIN_DEPLOY" -- ls -la /opt/idsvr/etc/init/license/
 ```
 
 Files are prefixed `cm_<name>_…` for ConfigMaps and `secret_<name>_…` for Secrets.

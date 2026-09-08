@@ -219,8 +219,11 @@ issues; `kubectl get isn` shows type, role, readiness and replica counts.
 
 The admin UI is **disabled by default**. Set `ui.enabled: true` on the admin node to enable it.
 
+The operator names every child of a node `<cluster>-<node>-<8 hex chars>` (for example
+`my-cluster-admin-1a2b3c4d`), so select the admin Service by label rather than by name:
+
 ```bash
-kubectl -n demo port-forward svc/admin 6749:6749
+kubectl -n demo port-forward "$(kubectl -n demo get svc -l curity.io/role=admin -o name)" 6749:6749
 ```
 
 - HTTPS (default): `https://localhost:6749/admin`
@@ -517,10 +520,24 @@ data:
 If a `postCommitScript` is applied to a cluster with no admin node, it mounts nowhere — the
 operator emits a `PostCommitScriptNoAdmin` Warning event on the IdentityServerCluster.
 
-### Namespace scoping
+### Cluster scoping
 
-All managed configs in a namespace are discovered by all clusters in that namespace. To scope
-configs to a specific cluster, use separate namespaces.
+Discovery is per namespace: every cluster in a namespace sees every managed ConfigMap and Secret
+in that namespace unless the resource says otherwise. To restrict a resource to specific clusters,
+set the `curity.io/cluster` annotation to a comma-separated list of cluster names:
+
+```yaml
+metadata:
+  annotations:
+    curity.io/cluster: "my-cluster,staging"   # mounted only on these clusters
+```
+
+- **Annotation absent** — the resource applies to every cluster in the namespace.
+- **Annotation lists names** — the resource applies only to those clusters. A name that matches
+  no cluster in the namespace raises an `UnknownClusterInScope` Warning event on the resource.
+- **Annotation present but empty** (`""`, whitespace, or only commas) — the resource applies to
+  no cluster; this is treated as a mistake and raises an `EmptyClusterScope` Warning event rather
+  than silently mounting everywhere.
 
 ## TLS keystores
 

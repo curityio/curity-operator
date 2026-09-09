@@ -178,7 +178,7 @@ spec:
     secure: false
   service:
     type: ClusterIP
-    port: 6749
+    uiPort: 6749
 ```
 
 **3. Create the runtime nodes**
@@ -384,10 +384,9 @@ spec:
     username:
       value: curity
     password:
-      valueFrom:
-        secretKeyRef:
-          name: db-credentials
-          key: password
+      secretKeyRef:
+        name: db-credentials
+        key: password
 ```
 
 Whole connection from one Secret (the Secret holds `JDBC_URL`, `JDBC_USERNAME`, `JDBC_PASSWORD`):

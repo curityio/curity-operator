@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"context"
+	"encoding/base64"
+	"net/url"
 	"strings"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -547,6 +550,113 @@ var _ = Describe("packages feature", func() {
 			Expect(logs).NotTo(ContainSubstring(tokenValue),
 				"token value must not leak to pod logs")
 			Expect(logs).To(ContainSubstring("extracted to /pkg"))
+		})
+	})
+
+	Describe("clientCredentials end-to-end against in-cluster nginx", Ordered, Label("slow"), func() {
+		const (
+			ns               = "e2e-pkg-cc-e2e"
+			serverName       = "pkg-cc-server"
+			clientSecretName = "pkg-cc-client"
+			clientID         = "package-reader"
+			// Includes characters that must be form-urlencoded before the
+			// Basic header is built (RFC 6749 §2.3.1).
+			clientSecret = "s3cr:t+e2e"
+			tokenValue   = "test-cc-access-token-e2e"
+			clusterName  = "pkg-cc-e2e"
+			nodeName     = "pkg-cc-e2e-rt"
+		)
+		BeforeAll(func() {
+			createNS(ns)
+			ctx := context.Background()
+
+			// client_secret_basic: base64(urlencode(id) ":" urlencode(secret)).
+			basic := "Basic " + base64.StdEncoding.EncodeToString(
+				[]byte(url.QueryEscape(clientID)+":"+url.QueryEscape(clientSecret)))
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/auth-server-client-credentials.yaml", ns,
+				map[string]interface{}{
+					"namespace":   ns,
+					"serverName":  serverName,
+					"token":       tokenValue,
+					"basicHeader": basic,
+				})
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: serverName, Namespace: ns}, dep)).To(Succeed())
+				g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">=", 1))
+			}, 90*time.Second, e2eInterval).Should(Succeed())
+
+			Expect(k().Create(ctx, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: clientSecretName, Namespace: ns},
+				StringData: map[string]string{"client-secret": clientSecret},
+			})).To(Succeed())
+		})
+		AfterAll(func() { deleteNS(ns) })
+
+		It("init container fetches a token, downloads the bearer-protected ZIP with it and unpacks it", func() {
+			ctx := context.Background()
+			base := "http://" + serverName + "." + ns + ".svc.cluster.local:8080"
+
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/packages/identityservercluster-with-package-client-credentials.yaml", ns,
+				map[string]interface{}{
+					"name": clusterName, "namespace": ns,
+					"url": base + "/pkg.zip", "tokenEndpoint": base + "/token",
+					"clientId": clientID, "clientSecretName": clientSecretName,
+					"mountPath": "/etc/plugins/cc",
+				})
+			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservernode-runtime.yaml", ns,
+				map[string]interface{}{"name": nodeName, "namespace": ns, "clusterName": clusterName})
+
+			deployName := ownedName(clusterName, nodeName)
+
+			By("waiting for the Curity Deployment to reach 1 ready replica (init container exit 0)")
+			Eventually(func(g Gomega) {
+				dep := &appsv1.Deployment{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: deployName, Namespace: ns}, dep)).To(Succeed())
+				g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">=", 1),
+					"Curity pod must become Ready — proves the token request succeeded and the ZIP was fetched with the token")
+			}, 120*time.Second, e2eInterval).Should(Succeed())
+
+			By("the init container's logs must contain neither the client secret nor the access token")
+			pods := &corev1.PodList{}
+			Expect(k().List(ctx, pods, client.InNamespace(ns),
+				client.MatchingLabels{"curity.io/cluster": clusterName})).To(Succeed())
+			Expect(pods.Items).NotTo(BeEmpty())
+			logs, err := utils.Run("kubectl", "logs", "-n", ns,
+				pods.Items[0].Name, "-c", "package-fetch-0")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(logs).NotTo(ContainSubstring(clientSecret))
+			Expect(logs).NotTo(ContainSubstring(tokenValue))
+			Expect(logs).To(ContainSubstring("extracted to /pkg"))
+		})
+
+		It("a wrong client secret surfaces as PackagesReady=False/PackageTokenRequestFailed", func() {
+			ctx := context.Background()
+			sec := &corev1.Secret{}
+			Expect(k().Get(ctx, client.ObjectKey{Name: clientSecretName, Namespace: ns}, sec)).To(Succeed())
+			sec.Data = map[string][]byte{"client-secret": []byte("wrong-secret")}
+			Expect(k().Update(ctx, sec)).To(Succeed())
+
+			// Secret edits do not roll healthy pods, so delete the pod to make
+			// its replacement read the wrong secret. Not `kubectl rollout
+			// restart`: the operator re-renders the Deployment spec and drops
+			// the restartedAt annotation, rolling back to the healthy pod.
+			pods := &corev1.PodList{}
+			Expect(k().List(ctx, pods, client.InNamespace(ns),
+				client.MatchingLabels{"curity.io/cluster": clusterName})).To(Succeed())
+			Expect(pods.Items).NotTo(BeEmpty())
+			for i := range pods.Items {
+				Expect(client.IgnoreNotFound(k().Delete(ctx, &pods.Items[i]))).To(Succeed())
+			}
+
+			Eventually(func(g Gomega) {
+				node := &v1alpha1.IdentityServerNode{}
+				g.Expect(k().Get(ctx, client.ObjectKey{Name: nodeName, Namespace: ns}, node)).To(Succeed())
+				cond := apimeta.FindStatusCondition(node.Status.Conditions, v1alpha1.ConditionPackagesReady)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal(v1alpha1.ReasonPackageTokenRequestFailed))
+			}, 120*time.Second, e2eInterval).Should(Succeed())
 		})
 	})
 

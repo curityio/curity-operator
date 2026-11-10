@@ -202,6 +202,8 @@ func TestTranslatePackagesReady_CurlExitCodes(t *testing.T) {
 		{"ClientCert_58", 58, v1alpha1.ReasonPackageClientCertInvalid},
 		{"ClientCert_82", 82, v1alpha1.ReasonPackageClientCertInvalid},
 		{"InvalidArchive_100", 100, v1alpha1.ReasonPackageInvalidArchive},
+		{"TokenRequestFailed_101", 101, v1alpha1.ReasonPackageTokenRequestFailed},
+		{"TokenResponseInvalid_102", 102, v1alpha1.ReasonPackageTokenRequestFailed},
 		// Exit 51 ("peer cert not OK") is ambiguous between server-side
 		// and client-cert problems — falls to the open-set catch-all so
 		// the exit code is visible in the message.
@@ -498,6 +500,7 @@ func TestIsRecoverableSecretFailure(t *testing.T) {
 		{"False/ClientCertInvalid", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageClientCertInvalid}, true},
 		{"False/FetchFailed", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageFetchFailed}, true},
 		{"False/InvalidArchive", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageInvalidArchive}, true},
+		{"False/TokenRequestFailed", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageTokenRequestFailed}, true},
 		{"False/ImagePullFailed", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackageImagePullFailed}, false},
 		{"False/PodCreationFailed", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackagePodCreationFailed}, false},
 		{"False/PackagesPending", &metav1.Condition{Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPackagesPending}, false},

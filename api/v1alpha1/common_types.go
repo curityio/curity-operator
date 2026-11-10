@@ -156,6 +156,12 @@ const (
 	// be unpacked as a ZIP archive.
 	ReasonPackageInvalidArchive = "PackageInvalidArchive"
 
+	// ReasonPackageTokenRequestFailed means the OAuth client_credentials
+	// token request for auth.clientCredentials failed (transport error,
+	// non-2xx from the token endpoint, or a response without an
+	// access_token), so the package download was never attempted.
+	ReasonPackageTokenRequestFailed = "PackageTokenRequestFailed"
+
 	// ReasonPackageFetchFailed is the open-set catch-all for any definitive
 	// package-fetch failure that does not match a more specific reason.
 	// The condition message carries the verbatim diagnostic signal.
@@ -506,12 +512,12 @@ type PackageSpec struct {
 }
 
 // PackageSource describes the source of a package archive.
-// When auth is set, exactly one of basicAuth or bearerToken must be
-// configured — `auth: {}` (empty) is rejected so the API surface is
-// unambiguous (an empty auth block would silently fall back to
-// unauthenticated, which is confusing). Omit the auth field entirely
-// for unauthenticated downloads.
-// +kubebuilder:validation:XValidation:rule="!has(self.auth) || ((has(self.auth.basicAuth) ? 1 : 0) + (has(self.auth.bearerToken) ? 1 : 0) == 1)",message="exactly one of auth.basicAuth or auth.bearerToken must be set when auth is configured"
+// When auth is set, exactly one of basicAuth, bearerToken or
+// clientCredentials must be configured — `auth: {}` (empty) is rejected so
+// the API surface is unambiguous (an empty auth block would silently fall
+// back to unauthenticated, which is confusing). Omit the auth field
+// entirely for unauthenticated downloads.
+// +kubebuilder:validation:XValidation:rule="!has(self.auth) || ((has(self.auth.basicAuth) ? 1 : 0) + (has(self.auth.bearerToken) ? 1 : 0) + (has(self.auth.clientCredentials) ? 1 : 0) == 1)",message="exactly one of auth.basicAuth, auth.bearerToken or auth.clientCredentials must be set when auth is configured"
 type PackageSource struct {
 	// URL is the full HTTP or HTTPS URL of the ZIP archive to fetch.
 	// Both schemes are supported; use NetworkPolicy at the cluster level
@@ -530,8 +536,8 @@ type PackageSource struct {
 	// accept the system trust store with default verification.
 	TLS *PackageTLSSpec `json:"tls,omitempty"`
 
-	// Auth carries credentials for authenticated endpoints. Set at most
-	// one of BasicAuth or BearerToken.
+	// Auth carries credentials for authenticated endpoints. Set exactly
+	// one of BasicAuth, BearerToken or ClientCredentials.
 	Auth *PackageAuthSpec `json:"auth,omitempty"`
 }
 
@@ -569,13 +575,56 @@ type PackageTLSSpec struct {
 }
 
 // PackageAuthSpec carries credentials for an authenticated download.
-// Set at most one of BasicAuth or BearerToken.
+// Set exactly one of BasicAuth, BearerToken or ClientCredentials.
 type PackageAuthSpec struct {
 	// BasicAuth provides HTTP Basic Authentication credentials.
 	BasicAuth *PackageBasicAuthRef `json:"basicAuth,omitempty"`
 
 	// BearerToken provides a bearer token sent as `Authorization: Bearer <token>`.
 	BearerToken *PackageSecretKeyRef `json:"bearerToken,omitempty"`
+
+	// ClientCredentials obtains an access token with the OAuth 2.0
+	// client_credentials grant before the download, and sends it as
+	// `Authorization: Bearer <token>` on the package request. The token is
+	// fetched fresh by every package-fetch init container run.
+	ClientCredentials *PackageClientCredentialsSpec `json:"clientCredentials,omitempty"`
+}
+
+// PackageClientCredentialsSpec configures an OAuth 2.0 client_credentials
+// token request (RFC 6749 §4.4). The client authenticates to the token
+// endpoint with HTTP Basic (client_secret_basic, RFC 6749 §2.3.1). The
+// package's tls block (CA, client cert, skipVerify) applies to the token
+// request as well as to the download.
+type PackageClientCredentialsSpec struct {
+	// TokenEndpoint is the full HTTP or HTTPS URL of the authorization
+	// server's token endpoint. Same URL rules as source.url: no embedded
+	// credentials and no whitespace.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^https?://[^/@\s]+([/?#][^\s]*)?$`
+	// +kubebuilder:validation:MaxLength=2048
+	TokenEndpoint string `json:"tokenEndpoint"`
+
+	// ClientID is the OAuth client identifier. It is not a secret, so it is
+	// given inline.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=512
+	ClientID string `json:"clientId"`
+
+	// ClientSecret is a Secret holding the OAuth client secret.
+	// +kubebuilder:validation:Required
+	ClientSecret PackageSecretKeyRef `json:"clientSecret"`
+
+	// Scopes requested with the token. Sent space-separated as the `scope`
+	// form parameter; omitted entirely when empty, so the authorization
+	// server applies the client's default scopes. Each scope must be an
+	// RFC 6749 scope-token (printable ASCII, no space, `"` or `\`).
+	// +kubebuilder:validation:MaxItems=32
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=256
+	// +kubebuilder:validation:items:Pattern=`^[!#-\[\]-~]+$`
+	// +listType=atomic
+	Scopes []string `json:"scopes,omitempty"`
 }
 
 // PackageSecretKeyRef references a single key in a Secret. Used for

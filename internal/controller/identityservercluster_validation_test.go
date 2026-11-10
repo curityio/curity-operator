@@ -1834,4 +1834,96 @@ var _ = Describe("IdentityServerCluster / convertKeystore validation", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("keyName must be unique"))
 	})
+	// --- auth.clientCredentials ---
+
+	clientCredentialsCluster := func(name string, mutate func(*v1alpha1.PackageAuthSpec)) *v1alpha1.IdentityServerCluster {
+		auth := &v1alpha1.PackageAuthSpec{
+			ClientCredentials: &v1alpha1.PackageClientCredentialsSpec{
+				TokenEndpoint: "https://idsvr.example.com/oauth/v2/oauth-token",
+				ClientID:      "package-reader",
+				ClientSecret: v1alpha1.PackageSecretKeyRef{
+					SecretRef: v1alpha1.PackageSecretKeySelector{Name: "cc", Key: "client-secret"},
+				},
+				Scopes: []string{"read", "urn:pkg:download"},
+			},
+		}
+		if mutate != nil {
+			mutate(auth)
+		}
+		return &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: v1alpha1.IdentityServerClusterSpec{
+				Version: "11.0",
+				Packages: []v1alpha1.PackageSpec{{
+					Source:    v1alpha1.PackageSource{URL: "https://example.com/pkg.zip", Auth: auth},
+					MountPath: "/opt/x/",
+				}},
+			},
+		}
+	}
+
+	It("should accept cluster with package clientCredentials", func() {
+		Expect(k8sClient.Create(ctx, clientCredentialsCluster("cc-ok", nil), client.DryRunAll)).To(Succeed())
+	})
+
+	It("should accept cluster with package clientCredentials and no scopes", func() {
+		cl := clientCredentialsCluster("cc-no-scopes", func(a *v1alpha1.PackageAuthSpec) { a.ClientCredentials.Scopes = nil })
+		Expect(k8sClient.Create(ctx, cl, client.DryRunAll)).To(Succeed())
+	})
+
+	It("should reject cluster with package clientCredentials combined with bearerToken", func() {
+		cl := clientCredentialsCluster("cc-and-bearer", func(a *v1alpha1.PackageAuthSpec) {
+			a.BearerToken = &v1alpha1.PackageSecretKeyRef{
+				SecretRef: v1alpha1.PackageSecretKeySelector{Name: "tok", Key: "token"},
+			}
+		})
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("exactly one of auth.basicAuth, auth.bearerToken or auth.clientCredentials"))
+	})
+
+	It("should reject cluster with package clientCredentials non-http(s) tokenEndpoint", func() {
+		cl := clientCredentialsCluster("cc-bad-endpoint", func(a *v1alpha1.PackageAuthSpec) {
+			a.ClientCredentials.TokenEndpoint = "ftp://idsvr.example.com/token"
+		})
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("clientCredentials.tokenEndpoint"))
+	})
+
+	It("should reject cluster with package clientCredentials tokenEndpoint containing embedded credentials", func() {
+		cl := clientCredentialsCluster("cc-creds-endpoint", func(a *v1alpha1.PackageAuthSpec) {
+			a.ClientCredentials.TokenEndpoint = "https://id:secret@idsvr.example.com/token"
+		})
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("clientCredentials.tokenEndpoint"))
+	})
+
+	It("should reject cluster with package clientCredentials empty clientId", func() {
+		cl := clientCredentialsCluster("cc-empty-id", func(a *v1alpha1.PackageAuthSpec) { a.ClientCredentials.ClientID = "" })
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("clientCredentials.clientId"))
+	})
+
+	It("should reject cluster with package clientCredentials empty clientSecret key", func() {
+		cl := clientCredentialsCluster("cc-empty-key", func(a *v1alpha1.PackageAuthSpec) {
+			a.ClientCredentials.ClientSecret.SecretRef.Key = ""
+		})
+		err := k8sClient.Create(ctx, cl, client.DryRunAll)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("clientSecret.secretRef.key"))
+	})
+
+	for _, bad := range []string{"has space", `quo"te`, `back\slash`, ""} {
+		It(fmt.Sprintf("should reject cluster with package clientCredentials scope %q", bad), func() {
+			cl := clientCredentialsCluster("cc-bad-scope", func(a *v1alpha1.PackageAuthSpec) {
+				a.ClientCredentials.Scopes = []string{"read", bad}
+			})
+			err := k8sClient.Create(ctx, cl, client.DryRunAll)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("clientCredentials.scopes"))
+		})
+	}
 })

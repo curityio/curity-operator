@@ -806,8 +806,15 @@ spec:
   pod-template annotation changes → rolling restart on the next reconcile.
 - **Secret edit while the cluster is healthy** (`PackagesReady=True`): no automatic action. The
   packages hash covers refs, not Secret contents, so running pods keep their cached env value. This
-  is intentional — a routine token rotation should not churn pods. Use
-  `kubectl rollout restart deployment/<name>` if you need the new value picked up immediately.
+  is intentional — a routine token rotation should not churn pods. To pick up the new value
+  immediately, change a pod annotation on the cluster, which rolls every node's pods:
+  ```bash
+  kubectl patch isc <cluster> --type merge -p \
+    '{"spec":{"podAnnotations":{"kubectl.kubernetes.io/restartedAt":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}}}'
+  ```
+  Do not use `kubectl rollout restart deployment/<name>`: the operator owns the Deployment spec
+  and reverts the restart annotation on its next reconcile, rolling back to the old pods. If the
+  cluster is managed with GitOps, make the annotation change in Git instead.
 - **Secret edit while the cluster is failing** (`PackagesReady=False` with a recoverable reason):
   the operator deletes the failing pod automatically. The fresh pod reads the corrected Secret and
   the cluster recovers in seconds, no manual restart needed.
@@ -953,8 +960,10 @@ OOM eviction, or any future rolling restart.
 
 **Secret data rotation.** Editing a Secret's data in place (same name, same key, new bytes — e.g.
 rotating a token) does **not** trigger a rolling restart. The packages hash covers Secret
-*references*, not bytes. To force a fetch with new credentials, edit `spec.packages` (e.g. bump
-`mountPath`) or `kubectl delete pod`.
+*references*, not bytes. To force a fetch with new credentials, change `spec.podAnnotations` on the
+cluster (see [How the operator reacts to changes](#how-the-operator-reacts-to-changes)) for a rolling
+restart, or `kubectl delete pod` to replace specific pods. `kubectl rollout restart` does not work —
+the operator reverts it.
 
 **Other useful commands**
 

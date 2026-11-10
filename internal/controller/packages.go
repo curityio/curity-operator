@@ -287,6 +287,17 @@ func buildPackageInitContainer(p v1alpha1.PackageSpec, idx int, image string) co
 	return c
 }
 
+// escapeEnvValue escapes a literal for use as an EnvVar.Value. The kubelet
+// expands `$(VAR)` in env values using variables declared earlier in the
+// same container, and reduces `$$` to `$`. Without escaping, a user-supplied
+// value such as the scope `$(CC_CLIENT_SECRET)` would be replaced by the
+// client secret and reach curl's argv; a URL containing `$$` would be
+// silently altered. Doubling every `$` makes the kubelet hand the script
+// the value exactly as written in the spec.
+func escapeEnvValue(v string) string {
+	return strings.ReplaceAll(v, "$", "$$")
+}
+
 // buildPackageInitEnv returns the env vars the init-container script reads.
 // PKG_URL holds the URL (passed as a value, NOT interpolated into the
 // script body — eliminates shell-command-injection via URL). PKG_HOST is
@@ -294,13 +305,14 @@ func buildPackageInitContainer(p v1alpha1.PackageSpec, idx int, image string) co
 // the netrc machine line. Auth credentials project Secret keys via
 // secretKeyRef (BEARER_TOKEN, BASIC_AUTH_USER, BASIC_AUTH_PASS) and the
 // script consumes them via stdin / netrc so they never appear on argv.
+// Every literal Value goes through escapeEnvValue.
 func buildPackageInitEnv(p v1alpha1.PackageSpec) []corev1.EnvVar {
 	envs := []corev1.EnvVar{
 		// URL is passed as an env var (NOT interpolated into the script
 		// source) so shell metacharacters in the URL cannot break out of
 		// the curl invocation. The script always references "$PKG_URL"
 		// inside double quotes, which preserves the value verbatim.
-		{Name: "PKG_URL", Value: p.Source.URL},
+		{Name: "PKG_URL", Value: escapeEnvValue(p.Source.URL)},
 	}
 	if p.Source.Auth == nil {
 		return envs
@@ -325,7 +337,7 @@ func buildPackageInitEnv(p v1alpha1.PackageSpec) []corev1.EnvVar {
 		// runtime — that older approach broke on URLs containing the sed
 		// delimiter ('#') and would have also been an injection sink.
 		envs = append(envs,
-			corev1.EnvVar{Name: "PKG_HOST", Value: packageURLHost(p.Source.URL)},
+			corev1.EnvVar{Name: "PKG_HOST", Value: escapeEnvValue(packageURLHost(p.Source.URL))},
 			corev1.EnvVar{
 				Name: "BASIC_AUTH_USER",
 				ValueFrom: &corev1.EnvVarSource{
@@ -358,8 +370,8 @@ func buildPackageInitEnv(p v1alpha1.PackageSpec) []corev1.EnvVar {
 // parameter otherwise.
 func buildClientCredentialsEnv(cc *v1alpha1.PackageClientCredentialsSpec) []corev1.EnvVar {
 	envs := []corev1.EnvVar{
-		{Name: "CC_TOKEN_ENDPOINT", Value: cc.TokenEndpoint},
-		{Name: "CC_CLIENT_ID", Value: cc.ClientID},
+		{Name: "CC_TOKEN_ENDPOINT", Value: escapeEnvValue(cc.TokenEndpoint)},
+		{Name: "CC_CLIENT_ID", Value: escapeEnvValue(cc.ClientID)},
 		{
 			Name: "CC_CLIENT_SECRET",
 			ValueFrom: &corev1.EnvVarSource{
@@ -371,7 +383,7 @@ func buildClientCredentialsEnv(cc *v1alpha1.PackageClientCredentialsSpec) []core
 		},
 	}
 	if len(cc.Scopes) > 0 {
-		envs = append(envs, corev1.EnvVar{Name: "CC_SCOPE", Value: strings.Join(cc.Scopes, " ")})
+		envs = append(envs, corev1.EnvVar{Name: "CC_SCOPE", Value: escapeEnvValue(strings.Join(cc.Scopes, " "))})
 	}
 	return envs
 }

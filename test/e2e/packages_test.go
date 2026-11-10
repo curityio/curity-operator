@@ -637,10 +637,17 @@ var _ = Describe("packages feature", func() {
 			sec.Data = map[string][]byte{"client-secret": []byte("wrong-secret")}
 			Expect(k().Update(ctx, sec)).To(Succeed())
 
-			// Secret edits do not roll healthy pods; force a new pod.
-			_, err := utils.Run("kubectl", "rollout", "restart", "-n", ns,
-				"deployment/"+ownedName(clusterName, nodeName))
-			Expect(err).NotTo(HaveOccurred())
+			// Secret edits do not roll healthy pods, so delete the pod to make
+			// its replacement read the wrong secret. Not `kubectl rollout
+			// restart`: the operator re-renders the Deployment spec and drops
+			// the restartedAt annotation, rolling back to the healthy pod.
+			pods := &corev1.PodList{}
+			Expect(k().List(ctx, pods, client.InNamespace(ns),
+				client.MatchingLabels{"curity.io/cluster": clusterName})).To(Succeed())
+			Expect(pods.Items).NotTo(BeEmpty())
+			for i := range pods.Items {
+				Expect(client.IgnoreNotFound(k().Delete(ctx, &pods.Items[i]))).To(Succeed())
+			}
 
 			Eventually(func(g Gomega) {
 				node := &v1alpha1.IdentityServerNode{}

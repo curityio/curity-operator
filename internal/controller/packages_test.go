@@ -880,6 +880,86 @@ func TestBuildPackageInitEnv_PkgURLPreservesMetacharacters(t *testing.T) {
 	}
 }
 
+// expandLikeKubelet mimics the kubelet's EnvVar.Value expansion
+// (k8s.io/kubernetes third_party/forked/golang/expansion): `$$` becomes `$`,
+// `$(NAME)` is replaced by an earlier-declared variable when one exists and
+// left as-is otherwise, and any other `$` is kept.
+func expandLikeKubelet(in string, declared map[string]string) string {
+	var out strings.Builder
+	for i := 0; i < len(in); i++ {
+		if in[i] != '$' || i+1 >= len(in) {
+			out.WriteByte(in[i])
+			continue
+		}
+		switch in[i+1] {
+		case '$':
+			out.WriteByte('$')
+			i++
+		case '(':
+			end := strings.IndexByte(in[i+2:], ')')
+			if end < 0 {
+				out.WriteString(in[i:])
+				return out.String()
+			}
+			name := in[i+2 : i+2+end]
+			if v, ok := declared[name]; ok {
+				out.WriteString(v)
+			} else {
+				out.WriteString(in[i : i+3+end])
+			}
+			i += 2 + end
+		default:
+			out.WriteByte('$')
+		}
+	}
+	return out.String()
+}
+
+// Literal env values must reach the script exactly as written in the spec:
+// a `$(VAR)` reference must not pull in an earlier env var (above all the
+// client secret), and `$$` must not be collapsed.
+func TestBuildPackageInitEnv_LiteralValuesSurviveKubeletExpansion(t *testing.T) {
+	p := clientCredentialsPackage("$(CC_CLIENT_SECRET)", "a$$b")
+	p.Source.URL = "https://a.example/x$(PKG_URL)$$y.zip"
+	p.Source.Auth.ClientCredentials.TokenEndpoint = "https://idsvr.example/t$(PKG_URL)"
+	p.Source.Auth.ClientCredentials.ClientID = "id$(CC_TOKEN_ENDPOINT)$$"
+
+	want := map[string]string{
+		"PKG_URL":           p.Source.URL,
+		"CC_TOKEN_ENDPOINT": p.Source.Auth.ClientCredentials.TokenEndpoint,
+		"CC_CLIENT_ID":      p.Source.Auth.ClientCredentials.ClientID,
+		"CC_SCOPE":          "$(CC_CLIENT_SECRET) a$$b",
+	}
+	declared := map[string]string{}
+	for _, e := range buildPackageInitEnv(p) {
+		if e.ValueFrom != nil {
+			declared[e.Name] = "THE-CLIENT-SECRET"
+			continue
+		}
+		got := expandLikeKubelet(e.Value, declared)
+		declared[e.Name] = got
+		if w, ok := want[e.Name]; ok && got != w {
+			t.Errorf("%s after kubelet expansion = %q, want %q", e.Name, got, w)
+		}
+		if strings.Contains(got, "THE-CLIENT-SECRET") {
+			t.Errorf("%s expands to the client secret: %q", e.Name, got)
+		}
+	}
+
+	// Basic auth's PKG_HOST is a literal too.
+	b := onePackage("https://h$$t.example/x.zip", "/p/b")
+	b.Source.Auth = &v1alpha1.PackageAuthSpec{BasicAuth: &v1alpha1.PackageBasicAuthRef{
+		SecretRef: v1alpha1.PackageBasicAuthSelector{Name: "bs", UsernameKey: "u", PasswordKey: "p"},
+	}}
+	for _, e := range buildPackageInitEnv(b) {
+		if e.Name == "PKG_HOST" {
+			if got := expandLikeKubelet(e.Value, nil); got != "h$$t.example" {
+				t.Errorf("PKG_HOST after kubelet expansion = %q, want %q", got, "h$$t.example")
+			}
+		}
+	}
+}
+
 // Security: the netrc construction uses a constant printf format string
 // ('%s\n') so Secret bytes can never be parsed as printf format directives.
 // The script must NOT use a multi-%s format like

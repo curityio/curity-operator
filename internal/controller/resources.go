@@ -38,6 +38,11 @@ const (
 
 	containerName = "curity"
 
+	// labelVersion is operator-owned even when buildLabels omits it (no
+	// valid resolved version): a user podLabels value is dropped, not passed
+	// through, so the key never reports a version the operator didn't set.
+	labelVersion = "app.kubernetes.io/version"
+
 	defaultProbeInitialDelay = int32(30)
 	defaultProbePeriod       = int32(10)
 	defaultProbeTimeout      = int32(1)
@@ -92,6 +97,9 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 	podAnnotations := mergeMaps(cluster.Spec.PodAnnotations, node.Spec.PodAnnotations)
 	// Operator labels overlay last: collisions on operator-owned keys lose.
 	podLabels := mergeMaps(mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels), labels)
+	if _, ok := labels[labelVersion]; !ok {
+		delete(podLabels, labelVersion)
+	}
 
 	replicas := resolveReplicas(cluster, node)
 	resources := resolveResources(cluster, node)
@@ -685,21 +693,22 @@ func buildLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Identit
 		"curity.io/owned-by":           OwnedResourceName(cluster.Name, node.Name),
 	}
 	if v := resolvedVersion(cluster); v != "" && len(validation.IsValidLabelValue(v)) == 0 {
-		labels["app.kubernetes.io/version"] = v
+		labels[labelVersion] = v
 	}
 	return labels
 }
 
 // userPodLabelsOverridden returns the sorted user-podLabels keys that the
 // operator-overlay-last merge will silently drop. Drives the
-// PodLabelsIgnored event; also covers the +2 app.kubernetes.io/{name,
-// instance} keys the CRD CEL doesn't block.
+// PodLabelsIgnored event; also covers the app.kubernetes.io/{name,
+// instance,version} keys the CRD CEL doesn't block. labelVersion counts even
+// when buildLabels omits it, since buildDeployment drops it either way.
 func userPodLabelsOverridden(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []string {
 	operatorKeys := buildLabels(cluster, node)
 	userKeys := mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels)
 	var overridden []string
 	for k := range userKeys {
-		if _, isOperator := operatorKeys[k]; isOperator {
+		if _, isOperator := operatorKeys[k]; isOperator || k == labelVersion {
 			overridden = append(overridden, k)
 		}
 	}

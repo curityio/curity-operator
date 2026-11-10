@@ -359,6 +359,46 @@ func TestBuildDeployment_OperatorLabelsOverlayUserPodLabelsLast(t *testing.T) {
 	}
 }
 
+// When the operator omits the version label (digest-only image, or a version
+// that isn't a valid label value), a user-supplied one must not leak onto the
+// pod template from either the cluster or the node podLabels.
+func TestBuildDeployment_UserVersionLabelDroppedWhenOperatorOmitsIt(t *testing.T) {
+	cases := []struct {
+		name           string
+		version, image string
+	}{
+		{"digest-only image", "", "reg/idsvr@sha256:abc"},
+		{"invalid label value", "11.0+build", ""},
+	}
+	for _, tc := range cases {
+		for _, level := range []string{"cluster", "node"} {
+			t.Run(tc.name+"/"+level, func(t *testing.T) {
+				cluster := newTestCluster()
+				cluster.Spec.Version, cluster.Spec.Image = tc.version, tc.image
+				node := newTestNode(v1alpha1.NodeTypeRuntime)
+				user := map[string]string{labelVersion: "11.0+build", "team": "platform"}
+				if level == "cluster" {
+					cluster.Spec.PodLabels = user
+				} else {
+					node.Spec.PodLabels = user
+				}
+
+				labels := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Labels
+				if got, ok := labels[labelVersion]; ok {
+					t.Errorf("user %s label leaked onto pod template: %q", labelVersion, got)
+				}
+				if labels["team"] != "platform" {
+					t.Errorf("user-only key 'team' lost; got %v", labels)
+				}
+				got := userPodLabelsOverridden(cluster, node)
+				if len(got) != 1 || got[0] != labelVersion {
+					t.Errorf("userPodLabelsOverridden = %v; want [%s]", got, labelVersion)
+				}
+			})
+		}
+	}
+}
+
 // Catches a refactor that wires Spec.Selector from buildLabels instead
 // of buildSelectorLabels.
 func TestBuildDeployment_SelectorMatchLabelsExactly(t *testing.T) {

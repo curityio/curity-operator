@@ -231,6 +231,35 @@ func TestEnsureConvertedKeystores_SteadyStateNoChurn(t *testing.T) {
 	}
 }
 
+// With spec.image set, an image-only upgrade (spec.version unchanged or
+// absent) must still regenerate the output.
+func TestEnsureConvertedKeystores_ImageChangeRegenerates(t *testing.T) {
+	ctx := context.Background()
+	src := tlsSourceSecret(t, "src", "ns")
+	cl := convertKSCluster("demo", "ns", v1alpha1.ConvertKeystoreSource{KeyName: "SSL_SERVER_KEY", FromSecretRef: "src"})
+	cl.Spec.Version = ""
+	cl.Spec.Image = "reg/idsvr:11.1.0"
+	r := newConvertKSReconciler(t, src, cl)
+
+	inputHash := func() string {
+		t.Helper()
+		if err := r.ensureConvertedKeystores(ctx, cl); err != nil {
+			t.Fatalf("ensureConvertedKeystores: %v", err)
+		}
+		var out corev1.Secret
+		if err := r.Get(ctx, client.ObjectKey{Name: "demo-convert-ks-env", Namespace: "ns"}, &out); err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		return out.Annotations[annotationConvertKsInputHash]
+	}
+
+	before := inputHash()
+	cl.Spec.Image = "reg/idsvr:11.2.0"
+	if after := inputHash(); after == before {
+		t.Fatalf("input hash unchanged after image change (%s)", after)
+	}
+}
+
 func TestEnsureConvertedKeystores_SelfHealsTamper(t *testing.T) {
 	ctx := context.Background()
 	src := tlsSourceSecret(t, "src", "ns")

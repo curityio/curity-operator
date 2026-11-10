@@ -234,7 +234,7 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.NodeCount = int32(len(childNodes))
 	cluster.Status.ReadyNodes = readyCount
-	cluster.Status.Version = cluster.Spec.Version
+	cluster.Status.Version = resolvedVersion(&cluster)
 
 	if err := r.Status().Update(ctx, &cluster); err != nil {
 		if apierrors.IsConflict(err) {

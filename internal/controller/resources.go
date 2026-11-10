@@ -16,6 +16,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
@@ -298,6 +299,29 @@ func buildImage(cluster *v1alpha1.IdentityServerCluster) string {
 		return cluster.Spec.Image
 	}
 	return fmt.Sprintf("%s:%s", defaultImage, cluster.Spec.Version)
+}
+
+// resolvedVersion returns the Curity version in effect for the cluster:
+// spec.version when set, otherwise the tag of spec.image. Returns "" when
+// neither yields one (e.g. a digest-only image reference).
+func resolvedVersion(cluster *v1alpha1.IdentityServerCluster) string {
+	if cluster.Spec.Version != "" {
+		return cluster.Spec.Version
+	}
+	return imageTag(cluster.Spec.Image)
+}
+
+// imageTag extracts the tag from an image reference, ignoring any digest and
+// any registry port ("registry:5000/idsvr" has no tag). Returns "" if absent.
+func imageTag(image string) string {
+	if i := strings.Index(image, "@"); i >= 0 {
+		image = image[:i]
+	}
+	i := strings.LastIndex(image, ":")
+	if i < 0 || strings.Contains(image[i+1:], "/") {
+		return ""
+	}
+	return image[i+1:]
 }
 
 // buildContainerArgs returns the command arguments for the Curity container.
@@ -646,17 +670,24 @@ func volumeDefaultMode(configType string, isSecret bool) *int32 {
 // buildLabels returns the standard Kubernetes labels for the resource.
 // `curity.io/owned-by` is the operator's private selector key (see
 // buildSelectorLabels); the `app.kubernetes.io/*` keys are informational.
+//
+// `app.kubernetes.io/version` is set only when the resolved version is a
+// valid label value (≤63 chars, alphanumeric at both ends); otherwise it is
+// omitted rather than producing objects the apiserver rejects.
 func buildLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		"app.kubernetes.io/name":       "curity-identity-server",
 		"app.kubernetes.io/instance":   OwnedResourceName(cluster.Name, node.Name),
 		"app.kubernetes.io/managed-by": "curity-operator",
 		"app.kubernetes.io/component":  string(node.Spec.Type),
-		"app.kubernetes.io/version":    cluster.Spec.Version,
 		"curity.io/cluster":            cluster.Name,
 		"curity.io/role":               node.Spec.Role,
 		"curity.io/owned-by":           OwnedResourceName(cluster.Name, node.Name),
 	}
+	if v := resolvedVersion(cluster); v != "" && len(validation.IsValidLabelValue(v)) == 0 {
+		labels["app.kubernetes.io/version"] = v
+	}
+	return labels
 }
 
 // userPodLabelsOverridden returns the sorted user-podLabels keys that the

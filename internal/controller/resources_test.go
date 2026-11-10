@@ -177,6 +177,64 @@ func TestBuildDeployment_ImageOverride(t *testing.T) {
 	}
 }
 
+func TestBuildDeployment_ImageOverrideWithoutVersion(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Version = ""
+	cluster.Spec.Image = "my-registry:5000/curity/idsvr:11.1.0"
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+	if got := deploy.Spec.Template.Spec.Containers[0].Image; got != cluster.Spec.Image {
+		t.Errorf("expected image %q, got %q", cluster.Spec.Image, got)
+	}
+	if got := deploy.Spec.Template.Labels["app.kubernetes.io/version"]; got != "11.1.0" {
+		t.Errorf("app.kubernetes.io/version = %q; want image tag %q", got, "11.1.0")
+	}
+}
+
+func TestResolvedVersion(t *testing.T) {
+	tests := []struct {
+		name, version, image, want string
+	}{
+		{"version only", "11.0", "", "11.0"},
+		{"version wins over image tag", "11.0", "reg/idsvr:custom", "11.0"},
+		{"image tag", "", "reg/idsvr:11.1.0", "11.1.0"},
+		{"registry port, tag", "", "reg:5000/curity/idsvr:11.1.0", "11.1.0"},
+		{"registry port, no tag", "", "reg:5000/curity/idsvr", ""},
+		{"no tag", "", "reg/idsvr", ""},
+		{"tag and digest", "", "reg/idsvr:11.1.0@sha256:abc", "11.1.0"},
+		{"digest only", "", "reg/idsvr@sha256:abc", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cluster := newTestCluster()
+			cluster.Spec.Version, cluster.Spec.Image = tt.version, tt.image
+			if got := resolvedVersion(cluster); got != tt.want {
+				t.Errorf("resolvedVersion() = %q; want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A version that is not a valid label value must not end up in the label,
+// or every object carrying buildLabels would be rejected by the apiserver.
+func TestBuildLabels_VersionLabelOmittedWhenInvalid(t *testing.T) {
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	for _, v := range []string{strings.Repeat("1", 64), "11.0+build", "11.0-"} {
+		cluster := newTestCluster()
+		cluster.Spec.Version = v
+		if got, ok := buildLabels(cluster, node)["app.kubernetes.io/version"]; ok {
+			t.Errorf("version %q: label should be omitted, got %q", v, got)
+		}
+	}
+	cluster := newTestCluster()
+	cluster.Spec.Version = ""
+	cluster.Spec.Image = "reg/idsvr@sha256:abc"
+	if _, ok := buildLabels(cluster, node)["app.kubernetes.io/version"]; ok {
+		t.Error("digest-only image without version: label should be omitted")
+	}
+}
+
 func TestBuildDeployment_ImagePullSecret(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.ImagePullSecret = "my-secret"

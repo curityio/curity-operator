@@ -121,6 +121,7 @@ func (r *IdentityServerClusterReconciler) handlePermanentWriteError(
 		return ctrl.Result{}, false, nil
 	}
 
+	versionChanged := syncStatusVersion(cluster)
 	degChanged := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionDegraded,
 		Status:             metav1.ConditionTrue,
@@ -136,7 +137,7 @@ func (r *IdentityServerClusterReconciler) handlePermanentWriteError(
 		ObservedGeneration: cluster.Generation,
 	})
 	if !degChanged && !readyChanged {
-		return ctrl.Result{}, true, nil
+		return r.persistStatusVersion(ctx, cluster, versionChanged, ctrl.Result{})
 	}
 
 	cluster.Status.ObservedGeneration = cluster.Generation
@@ -178,6 +179,7 @@ func (r *IdentityServerClusterReconciler) handleAdmissionForbidden(
 
 	apiMsg := truncateReplicaFailureMessage(statusErr.ErrStatus.Message)
 
+	versionChanged := syncStatusVersion(cluster)
 	changed := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionClusterConfigReady,
 		Status:             metav1.ConditionFalse,
@@ -187,7 +189,7 @@ func (r *IdentityServerClusterReconciler) handleAdmissionForbidden(
 	})
 
 	if !changed {
-		return ctrl.Result{RequeueAfter: 5 * time.Minute}, true, nil
+		return r.persistStatusVersion(ctx, cluster, versionChanged, ctrl.Result{RequeueAfter: 5 * time.Minute})
 	}
 
 	cluster.Status.ObservedGeneration = cluster.Generation
@@ -220,6 +222,7 @@ func (r *IdentityServerClusterReconciler) handleAdminCredsSecretMissing(
 
 	name := cluster.Spec.AdminCredentials.ValueFrom.SecretKeyRef.Name
 
+	versionChanged := syncStatusVersion(cluster)
 	degChanged := apimeta.SetStatusCondition(&cluster.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionDegraded,
 		Status:             metav1.ConditionTrue,
@@ -235,7 +238,7 @@ func (r *IdentityServerClusterReconciler) handleAdminCredsSecretMissing(
 		ObservedGeneration: cluster.Generation,
 	})
 	if !degChanged && !readyChanged {
-		return ctrl.Result{}, true, nil
+		return r.persistStatusVersion(ctx, cluster, versionChanged, ctrl.Result{})
 	}
 
 	cluster.Status.ObservedGeneration = cluster.Generation
@@ -251,4 +254,28 @@ func (r *IdentityServerClusterReconciler) handleAdminCredsSecretMissing(
 		"adminCredentials Secret %q does not exist; waiting for it to be created", name)
 
 	return ctrl.Result{}, true, nil
+}
+
+// persistStatusVersion is the no-op path of the cluster status handlers above:
+// their conditions are unchanged, so no event, but a status.version change is
+// still written. That happens when a cluster already stuck in the handler's
+// state is first reconciled by an operator that reports status.version, since
+// with no spec edit the conditions' observedGeneration doesn't move. Returns
+// handled=true, as the callers do.
+func (r *IdentityServerClusterReconciler) persistStatusVersion(
+	ctx context.Context,
+	cluster *v1alpha1.IdentityServerCluster,
+	versionChanged bool,
+	res ctrl.Result,
+) (ctrl.Result, bool, error) {
+	if !versionChanged {
+		return res, true, nil
+	}
+	if err := r.Status().Update(ctx, cluster); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, true, nil
+		}
+		return ctrl.Result{}, true, fmt.Errorf("updating status.version: %w", err)
+	}
+	return res, true, nil
 }

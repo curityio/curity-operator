@@ -165,6 +165,7 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 		if apimeta.RemoveStatusCondition(&cluster.Status.Conditions, "ConfigScopeIssues") {
 			log.V(1).Info("removed obsolete ConfigScopeIssues condition during LogsUnavailable cleanup")
 		}
+		syncStatusVersion(&cluster)
 		if err := r.Status().Update(ctx, &cluster); err != nil {
 			if apierrors.IsConflict(err) {
 				return ctrl.Result{Requeue: true}, nil
@@ -234,7 +235,7 @@ func (r *IdentityServerClusterReconciler) Reconcile(ctx context.Context, req ctr
 	cluster.Status.ObservedGeneration = cluster.Generation
 	cluster.Status.NodeCount = int32(len(childNodes))
 	cluster.Status.ReadyNodes = readyCount
-	cluster.Status.Version = cluster.Spec.Version
+	syncStatusVersion(&cluster)
 
 	if err := r.Status().Update(ctx, &cluster); err != nil {
 		if apierrors.IsConflict(err) {
@@ -594,6 +595,19 @@ func encryptionKeyHash(ctx context.Context, c client.Reader, cluster *v1alpha1.I
 	return hex.EncodeToString(h[:]), nil
 }
 
+// syncStatusVersion sets status.version to the resolved version and reports
+// whether it changed. Every path that persists cluster status calls it, so the
+// printed Version column (which reads status.version) is never left blank or
+// stale while the cluster is stuck on an early-return error path.
+func syncStatusVersion(cluster *v1alpha1.IdentityServerCluster) bool {
+	v := resolvedVersion(cluster)
+	if cluster.Status.Version == v {
+		return false
+	}
+	cluster.Status.Version = v
+	return true
+}
+
 // computeClusterConfigHash hashes the inputs that trigger a genclust re-run:
 // image, imagePullSecret, admin node name, packages, and a non-default config
 // port. Packages/config-port append only when non-default, so existing clusters
@@ -875,6 +889,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 				setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
 					metav1.ConditionFalse, "Regenerating",
 					"Encryption key rotated; regenerating cluster.xml", cluster.Generation)
+				syncStatusVersion(cluster)
 				if err := r.Status().Update(ctx, cluster); err != nil {
 					return fmt.Errorf("failed to flip ClusterConfigReady=False for key rotation: %w", err)
 				}
@@ -959,6 +974,7 @@ func (r *IdentityServerClusterReconciler) ensureClusterConfig(ctx context.Contex
 			setCondition(&cluster.Status.Conditions, v1alpha1.ConditionClusterConfigReady,
 				metav1.ConditionFalse, "Regenerating",
 				"Cluster.xml inputs changed; regenerating", cluster.Generation)
+			syncStatusVersion(cluster)
 			if err := r.Status().Update(ctx, cluster); err != nil {
 				return fmt.Errorf("failed to flip ClusterConfigReady=False for regen: %w", err)
 			}

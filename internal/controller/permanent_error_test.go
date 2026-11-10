@@ -1624,3 +1624,69 @@ func TestClusterHandleAdminCredsSecretMissing_NoChange_SkipsEvent(t *testing.T) 
 	default:
 	}
 }
+
+// The cluster status handlers return before the main status write, so they
+// must persist status.version themselves (the Version column reads it), both
+// on their transition path and on their no-op path. The no-op case is a
+// cluster already stuck in that state when an operator reporting
+// status.version first reconciles it: no spec edit, so conditions don't move.
+func TestClusterStatusHandlers_PersistStatusVersion(t *testing.T) {
+	handlers := []struct {
+		name string
+		call func(r *IdentityServerClusterReconciler, cl *v1alpha1.IdentityServerCluster) (ctrl.Result, bool, error)
+	}{
+		{"handlePermanentWriteError", func(r *IdentityServerClusterReconciler, cl *v1alpha1.IdentityServerCluster) (ctrl.Result, bool, error) {
+			return r.handlePermanentWriteError(context.Background(), cl,
+				invalidErrForKind("Secret", "bad..secret..name", "must be DNS-1123 subdomain"))
+		}},
+		{"handleAdmissionForbidden", func(r *IdentityServerClusterReconciler, cl *v1alpha1.IdentityServerCluster) (ctrl.Result, bool, error) {
+			return r.handleAdmissionForbidden(context.Background(), cl,
+				forbiddenErrForPod("c-1-cluster-config-job-dryrun-preflight", "violates PodSecurity"))
+		}},
+		{"handleAdminCredsSecretMissing", func(r *IdentityServerClusterReconciler, cl *v1alpha1.IdentityServerCluster) (ctrl.Result, bool, error) {
+			return r.handleAdminCredsSecretMissing(context.Background(), cl, errAdminCredsSecretMissing)
+		}},
+	}
+	for _, h := range handlers {
+		t.Run(h.name, func(t *testing.T) {
+			ctx := context.Background()
+			cluster := clusterWithCredsName("managed-creds")
+			cluster.Spec.Image = "reg/idsvr:11.1.0"
+			r, rec := newClusterReconcilerForHelperTest(t, cluster, nil)
+			persisted := func() string {
+				t.Helper()
+				var got v1alpha1.IdentityServerCluster
+				if err := r.Get(ctx, client.ObjectKeyFromObject(cluster), &got); err != nil {
+					t.Fatalf("get: %v", err)
+				}
+				return got.Status.Version
+			}
+
+			if _, handled, err := h.call(r, cluster); err != nil || !handled {
+				t.Fatalf("transition: handled=%v err=%v", handled, err)
+			}
+			if got := persisted(); got != "11.1.0" {
+				t.Fatalf("transition path: status.version = %q; want 11.1.0", got)
+			}
+			<-rec.Events
+
+			// Simulate the pre-upgrade state: conditions in place, no version.
+			cluster.Status.Version = ""
+			if err := r.Status().Update(ctx, cluster); err != nil {
+				t.Fatalf("resetting status.version: %v", err)
+			}
+
+			if _, handled, err := h.call(r, cluster); err != nil || !handled {
+				t.Fatalf("no-op: handled=%v err=%v", handled, err)
+			}
+			if got := persisted(); got != "11.1.0" {
+				t.Errorf("no-op path: status.version = %q; want 11.1.0", got)
+			}
+			select {
+			case ev := <-rec.Events:
+				t.Errorf("no-op path must not re-emit the Warning; got %s", ev)
+			default:
+			}
+		})
+	}
+}

@@ -241,8 +241,8 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | string, required | Curity Identity Server version |
-| `image` | string | Override container image (for private mirrors) |
+| `version` | string, required unless `image` is set | Curity Identity Server version; used as the tag of the default image `curity.azurecr.io/curity/idsvr:<version>` |
+| `image` | string | Full container image reference, overriding the default (for private mirrors). When set, `version` may be omitted and the image tag is reported as the version |
 | `imagePullSecret` | string | Secret name for pulling images |
 | `fipsMode` | bool | Enable FIPS mode (`--fips-mode`). Requires a special licence and a FIPS-enabled image; contact sales@curity.io. Defaults to `false` |
 | `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`; auto-generated if omitted |
@@ -314,13 +314,21 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 
 Manages the Identity Server database schema. Creating one triggers a **run-once Job** that executes
 `/opt/idsvr/bin/idsvr -I` using the **same container image as the referenced
-`IdentityServerCluster`**. The Job is re-run whenever the resolved cluster image (a `version` bump
-or `image` override) **or** this resource's own spec changes — handy for re-pointing at a new
-database.
+`IdentityServerCluster`**. The Job is re-run whenever the resolved cluster image **or** this
+resource's own spec changes — handy for re-pointing at a new database. It is not re-run on every
+reconcile; a completed Job stays completed until one of those changes.
+
+What counts as an image change depends on how the cluster picks its image:
+
+- **Default image** (`image` unset): changing `version` changes the image tag
+  (`curity.azurecr.io/curity/idsvr:<version>`), so a `version` bump re-runs the Job.
+- **Custom image** (`image` set): only a change to the `image` string re-runs the Job. `version`
+  is informational in this mode, so changing it alone does not. Re-pushing a moving tag (e.g.
+  `:latest`) without changing the string isn't detected either; pin a specific tag or digest.
 
 | Field | Type | Description |
 |---|---|---|
-| `identityServerClusterRef` | object, required | `{name: "<cluster>"}` reference (same namespace). Supplies the image; a change to its `version`/`image` re-triggers the Job |
+| `identityServerClusterRef` | object, required | `{name: "<cluster>"}` reference (same namespace). Supplies the image; a change to the resolved image re-triggers the Job (see above) |
 | `connection` | object, required | JDBC settings projected onto `JDBC_URL`, `JDBC_USERNAME`, `JDBC_PASSWORD`. See below |
 | `jobTemplate` | object | Standard Kubernetes Job/Pod settings for the schema-management Job (all optional). See below |
 

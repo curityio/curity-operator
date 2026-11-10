@@ -71,27 +71,47 @@ func TestBuildDeployment_RuntimeArgs(t *testing.T) {
 	assertNotContains(t, args, "-N")
 }
 
-func TestBuildDeployment_FIPSModeDefaultOff(t *testing.T) {
-	cluster := newTestCluster()
-	for _, nodeType := range []v1alpha1.NodeType{v1alpha1.NodeTypeAdmin, v1alpha1.NodeTypeRuntime} {
-		node := newTestNode(nodeType)
-		deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
-		args := deploy.Spec.Template.Spec.Containers[0].Args
-		assertNotContains(t, args, "--fips-mode")
+func TestBuildImage(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		image   string
+		fips    bool
+		want    string
+	}{
+		{"default repository", "11.1.0", "", false, "curity.azurecr.io/curity/idsvr:11.1.0"},
+		{"fips repository", "11.1.0", "", true, "curityfips.azurecr.io/curity/idsvr:11.1.0"},
+		{"explicit image wins", "11.1.0", "mirror.example.com/idsvr:11.1.0", false, "mirror.example.com/idsvr:11.1.0"},
+		{"explicit image wins over fips", "11.1.0", "mirror.example.com/idsvr-fips:11.1.0", true, "mirror.example.com/idsvr-fips:11.1.0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cluster := newTestCluster()
+			cluster.Spec.Version = tt.version
+			cluster.Spec.Image = tt.image
+			cluster.Spec.FIPSMode = tt.fips
+			if got := buildImage(cluster); got != tt.want {
+				t.Errorf("buildImage() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestBuildDeployment_FIPSModeAppendsFlag(t *testing.T) {
+// FIPS mode is selected by the image alone; the server no longer takes a
+// --fips-mode argument.
+func TestBuildDeployment_FIPSModeUsesFIPSImageWithoutFlag(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.FIPSMode = true
 
 	for _, nodeType := range []v1alpha1.NodeType{v1alpha1.NodeTypeAdmin, v1alpha1.NodeTypeRuntime} {
 		node := newTestNode(nodeType)
 		deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
-		args := deploy.Spec.Template.Spec.Containers[0].Args
-		assertContains(t, args, "--fips-mode")
-		// The base idsvr invocation is preserved.
-		assertContains(t, args, "/opt/idsvr/bin/idsvr")
+		c := deploy.Spec.Template.Spec.Containers[0]
+		if !strings.HasPrefix(c.Image, defaultFIPSImage+":") {
+			t.Errorf("%s: image = %q, want prefix %q", nodeType, c.Image, defaultFIPSImage+":")
+		}
+		assertNotContains(t, c.Args, "--fips-mode")
+		assertContains(t, c.Args, "/opt/idsvr/bin/idsvr")
 	}
 }
 
@@ -3318,6 +3338,7 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 	includedInHash := map[string]bool{
 		"Version":         true, // via buildImage(cluster)
 		"Image":           true, // via buildImage(cluster)
+		"FIPSMode":        true, // via buildImage(cluster): picks the default repository
 		"ImagePullSecret": true,
 		// Packages flows into the hash via computePackagesHash (conditional
 		// append — nil/empty packages leave the hash unchanged). Each package
@@ -3354,10 +3375,6 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 		// consumed via envFrom on nodes; it does not affect cluster.xml, so it
 		// must not trigger a genclust Job re-run.
 		"ConvertKeystore": true,
-		// FIPSMode only appends the --fips-mode flag to the node idsvr args; it
-		// does not affect cluster.xml generation. Flipping it rolls the node
-		// Deployments via the normal Deployment diff, not a genclust Job re-run.
-		"FIPSMode": true,
 		// Observability only governs a Prometheus ServiceMonitor; it has no
 		// bearing on cluster.xml or pod config, so it must not trigger a
 		// genclust Job re-run or a Deployment rollout.

@@ -241,10 +241,10 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | string, required | Curity Identity Server version |
+| `version` | string, required | Curity Identity Server version; used as the tag of the default image `curity.azurecr.io/curity/idsvr:<version>` (`curityfips.azurecr.io/curity/idsvr:<version>` when `fipsMode` is on) |
 | `image` | string | Override container image (for private mirrors) |
 | `imagePullSecret` | string | Secret name for pulling images |
-| `fipsMode` | bool | Enable FIPS mode (`--fips-mode`). Requires a special licence and a FIPS-enabled image; contact sales@curity.io. Defaults to `false` |
+| `fipsMode` | bool | Run the FIPS-enabled Identity Server. When `image` is unset, the default image becomes `curityfips.azurecr.io/curity/idsvr:<version>`; when `image` is set, it must already be a FIPS-enabled image. Requires a special licence; contact sales@curity.io. Defaults to `false` |
 | `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`; auto-generated if omitted |
 | `logging` | object | Log level, log streams to tail, sidecar config |
 | `resources` | object | Default CPU/memory requests/limits |
@@ -314,9 +314,9 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 
 Manages the Identity Server database schema. Creating one triggers a **run-once Job** that executes
 `/opt/idsvr/bin/idsvr -I` using the **same container image as the referenced
-`IdentityServerCluster`**. The Job is re-run whenever the resolved cluster image (a `version` bump
-or `image` override) **or** this resource's own spec changes — handy for re-pointing at a new
-database.
+`IdentityServerCluster`**. The Job is re-run whenever the resolved cluster image (a `version` bump,
+an `image` override, or toggling `fipsMode` when `image` is unset) **or** this resource's own spec
+changes — handy for re-pointing at a new database.
 
 | Field | Type | Description |
 |---|---|---|

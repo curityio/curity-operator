@@ -23,7 +23,8 @@ import (
 )
 
 const (
-	defaultImage = "curity.azurecr.io/curity/idsvr"
+	defaultImage     = "curity.azurecr.io/curity/idsvr"
+	defaultFIPSImage = "curityfips.azurecr.io/curity/idsvr"
 
 	portConfig             = 6789
 	portDistributedService = 6790
@@ -100,7 +101,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 		Name:            containerName,
 		Image:           buildImage(cluster),
 		ImagePullPolicy: resolveImagePullPolicy(cluster, node),
-		Args:            buildContainerArgs(cluster, node),
+		Args:            buildContainerArgs(node),
 		Ports:           buildContainerPorts(node),
 		Env:             buildEnvVars(cluster, node),
 		EnvFrom:         buildEnvFrom(configs),
@@ -292,37 +293,37 @@ func resolveServiceMonitorSpec(cluster *v1alpha1.IdentityServerCluster) *v1alpha
 	return sm
 }
 
-// buildImage returns the container image string.
+// buildImage returns the container image string: spec.image when set,
+// otherwise the default repository tagged with spec.version. With fipsMode
+// enabled the default repository is the FIPS one; an explicit spec.image always
+// wins, so a mirrored FIPS image is used as-is.
 func buildImage(cluster *v1alpha1.IdentityServerCluster) string {
 	if cluster.Spec.Image != "" {
 		return cluster.Spec.Image
 	}
-	return fmt.Sprintf("%s:%s", defaultImage, cluster.Spec.Version)
+	repo := defaultImage
+	if cluster.Spec.FIPSMode {
+		repo = defaultFIPSImage
+	}
+	return fmt.Sprintf("%s:%s", repo, cluster.Spec.Version)
 }
 
 // buildContainerArgs returns the command arguments for the Curity container.
-// When the cluster enables FIPS mode, --fips-mode is appended for both admin
-// and runtime nodes.
-func buildContainerArgs(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []string {
-	var args []string
+// FIPS mode needs no argument: the FIPS image enables it (see buildImage).
+func buildContainerArgs(node *v1alpha1.IdentityServerNode) []string {
 	if node.Spec.Type == v1alpha1.NodeTypeAdmin {
-		args = []string{
+		return []string{
 			"/opt/idsvr/bin/idsvr",
 			"-s", node.Spec.Role,
 			"-N", node.Name,
 			"--admin",
 		}
-	} else {
-		args = []string{
-			"/opt/idsvr/bin/idsvr",
-			"-s", node.Spec.Role,
-			"--no-admin",
-		}
 	}
-	if cluster.Spec.FIPSMode {
-		args = append(args, "--fips-mode")
+	return []string{
+		"/opt/idsvr/bin/idsvr",
+		"-s", node.Spec.Role,
+		"--no-admin",
 	}
-	return args
 }
 
 // resolveHTTPPort returns the runtime http Service port: service.port when set,

@@ -231,6 +231,10 @@ helmify: manifests kustomize helmify-bin yq ## Generate Helm chart from Kustomiz
 helm-lint: ## Lint the generated Helm chart.
 	helm lint $(HELM_CHART_DIR) --strict
 
+.PHONY: helm-verify
+helm-verify: yq ## Render the generated chart with default and namespace-scoped values and check the output.
+	YQ=$(YQ) hack/helm/verify-render.sh $(HELM_CHART_DIR)
+
 .PHONY: helm-template
 helm-template: ## Render Helm templates locally (dry-run).
 	helm template $(HELM_CHART_NAME) $(HELM_CHART_DIR)

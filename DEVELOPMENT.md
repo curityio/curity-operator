@@ -130,7 +130,11 @@ make version-sync  # Sync version across Chart.yaml, values.yaml, kustomization
 ```
 
 `make helmify` rewrites everything under `charts/curity-operator/templates/`; hand edits there are
-lost on the next run. Chart-shaping changes belong in `hack/helm/postprocess.sh`.
+lost on the next run. Chart-shaping changes belong in `hack/helm/postprocess.sh`. Some of its edits
+match helmify's exact output and would silently do nothing if that output changed, so
+`make helm-verify` (`hack/helm/verify-render.sh`) renders the chart with default and
+namespace-scoped values and checks the result. Run it after `make helmify`, and extend it when
+you add a chart-shaping step.
 
 ## Linting
 
@@ -144,7 +148,7 @@ make vet   # Run go vet
 
 | Workflow | Trigger | What it does | Publishes to |
 |---|---|---|---|
-| `pull_request.yaml` | PRs to `main` | generate, lint, unit tests, build, `docker build`, `helm lint` | nothing |
+| `pull_request.yaml` | PRs to `main` | generate, lint, unit tests, build, `docker build`, `helm lint`, `make helm-verify` | nothing |
 | `e2e.yaml` | `ok-to-test/e2e` label on a PR | `build-image` publishes the test image, then `e2e-tests` runs the suite against the shared AKS cluster | GHCR |
 | `push.yaml` | push to `main` | tests, build, push image, generate + push the Helm chart | GHCR |
 | `release.yaml` | tag `X.Y.Z` | multi-arch image (+ `latest`), versioned chart, `dist/install.yaml`, `dist/crds.yaml`, GitHub release | ACR |

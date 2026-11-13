@@ -122,9 +122,23 @@ endif
 test: envtest ## Run unit tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /test/) -v -count=1
 
+# The namespace-scoped suite runs after the main one, on the same cluster: the
+# main suite's teardown removes the cluster-wide operator, which would
+# otherwise also reconcile the namespaces the scoped suite checks. It runs even
+# when the main suite fails, and the target fails if either did.
 .PHONY: test-e2e
 test-e2e: generate deploy-kind install ## Build, load into Kind, install CRDs, run e2e tests.
-	go test -v -timeout 1200s ./test/e2e/...
+	go test -v -timeout 1200s ./test/e2e/...; status=$$?; \
+	$(MAKE) test-e2e-scoped || status=1; \
+	exit $$status
+
+# E2E_PULL_SECRET names an existing pull secret in the scoped suite's namespace
+# (curity-e2e-scoped); CI creates it. Leave empty for Kind.
+E2E_PULL_SECRET ?=
+
+.PHONY: test-e2e-scoped
+test-e2e-scoped: helmify ## Run the namespace-scoped e2e suite (no cluster-wide operator may be installed).
+	E2E_IMG=$(IMG) E2E_PULL_SECRET=$(E2E_PULL_SECRET) go test -v -count=1 -timeout 900s ./test/e2e-scoped/...
 
 .PHONY: test-e2e-remote
 test-e2e-remote: generate deploy-remote test-e2e-run ## Build, push to registry, install CRDs, run e2e tests.
@@ -134,7 +148,9 @@ test-e2e-remote: generate deploy-remote test-e2e-run ## Build, push to registry,
 # matters because its GITHUB_TOKEN is what lands in the in-cluster pull secret.
 .PHONY: test-e2e-run
 test-e2e-run: generate install ## Run e2e tests against an image already published to the registry.
-	E2E_REMOTE=true go test -v -timeout 1200s ./test/e2e/...
+	E2E_REMOTE=true go test -v -timeout 1200s ./test/e2e/...; status=$$?; \
+	$(MAKE) test-e2e-scoped || status=1; \
+	exit $$status
 
 .PHONY: test-e2e-update-snapshots
 test-e2e-update-snapshots: generate deploy-kind install ## Run e2e tests and update snapshots.
@@ -167,8 +183,10 @@ ifndef ignore-not-found
 endif
 
 .PHONY: install
+# Server-side: client-side apply keeps a copy of each CRD in an annotation
+# capped at 256 KB, and the largest CRD is already ~210 KB.
 install: manifests kustomize ## Install CRDs into the K8s cluster.
-	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
+	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply --server-side -f -
 
 .PHONY: uninstall
 uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster.
@@ -190,11 +208,14 @@ kustomize-deploy: manifests kustomize ## Deploy operator to the K8s cluster via 
 undeploy: kustomize ## Undeploy operator from the K8s cluster.
 	$(KUSTOMIZE) build $(DEPLOY_OVERLAY) | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
 
+# crds.yaml is the CRDs alone, for namespace-scoped installs where a cluster
+# admin installs the CRDs and teams install the chart with crds.install=false.
 .PHONY: build-installer
-build-installer: manifests kustomize ## Generate a consolidated install.yaml.
+build-installer: manifests kustomize ## Generate a consolidated install.yaml and a CRDs-only crds.yaml.
 	mkdir -p dist
 	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
 	$(KUSTOMIZE) build config/default > dist/install.yaml
+	$(KUSTOMIZE) build config/crd > dist/crds.yaml
 
 ##@ Helm
 

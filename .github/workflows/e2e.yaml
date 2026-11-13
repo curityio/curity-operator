@@ -92,6 +92,10 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The namespace-scoped suite installs the operator through the Helm chart.
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
       - name: Configure kubeconfig
         env:
           KUBE_SERVER: ${{ secrets.KUBE_SERVER }}
@@ -125,10 +129,27 @@ jobs:
             --docker-password=${{ secrets.GITHUB_TOKEN }} \
             --namespace=curity-operator
 
+      # The namespace-scoped suite runs after the main one and installs the
+      # operator into curity-e2e-scoped. The main suite's teardown deletes the
+      # curity-operator namespace (and the secret above), so this namespace
+      # gets its own copy, created up front.
+      - name: Create image pull secret for the namespace-scoped suite
+        run: |
+          kubectl get namespace curity-e2e-scoped || kubectl create namespace curity-e2e-scoped
+          kubectl delete secret ghcr-pull-secret -n curity-e2e-scoped --ignore-not-found
+          kubectl create secret docker-registry ghcr-pull-secret \
+            --docker-server=ghcr.io \
+            --docker-username=${{ github.actor }} \
+            --docker-password=${{ secrets.GITHUB_TOKEN }} \
+            --namespace=curity-e2e-scoped
+
       # test-e2e-run, not test-e2e-remote: the image was published by the
-      # build-image job, so this one only installs CRDs and runs the suite.
+      # build-image job, so this one only installs CRDs and runs the suites.
       - name: Run E2E Tests
-        run: make test-e2e-run IMG=ghcr.io/curityio/curity-operator:${{ needs.build-image.outputs.version }}
+        run: |
+          make test-e2e-run \
+            IMG=ghcr.io/curityio/curity-operator:${{ needs.build-image.outputs.version }} \
+            E2E_PULL_SECRET=ghcr-pull-secret
 
       - name: Collect operator logs
         if: failure()
@@ -141,10 +162,15 @@ jobs:
           kubectl logs -l control-plane=controller-manager -n curity-operator --all-containers --tail=200 || true
           echo "=== Operator previous logs (if restarted) ==="
           kubectl logs -l control-plane=controller-manager -n curity-operator --all-containers --previous --tail=100 || true
+          echo "=== Namespace-scoped operator pod status ==="
+          kubectl get pods -n curity-e2e-scoped -o wide || true
+          echo "=== Namespace-scoped operator logs ==="
+          kubectl logs -l control-plane=controller-manager -n curity-e2e-scoped --all-containers --tail=200 || true
 
       - name: Cleanup
         if: always()
         run: |
+          helm uninstall curity-operator -n curity-e2e-scoped --ignore-not-found || true
           make undeploy ignore-not-found=true || true
           kubectl delete secret ghcr-pull-secret -n curity-operator --ignore-not-found
-          kubectl delete namespace curity-e2e --ignore-not-found
+          kubectl delete namespace curity-e2e curity-e2e-scoped curity-e2e-scoped-other --ignore-not-found

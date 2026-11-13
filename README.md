@@ -60,9 +60,11 @@ ConfigMaps / Secrets labelled curity.io/managed=true  →  mounted into the pods
 - A Curity Identity Server licence — see [curity.io](https://curity.io/) to get one for free
 - Optional: the Prometheus Operator, if you want metrics scraped automatically
 
-The operator watches all namespaces and needs cluster-scoped RBAC (it creates Deployments,
-Services, Secrets, Jobs, HPAs, PodDisruptionBudgets, NetworkPolicies and ServiceMonitors on your
-behalf).
+By default the operator watches all namespaces and needs cluster-scoped RBAC (it creates
+Deployments, Services, Secrets, Jobs, HPAs, PodDisruptionBudgets, NetworkPolicies and
+ServiceMonitors on your behalf). On restricted clusters it can instead be limited to a single
+namespace, see [Namespace-scoped installation](#namespace-scoped-installation) and
+[Permissions](#permissions).
 
 ## Installation
 
@@ -89,6 +91,9 @@ Useful values:
 | `controllerManager.manager.resources` | 10m/128Mi requests | Operator resource requests and limits |
 | `imagePullSecrets` | `[]` | Pull secrets for the operator image |
 | `crds.keep` | `true` | Keep the CRDs (and therefore your resources) on `helm uninstall` |
+| `crds.install` | `true` | Install the CRDs with the chart; set `false` when they are installed separately |
+| `watchScope` | `cluster` | `cluster` watches all namespaces; `namespace` watches only the release namespace, see [Namespace-scoped installation](#namespace-scoped-installation) |
+| `controllerManager.kubeRbacProxy.enabled` | `true` | Deploy the kube-rbac-proxy metrics sidecar, which needs cluster-scoped RBAC |
 
 `curity.azurecr.io` allows anonymous pulls, so no pull secret is needed for a default install. If
 you mirror the image into a private registry, create a pull secret and reference it:
@@ -106,14 +111,110 @@ helm install curity-operator oci://curity.azurecr.io/charts/curity-operator \
   --set imagePullSecrets[0].name=operator-pull-secret
 ```
 
+### Namespace-scoped installation
+
+On clusters where the operator may not have cluster-wide permissions, set `watchScope=namespace`.
+The operator then only watches and manages resources in the namespace it is installed in, and its
+permissions are granted with a Role and RoleBinding in that namespace instead of a ClusterRole.
+Install it into the namespace where your Identity Server will run, and create your
+`IdentityServerCluster`, `IdentityServerNode` and `IdentityServerDatabase` resources there.
+
+```bash
+helm install curity-operator oci://curity.azurecr.io/charts/curity-operator \
+  --namespace team-a \
+  --set watchScope=namespace \
+  --set crds.install=false \
+  --set controllerManager.kubeRbacProxy.enabled=false
+```
+
+- `crds.install=false` is needed when the CRDs are installed separately (see below) or already
+  belong to another release. Helm won't take over CRDs owned by another release.
+- `controllerManager.kubeRbacProxy.enabled=false` removes the metrics sidecar and its two
+  ClusterRoles. With it, the release contains no cluster-scoped objects at all.
+
+**One-time steps for a cluster admin.** CRDs are always cluster-scoped, and Kubernetes only lets
+you create a Role that grants permissions you already hold. If the person installing the chart
+only administers their own namespace, a cluster admin must once:
+
+1. Install the CRDs. Every release ships them as `crds.yaml`. The URL below always resolves to the
+   latest release; to pin a version, replace `latest/download` with `download/X.Y.Z`:
+
+   ```bash
+   kubectl apply --server-side \
+     -f https://github.com/curityio/curity-operator/releases/latest/download/crds.yaml
+   ```
+
+   `--server-side` is needed because the CRDs are large: a plain `kubectl apply` stores a copy of
+   each in an annotation, which Kubernetes limits to 256 KB. To upgrade, apply the new version's
+   `crds.yaml` before upgrading the operators.
+
+2. Grant the installer the permissions the built-in `admin` role does not include, in their
+   namespace only:
+
+   ```yaml
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: Role
+   metadata:
+     name: curity-operator-installer
+     namespace: team-a
+   rules:
+   - apiGroups: ["curity.io"]
+     resources:
+     - identityserverclusters
+     - identityservernodes
+     - identityserverdatabases
+     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+   - apiGroups: ["curity.io"]
+     resources:
+     - identityserverclusters/status
+     - identityservernodes/status
+     - identityserverdatabases/status
+     verbs: ["get", "patch", "update"]
+   - apiGroups: ["curity.io"]
+     resources:
+     - identityserverclusters/finalizers
+     - identityservernodes/finalizers
+     - identityserverdatabases/finalizers
+     verbs: ["update"]
+   # Only if the Prometheus Operator is installed:
+   - apiGroups: ["monitoring.coreos.com"]
+     resources: ["servicemonitors"]
+     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+   ---
+   apiVersion: rbac.authorization.k8s.io/v1
+   kind: RoleBinding
+   metadata:
+     name: curity-operator-installer
+     namespace: team-a
+   roleRef:
+     apiGroup: rbac.authorization.k8s.io
+     kind: Role
+     name: curity-operator-installer
+   subjects:
+   - kind: User # or Group / ServiceAccount, e.g. your CI identity
+     name: team-a-admin
+   ```
+
+Things to keep in mind:
+
+- The CRDs are shared by the whole cluster, so every operator instance in it must run a compatible
+  version. Upgrade the CRDs first, then the operators.
+- Never let two operators manage the same namespace, for example a cluster-scoped and a
+  namespace-scoped one.
+- The plain `install.yaml` manifest below is cluster-scoped only.
+
 ### Plain manifests
 
 Every release also ships a single consolidated manifest. The URL below always resolves to the
 latest release; to pin a version, replace `latest/download` with `download/X.Y.Z`:
 
 ```bash
-kubectl apply -f https://github.com/curityio/curity-operator/releases/latest/download/install.yaml
+kubectl apply --server-side \
+  -f https://github.com/curityio/curity-operator/releases/latest/download/install.yaml
 ```
+
+`--server-side` is needed because the CRDs in the manifest are too large for the annotation a plain
+`kubectl apply` stores. Existing installs made without it can switch to it without conflicts.
 
 ### Verify
 
@@ -121,6 +222,39 @@ kubectl apply -f https://github.com/curityio/curity-operator/releases/latest/dow
 kubectl -n curity-operator get pods
 kubectl get crd | grep curity.io
 ```
+
+### Permissions
+
+The operator's service account gets these permissions. With `watchScope=cluster` they come from a
+ClusterRole and apply in every namespace; with `watchScope=namespace` the same rules come from a
+Role in the release namespace only.
+
+| API group | Resources | Verbs |
+|---|---|---|
+| core | `configmaps` | get, list, watch |
+| core | `events` | create, get, list, patch, watch |
+| core | `pods` | create, delete, get, list, watch |
+| core | `pods/log` | get |
+| core | `secrets` | create, get, list, update, watch |
+| core | `services` | create, delete, get, list, patch, update, watch |
+| `apps` | `deployments` | create, delete, get, list, patch, update, watch |
+| `autoscaling` | `horizontalpodautoscalers` | create, delete, get, list, patch, update, watch |
+| `batch` | `jobs` | create, delete, get, list, watch |
+| `policy` | `poddisruptionbudgets` | create, delete, get, list, patch, update, watch |
+| `networking.k8s.io` | `networkpolicies` | create, delete, get, list, patch, update, watch |
+| `monitoring.coreos.com` | `servicemonitors` | create, delete, get, list, patch, update, watch |
+| `curity.io` | `identityserverclusters`, `identityservernodes`, `identityserverdatabases` | create, delete, get, list, patch, update, watch |
+| `curity.io` | the same, `/status` | get, patch, update |
+| `curity.io` | the same, `/finalizers` | update |
+
+The chart also creates:
+
+- A Role in the release namespace for leader election: `configmaps` and `leases` (all verbs),
+  `events` (create, patch).
+- When `controllerManager.kubeRbacProxy.enabled=true`: a ClusterRole for the metrics sidecar
+  (`tokenreviews` and `subjectaccessreviews`: create), and a `metrics-reader` ClusterRole
+  (`/metrics`: get) that you can bind to your scraper.
+- When `crds.install=true`: the three cluster-scoped `curity.io` CRDs.
 
 ## Quick start
 

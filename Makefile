@@ -128,9 +128,9 @@ test: envtest ## Run unit tests.
 # when the main suite fails, and the target fails if either did.
 .PHONY: test-e2e
 test-e2e: generate deploy-kind install ## Build, load into Kind, install CRDs, run e2e tests.
-	go test -v -timeout 1200s ./test/e2e/...; status=$$?; \
-	$(MAKE) test-e2e-scoped || status=1; \
-	exit $$status
+	go test -v -timeout 1200s ./test/e2e/...; test_status=$$?; \
+	$(MAKE) test-e2e-scoped || test_status=1; \
+	exit $$test_status
 
 # E2E_PULL_SECRET names an existing pull secret in the scoped suite's namespace
 # (curity-e2e-scoped); CI creates it. Leave empty for Kind.
@@ -148,9 +148,9 @@ test-e2e-remote: generate deploy-remote test-e2e-run ## Build, push to registry,
 # matters because its GITHUB_TOKEN is what lands in the in-cluster pull secret.
 .PHONY: test-e2e-run
 test-e2e-run: generate install ## Run e2e tests against an image already published to the registry.
-	E2E_REMOTE=true go test -v -timeout 1200s ./test/e2e/...; status=$$?; \
-	$(MAKE) test-e2e-scoped || status=1; \
-	exit $$status
+	E2E_REMOTE=true go test -v -timeout 1200s ./test/e2e/...; test_status=$$?; \
+	$(MAKE) test-e2e-scoped || test_status=1; \
+	exit $$test_status
 
 .PHONY: test-e2e-update-snapshots
 test-e2e-update-snapshots: generate deploy-kind install ## Run e2e tests and update snapshots.

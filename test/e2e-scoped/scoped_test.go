@@ -63,6 +63,7 @@ var _ = Describe("Namespace-scoped operator", Ordered, func() {
 
 	It("reconciles resources in its own namespace and ignores other namespaces", func() {
 		for _, ns := range []string{watchedNS, otherNS} {
+			recordCluster(ns, clusterName)
 			utils.ApplyFixtureTemplate("./test/e2e/fixtures/identityservercluster.yaml", ns,
 				map[string]interface{}{"name": clusterName, "namespace": ns})
 		}

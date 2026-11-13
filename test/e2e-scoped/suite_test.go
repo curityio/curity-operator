@@ -65,6 +65,15 @@ var created struct {
 	crds               []string
 	namespaces         []string
 	chart              bool
+	// clusters are the IdentityServerClusters the specs applied. Cleanup
+	// deletes these by name and never uses --all.
+	clusters []client.ObjectKey
+}
+
+// recordCluster registers an IdentityServerCluster for cleanup. Call it
+// before applying the fixture, since a failed apply can still create it.
+func recordCluster(namespace, name string) {
+	created.clusters = append(created.clusters, client.ObjectKey{Namespace: namespace, Name: name})
 }
 
 func TestScopedE2E(t *testing.T) {
@@ -116,6 +125,17 @@ var _ = BeforeSuite(func() {
 	createNamespace(watchedNS)
 	createNamespace(otherNS)
 
+	// The specs apply fixtures into these namespaces, and cleanup deletes what
+	// they applied. Anything already there would be overwritten by a fixture
+	// with the same name, then deleted, so refuse to run instead.
+	By("checking that the suite's namespaces hold no Curity resources yet")
+	for _, ns := range []string{watchedNS, otherNS} {
+		existing, err := utils.Run("kubectl", "get", strings.Join(crdNames, ","), "-n", ns, "-o", "name")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(utils.GetNonEmptyLines(existing)).To(BeEmpty(),
+			"namespace %s already holds Curity resources, probably left by an earlier run; remove them first", ns)
+	}
+
 	By("installing the chart with watchScope=namespace")
 	args := []string{
 		"upgrade", "--install", releaseName, chartDir,
@@ -149,18 +169,34 @@ var _ = AfterSuite(func() {
 			GinkgoWriter.Printf("warning: %s: %v\n", step, err)
 		}
 	}
-	crTypes := strings.Join(crdNames, ",")
+	var err error
 
-	// Both namespaces are this suite's own. The operator is still running,
-	// so it can remove its finalizers in watchedNS.
-	_, err := utils.Run("kubectl", "delete", crTypes, "--all", "-n", watchedNS, "--ignore-not-found", "--timeout=60s")
-	warn("delete resources in "+watchedNS, err)
+	// Only the clusters the specs applied, by name. The operator is still
+	// running, so it removes its finalizers from the one in watchedNS.
+	for _, c := range created.clusters {
+		if c.Namespace != watchedNS {
+			continue
+		}
+		_, err = utils.Run("kubectl", "delete", "identityserverclusters.curity.io", c.Name,
+			"-n", c.Namespace, "--ignore-not-found", "--timeout=60s")
+		warn("delete "+c.String(), err)
+	}
 
-	// Nothing should have put a finalizer here; if a regression did, strip it
-	// so the CRD deletion below cannot hang.
-	_, err = utils.Run("kubectl", "delete", crTypes, "--all", "-n", otherNS, "--ignore-not-found", "--wait=false")
-	warn("delete resources in "+otherNS, err)
-	stripFinalizers(otherNS)
+	// Nothing should have put a finalizer on the ones in otherNS; if a
+	// regression did, strip it so they (and the CRDs below) cannot hang.
+	for _, c := range created.clusters {
+		if c.Namespace == watchedNS {
+			continue
+		}
+		_, err = utils.Run("kubectl", "delete", "identityserverclusters.curity.io", c.Name,
+			"-n", c.Namespace, "--ignore-not-found", "--wait=false")
+		warn("delete "+c.String(), err)
+		_, err = utils.Run("kubectl", "patch", "identityserverclusters.curity.io", c.Name,
+			"-n", c.Namespace, "--type=merge", "-p", `{"metadata":{"finalizers":null}}`)
+		if err != nil && !strings.Contains(err.Error(), "NotFound") {
+			warn("strip finalizers from "+c.String(), err)
+		}
+	}
 
 	if created.chart {
 		_, err = utils.Run("helm", "uninstall", releaseName, "--namespace", watchedNS, "--ignore-not-found", "--wait")
@@ -262,19 +298,6 @@ func createNamespace(name string) {
 		created.namespaces = append(created.namespaces, name)
 	case !apierrors.IsAlreadyExists(err):
 		Fail(fmt.Sprintf("failed to create namespace %s: %v", name, err))
-	}
-}
-
-func stripFinalizers(ns string) {
-	for _, crd := range crdNames {
-		out, err := utils.Run("kubectl", "get", crd, "-n", ns, "-o", "name", "--ignore-not-found")
-		if err != nil {
-			continue
-		}
-		for _, name := range utils.GetNonEmptyLines(out) {
-			_, _ = utils.Run("kubectl", "patch", name, "-n", ns, "--type=merge",
-				"-p", `{"metadata":{"finalizers":null}}`)
-		}
 	}
 }
 

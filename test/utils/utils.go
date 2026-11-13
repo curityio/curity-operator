@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -50,14 +51,22 @@ func GetNonEmptyLines(output string) []string {
 	return res
 }
 
-// GetProjectDir returns the project root directory.
+// GetProjectDir returns the project root directory: the nearest ancestor of
+// the working directory that holds go.mod. Walking up (rather than trimming a
+// known suffix) works from any test package, e.g. test/e2e and test/e2e-scoped.
 func GetProjectDir() (string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return wd, err
 	}
-	wd = strings.ReplaceAll(wd, "/test/e2e", "")
-	return wd, nil
+	for dir := wd; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir, nil
+		}
+		if dir == filepath.Dir(dir) {
+			return wd, fmt.Errorf("no go.mod found above %s", wd)
+		}
+	}
 }
 
 // AssertError fails the test if err is not nil.

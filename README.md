@@ -176,7 +176,9 @@ only administers their own namespace, a cluster admin must once:
      - identityservernodes/finalizers
      - identityserverdatabases/finalizers
      verbs: ["update"]
-   # Only if the Prometheus Operator is installed:
+   # Needed even without the Prometheus Operator: the operator's Role always
+   # includes this rule, and Kubernetes only lets you create a Role whose
+   # permissions you already hold, whether or not the API is installed.
    - apiGroups: ["monitoring.coreos.com"]
      resources: ["servicemonitors"]
      verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]

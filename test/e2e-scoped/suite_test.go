@@ -54,6 +54,19 @@ var crdNames = []string{
 
 var k8s client.Client
 
+// created records what this suite put on the cluster, so AfterSuite removes
+// only that. Ginkgo runs AfterSuite even when BeforeSuite fails, and the
+// cluster is shared: deleting a CRD the suite did not create would delete
+// every resource of that kind in every namespace.
+var created struct {
+	// safetyChecksPassed is set once no other curity-operator was found.
+	// Until then AfterSuite touches nothing.
+	safetyChecksPassed bool
+	crds               []string
+	namespaces         []string
+	chart              bool
+}
+
 func TestScopedE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	GinkgoWriter.Println("Starting curity-operator namespace-scoped e2e suite")
@@ -83,8 +96,14 @@ var _ = BeforeSuite(func() {
 
 	By("waiting for CRDs still being deleted by an earlier teardown")
 	waitForTerminatingCRDs()
+	created.safetyChecksPassed = true
 
 	By("installing the CRDs separately, as a cluster admin would")
+	for _, crd := range crdNames {
+		if !crdExists(crd) {
+			created.crds = append(created.crds, crd)
+		}
+	}
 	_, err = utils.Run("make", "install")
 	Expect(err).NotTo(HaveOccurred())
 	waitArgs := []string{"wait", "--for=condition=Established", "--timeout=60s"}
@@ -111,11 +130,18 @@ var _ = BeforeSuite(func() {
 	if secret := os.Getenv("E2E_PULL_SECRET"); secret != "" {
 		args = append(args, "--set", "imagePullSecrets[0].name="+secret)
 	}
+	// Set before running: a failed install can still leave a release behind.
+	created.chart = true
 	_, err = utils.Run("helm", args...)
 	Expect(err).NotTo(HaveOccurred())
 })
 
 var _ = AfterSuite(func() {
+	if !created.safetyChecksPassed {
+		GinkgoWriter.Println("setup stopped before its safety checks passed; leaving the cluster untouched")
+		return
+	}
+
 	// Best effort: every step runs even if an earlier one fails, so a failed
 	// spec still leaves the cluster as the main suite's teardown left it.
 	warn := func(step string, err error) {
@@ -125,7 +151,8 @@ var _ = AfterSuite(func() {
 	}
 	crTypes := strings.Join(crdNames, ",")
 
-	// The operator is still running, so it can remove its finalizers.
+	// Both namespaces are this suite's own. The operator is still running,
+	// so it can remove its finalizers in watchedNS.
 	_, err := utils.Run("kubectl", "delete", crTypes, "--all", "-n", watchedNS, "--ignore-not-found", "--timeout=60s")
 	warn("delete resources in "+watchedNS, err)
 
@@ -135,14 +162,20 @@ var _ = AfterSuite(func() {
 	warn("delete resources in "+otherNS, err)
 	stripFinalizers(otherNS)
 
-	_, err = utils.Run("helm", "uninstall", releaseName, "--namespace", watchedNS, "--ignore-not-found", "--wait")
-	warn("helm uninstall", err)
+	if created.chart {
+		_, err = utils.Run("helm", "uninstall", releaseName, "--namespace", watchedNS, "--ignore-not-found", "--wait")
+		warn("helm uninstall", err)
+	}
 
-	_, err = utils.Run("kubectl", append([]string{"delete", "crd", "--ignore-not-found", "--timeout=120s"}, crdNames...)...)
-	warn("delete CRDs", err)
+	if len(created.crds) > 0 {
+		_, err = utils.Run("kubectl", append([]string{"delete", "crd", "--ignore-not-found", "--timeout=120s"}, created.crds...)...)
+		warn("delete CRDs", err)
+	}
 
-	_, err = utils.Run("kubectl", "delete", "namespace", watchedNS, otherNS, "--ignore-not-found", "--timeout=120s")
-	warn("delete namespaces", err)
+	if len(created.namespaces) > 0 {
+		_, err = utils.Run("kubectl", append([]string{"delete", "namespace", "--ignore-not-found", "--timeout=120s"}, created.namespaces...)...)
+		warn("delete namespaces", err)
+	}
 })
 
 // splitImage splits "registry/repo:tag" into repository and tag. A colon
@@ -212,9 +245,22 @@ func waitForTerminatingCRDs() {
 	})
 }
 
+func crdExists(name string) bool {
+	out, err := utils.Run("kubectl", "get", "crd", name, "--ignore-not-found", "-o", "name")
+	Expect(err).NotTo(HaveOccurred())
+	return out != ""
+}
+
+// createNamespace creates a namespace and records it for cleanup. One that
+// already exists (CI pre-creates watchedNS with a pull secret) is left to
+// whoever created it.
 func createNamespace(name string) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-	if err := k8s.Create(context.Background(), ns); err != nil && !apierrors.IsAlreadyExists(err) {
+	err := k8s.Create(context.Background(), ns)
+	switch {
+	case err == nil:
+		created.namespaces = append(created.namespaces, name)
+	case !apierrors.IsAlreadyExists(err):
 		Fail(fmt.Sprintf("failed to create namespace %s: %v", name, err))
 	}
 }

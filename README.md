@@ -241,10 +241,10 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | string, required unless `image` is set | Curity Identity Server version; used as the tag of the default image `curity.azurecr.io/curity/idsvr:<version>` |
+| `version` | string, required unless `image` is set | Curity Identity Server version; used as the tag of the default image `curity.azurecr.io/curity/idsvr:<version>` (`curityfips.azurecr.io/curity/idsvr:<version>` when `fipsMode` is on) |
 | `image` | string | Full container image reference, overriding the default (for private mirrors). When set, `version` may be omitted and the image tag is reported as the version |
 | `imagePullSecret` | string | Secret name for pulling images |
-| `fipsMode` | bool | Enable FIPS mode (`--fips-mode`). Requires a special licence and a FIPS-enabled image; contact sales@curity.io. Defaults to `false` |
+| `fipsMode` | bool | Run the FIPS-enabled Identity Server. When `image` is unset, the default image becomes `curityfips.azurecr.io/curity/idsvr:<version>`; when `image` is set, it must already be a FIPS-enabled image. Requires a special licence; contact sales@curity.io. Defaults to `false` |
 | `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`; auto-generated if omitted |
 | `logging` | object | Log level, log streams to tail, sidecar config |
 | `resources` | object | Default CPU/memory requests/limits |
@@ -321,7 +321,9 @@ reconcile; a completed Job stays completed until one of those changes.
 What counts as an image change depends on how the cluster picks its image:
 
 - **Default image** (`image` unset): changing `version` changes the image tag
-  (`curity.azurecr.io/curity/idsvr:<version>`), so a `version` bump re-runs the Job.
+  (`curity.azurecr.io/curity/idsvr:<version>`), so a `version` bump re-runs the Job. Toggling
+  `fipsMode` switches the repository to `curityfips.azurecr.io/curity/idsvr`, so it re-runs the
+  Job too.
 - **Custom image** (`image` set): only a change to the `image` string re-runs the Job. `version`
   is informational in this mode, so changing it alone does not. Re-pushing a moving tag (e.g.
   `:latest`) without changing the string isn't detected either; pin a specific tag or digest.

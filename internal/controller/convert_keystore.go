@@ -162,13 +162,20 @@ func (r *IdentityServerClusterReconciler) ensureConvertedKeystores(ctx context.C
 		reads = append(reads, readItem{src: src, crt: crt, key: key})
 	}
 
-	// 3. Input hash over encoding version + Curity version + sorted inputs, so a
-	// Curity upgrade or encoder change regenerates the output.
+	// 3. Input hash over encoding version + Curity version/image + sorted inputs,
+	// so a Curity upgrade or encoder change regenerates the output. A custom
+	// image is hashed too, since with spec.image set an upgrade can change the
+	// image alone. It's appended only when set, so hashes for clusters on the
+	// default image (fully described by spec.version) stay unchanged.
 	ih := sha256.New()
 	ih.Write([]byte(convertKeystoreEncodingVersion))
 	ih.Write([]byte{0})
 	ih.Write([]byte(cluster.Spec.Version))
 	ih.Write([]byte{0})
+	if cluster.Spec.Image != "" {
+		ih.Write([]byte(cluster.Spec.Image))
+		ih.Write([]byte{0})
+	}
 	for _, ri := range reads {
 		ih.Write([]byte(ri.src.KeyName))
 		ih.Write([]byte{0})

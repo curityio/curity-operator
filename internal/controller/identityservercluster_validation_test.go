@@ -32,14 +32,47 @@ var _ = Describe("IdentityServerCluster Reconciler / CRD validation", func() {
 
 	// --- Cluster spec validations ---
 
-	It("should reject cluster with empty version", func() {
+	It("should reject cluster with neither version nor image", func() {
 		cluster := &v1alpha1.IdentityServerCluster{
 			ObjectMeta: metav1.ObjectMeta{Name: "cluster-empty-ver", Namespace: ns},
-			Spec:       v1alpha1.IdentityServerClusterSpec{Version: ""},
+			Spec:       v1alpha1.IdentityServerClusterSpec{},
 		}
 		err := k8sClient.Create(ctx, cluster)
-		Expect(err).To(HaveOccurred(), "empty version should be rejected by MinLength=1")
+		Expect(err).To(HaveOccurred(), "a cluster with no version and no image has no resolvable image")
+		Expect(err.Error()).To(ContainSubstring("spec.version or spec.image must be set"))
+	})
+
+	It("should reject cluster with empty image and no version", func() {
+		obj := &unstructured.Unstructured{}
+		obj.SetAPIVersion(v1alpha1.GroupVersion.String())
+		obj.SetKind("IdentityServerCluster")
+		obj.SetName("cluster-empty-img")
+		obj.SetNamespace(ns)
+		_ = unstructured.SetNestedField(obj.Object, "", "spec", "image")
+		err := k8sClient.Create(ctx, obj)
+		Expect(err).To(HaveOccurred(), "an empty image does not stand in for version")
+		Expect(err.Error()).To(ContainSubstring("spec.version or spec.image must be set"))
+	})
+
+	It("should reject cluster with explicitly empty version", func() {
+		obj := &unstructured.Unstructured{}
+		obj.SetAPIVersion(v1alpha1.GroupVersion.String())
+		obj.SetKind("IdentityServerCluster")
+		obj.SetName("cluster-blank-ver")
+		obj.SetNamespace(ns)
+		_ = unstructured.SetNestedField(obj.Object, "", "spec", "version")
+		_ = unstructured.SetNestedField(obj.Object, "my-registry/idsvr:11.0", "spec", "image")
+		err := k8sClient.Create(ctx, obj)
+		Expect(err).To(HaveOccurred(), "version: \"\" should still be rejected by MinLength=1")
 		Expect(err.Error()).To(ContainSubstring("spec.version"))
+	})
+
+	It("should accept cluster with image and no version", func() {
+		cluster := &v1alpha1.IdentityServerCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster-img-only", Namespace: ns},
+			Spec:       v1alpha1.IdentityServerClusterSpec{Image: "my-registry/idsvr:11.0"},
+		}
+		Expect(k8sClient.Create(ctx, cluster)).To(Succeed())
 	})
 
 	It("should reject cluster with version exceeding max length", func() {

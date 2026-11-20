@@ -15,13 +15,17 @@ import (
 // other non-zero exit (DNS=6, TCP refused=7, timeout=28, size limit=63, etc.)
 // falls through to ReasonPackageFetchFailed with the verbatim exit code in
 // the message. Exit 100 is operator-emitted by the download script's
-// `unzip ... || exit 100` wrapper (see buildPackageDownloadScript).
+// `unzip ... || exit 100` wrapper (see buildPackageDownloadScript); 101 and
+// 102 are operator-emitted by the client_credentials token request (see
+// writeClientCredentialsTokenRequest).
 const (
-	exitCodeHTTPError       = 22  // curl --fail (-f) on HTTP 4xx/5xx
-	exitCodeClientCertBad   = 58  // curl: unable to use client cert file
-	exitCodeTLSVerifyFailed = 60  // curl: SSL certificate problem
-	exitCodeSSLEngineInit   = 82  // curl: SSL engine could not be initialized
-	exitCodeUnzipFailure    = 100 // operator-emitted; see download script
+	exitCodeHTTPError            = 22  // curl --fail (-f) on HTTP 4xx/5xx
+	exitCodeClientCertBad        = 58  // curl: unable to use client cert file
+	exitCodeTLSVerifyFailed      = 60  // curl: SSL certificate problem
+	exitCodeSSLEngineInit        = 82  // curl: SSL engine could not be initialized
+	exitCodeUnzipFailure         = 100 // operator-emitted; see download script
+	exitCodeTokenRequestFailed   = 101 // operator-emitted; token request transport error or non-2xx
+	exitCodeTokenResponseInvalid = 102 // operator-emitted; token response has no access_token
 )
 
 // translatePackagesReadyResult bundles the outcome of running the pod-watch
@@ -289,7 +293,7 @@ func classifyWaitingState(w *corev1.ContainerStateWaiting) (reason, detail strin
 
 // classifyTerminatedState returns a non-empty failure classification only
 // for non-zero exit codes. Specific exit codes (60=TLS verify, 22=HTTP,
-// 58/82=client cert, 100=unzip) map to their dedicated reasons; the rest
+// 58/82=client cert, 100=unzip, 101/102=token request) map to their dedicated reasons; the rest
 // fall through to ReasonPackageFetchFailed with the exit code in the
 // message.
 //
@@ -316,6 +320,12 @@ func classifyTerminatedState(t *corev1.ContainerStateTerminated) (reason, detail
 	case exitCodeUnzipFailure:
 		return v1alpha1.ReasonPackageInvalidArchive,
 			fmt.Sprintf("exited %d (unzip failed; downloaded artifact is not a valid ZIP)", t.ExitCode), true
+	case exitCodeTokenRequestFailed:
+		return v1alpha1.ReasonPackageTokenRequestFailed,
+			fmt.Sprintf("exited %d (client_credentials token request failed; see init container logs)", t.ExitCode), true
+	case exitCodeTokenResponseInvalid:
+		return v1alpha1.ReasonPackageTokenRequestFailed,
+			fmt.Sprintf("exited %d (token endpoint response has no access_token)", t.ExitCode), true
 	default:
 		return v1alpha1.ReasonPackageFetchFailed,
 			fmt.Sprintf("exited %d", t.ExitCode), true
@@ -342,7 +352,8 @@ func isRecoverableSecretFailure(c *metav1.Condition) bool {
 		v1alpha1.ReasonPackageTLSVerifyFailed,
 		v1alpha1.ReasonPackageClientCertInvalid,
 		v1alpha1.ReasonPackageFetchFailed,
-		v1alpha1.ReasonPackageInvalidArchive:
+		v1alpha1.ReasonPackageInvalidArchive,
+		v1alpha1.ReasonPackageTokenRequestFailed:
 		return true
 	}
 	return false

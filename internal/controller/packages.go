@@ -287,6 +287,17 @@ func buildPackageInitContainer(p v1alpha1.PackageSpec, idx int, image string) co
 	return c
 }
 
+// escapeEnvValue escapes a literal for use as an EnvVar.Value. The kubelet
+// expands `$(VAR)` in env values using variables declared earlier in the
+// same container, and reduces `$$` to `$`. Without escaping, a user-supplied
+// value such as the scope `$(CC_CLIENT_SECRET)` would be replaced by the
+// client secret and reach curl's argv; a URL containing `$$` would be
+// silently altered. Doubling every `$` makes the kubelet hand the script
+// the value exactly as written in the spec.
+func escapeEnvValue(v string) string {
+	return strings.ReplaceAll(v, "$", "$$")
+}
+
 // buildPackageInitEnv returns the env vars the init-container script reads.
 // PKG_URL holds the URL (passed as a value, NOT interpolated into the
 // script body — eliminates shell-command-injection via URL). PKG_HOST is
@@ -294,13 +305,14 @@ func buildPackageInitContainer(p v1alpha1.PackageSpec, idx int, image string) co
 // the netrc machine line. Auth credentials project Secret keys via
 // secretKeyRef (BEARER_TOKEN, BASIC_AUTH_USER, BASIC_AUTH_PASS) and the
 // script consumes them via stdin / netrc so they never appear on argv.
+// Every literal Value goes through escapeEnvValue.
 func buildPackageInitEnv(p v1alpha1.PackageSpec) []corev1.EnvVar {
 	envs := []corev1.EnvVar{
 		// URL is passed as an env var (NOT interpolated into the script
 		// source) so shell metacharacters in the URL cannot break out of
 		// the curl invocation. The script always references "$PKG_URL"
 		// inside double quotes, which preserves the value verbatim.
-		{Name: "PKG_URL", Value: p.Source.URL},
+		{Name: "PKG_URL", Value: escapeEnvValue(p.Source.URL)},
 	}
 	if p.Source.Auth == nil {
 		return envs
@@ -316,13 +328,16 @@ func buildPackageInitEnv(p v1alpha1.PackageSpec) []corev1.EnvVar {
 			},
 		})
 	}
+	if cc := p.Source.Auth.ClientCredentials; cc != nil {
+		envs = append(envs, buildClientCredentialsEnv(cc)...)
+	}
 	if ba := p.Source.Auth.BasicAuth; ba != nil {
 		// PKG_HOST is the netrc "machine" field. Computed in Go via
 		// url.Parse so we don't have to extract host with shell sed at
 		// runtime — that older approach broke on URLs containing the sed
 		// delimiter ('#') and would have also been an injection sink.
 		envs = append(envs,
-			corev1.EnvVar{Name: "PKG_HOST", Value: packageURLHost(p.Source.URL)},
+			corev1.EnvVar{Name: "PKG_HOST", Value: escapeEnvValue(packageURLHost(p.Source.URL))},
 			corev1.EnvVar{
 				Name: "BASIC_AUTH_USER",
 				ValueFrom: &corev1.EnvVarSource{
@@ -342,6 +357,33 @@ func buildPackageInitEnv(p v1alpha1.PackageSpec) []corev1.EnvVar {
 				},
 			},
 		)
+	}
+	return envs
+}
+
+// buildClientCredentialsEnv returns the env vars the client_credentials
+// token request reads. Like PKG_URL, the token endpoint, client ID and
+// scope are passed as env values (never interpolated into the script body)
+// so shell metacharacters cannot break out of the curl invocation. The
+// client secret is projected from its Secret via secretKeyRef. CC_SCOPE is
+// only set when scopes are configured; the script omits the scope
+// parameter otherwise.
+func buildClientCredentialsEnv(cc *v1alpha1.PackageClientCredentialsSpec) []corev1.EnvVar {
+	envs := []corev1.EnvVar{
+		{Name: "CC_TOKEN_ENDPOINT", Value: escapeEnvValue(cc.TokenEndpoint)},
+		{Name: "CC_CLIENT_ID", Value: escapeEnvValue(cc.ClientID)},
+		{
+			Name: "CC_CLIENT_SECRET",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: cc.ClientSecret.SecretRef.Name},
+					Key:                  cc.ClientSecret.SecretRef.Key,
+				},
+			},
+		},
+	}
+	if len(cc.Scopes) > 0 {
+		envs = append(envs, corev1.EnvVar{Name: "CC_SCOPE", Value: escapeEnvValue(strings.Join(cc.Scopes, " "))})
 	}
 	return envs
 }
@@ -391,17 +433,28 @@ func buildPackageInitVolumeMounts(p v1alpha1.PackageSpec, idx int) []corev1.Volu
 //   - applies TLS flags only when tls.enabled is true
 //   - feeds bearer tokens via stdin (--header @-) and basic-auth via netrc
 //     so credentials never appear in process argv or curl's output
+//   - for clientCredentials, first fetches an access token from the token
+//     endpoint (see writeClientCredentialsTokenRequest) and then downloads
+//     with it exactly like a bearer token
 //   - unpacks into /pkg
 //   - exits non-zero on any failure so the pod stays in Init:Error
 func buildPackageDownloadScript(p v1alpha1.PackageSpec, idx int) string {
 	var sb strings.Builder
+	auth := p.Source.Auth
+	clientCredentials := auth != nil && auth.ClientCredentials != nil
+
 	sb.WriteString("set -e\n")
 	// >/dev/null silences apk's verbose progress lines, but stderr is
 	// deliberately NOT redirected — if Alpine repos are unreachable
 	// (NetworkPolicy, air-gap, DNS hiccup), the failure reason surfaces
 	// in `kubectl logs <pod> -c package-fetch-N` instead of a silent
-	// Init:Error with no breadcrumb.
-	sb.WriteString("apk add --no-cache curl unzip ca-certificates >/dev/null\n")
+	// Init:Error with no breadcrumb. jq is only installed when the
+	// client_credentials flow needs to parse a token response.
+	if clientCredentials {
+		sb.WriteString("apk add --no-cache curl unzip ca-certificates jq >/dev/null\n")
+	} else {
+		sb.WriteString("apk add --no-cache curl unzip ca-certificates >/dev/null\n")
+	}
 	sb.WriteString("mkdir -p /pkg\n")
 
 	curlArgs := `-fsSL --max-time 120 --max-filesize 268435456 -o /tmp/pkg.zip`
@@ -433,9 +486,13 @@ func buildPackageDownloadScript(p v1alpha1.PackageSpec, idx int) string {
 	// containing shell metacharacters (e.g. `"; rm -rf /; #`). The CRD
 	// Pattern only enforces ^https?:// and MaxLength=2048 — it does not
 	// forbid quotes / backticks / dollar signs. Defense lives in code.
-	auth := p.Source.Auth
+	if clientCredentials {
+		// Sets the shell variable BEARER_TOKEN (not an env var from a
+		// Secret, unlike auth.bearerToken) for the bearer download below.
+		writeClientCredentialsTokenRequest(&sb, auth.ClientCredentials, tlsFlags, idx)
+	}
 	switch {
-	case auth != nil && auth.BearerToken != nil:
+	case auth != nil && (auth.BearerToken != nil || auth.ClientCredentials != nil):
 		// Bearer token via stdin (--header @-) so it never hits cmdline.
 		// Format string is the constant "%s\n" so Secret bytes never
 		// reach printf's format parser.
@@ -473,6 +530,54 @@ func buildPackageDownloadScript(p v1alpha1.PackageSpec, idx int) string {
 	sb.WriteString("unzip -q /tmp/pkg.zip -d /pkg || exit 100\n")
 	fmt.Fprintf(&sb, "echo \"package-fetch-%d: extracted to /pkg\"\n", idx)
 	return sb.String()
+}
+
+// writeClientCredentialsTokenRequest emits the script section that obtains
+// an access token with the OAuth 2.0 client_credentials grant and stores it
+// in the shell variable BEARER_TOKEN.
+//
+//   - Client authentication is client_secret_basic (RFC 6749 §2.3.1, the
+//     method every authorization server must support). The client ID and
+//     secret are form-urlencoded with jq's @uri before base64, as the RFC
+//     requires; jq reads them from the environment (env.CC_*) so they never
+//     appear on any argv. The resulting header goes to curl via stdin.
+//   - The package's TLS flags apply to the token request too, so a private
+//     CA or mTLS client cert covers both hops.
+//   - Failures exit 101 (transport error or non-2xx from the token
+//     endpoint) or 102 (2xx without an access_token). Both map to
+//     ReasonPackageTokenRequestFailed; curl's own exit codes are reported
+//     on stderr instead of as the container exit code, so a token-endpoint
+//     failure is never mistaken for a package-download failure.
+//   - Only the OAuth `error` / `error_description` fields of an error
+//     response are logged — never the raw body, which on success holds the
+//     token.
+func writeClientCredentialsTokenRequest(sb *strings.Builder, cc *v1alpha1.PackageClientCredentialsSpec, tlsFlags string, idx int) {
+	name := packageInitContainerName(idx)
+	sb.WriteString("touch /tmp/token.json && chmod 600 /tmp/token.json\n")
+	sb.WriteString(`CC_BASIC=$(jq -jn '"\(env.CC_CLIENT_ID|@uri):\(env.CC_CLIENT_SECRET|@uri)"' | base64 | tr -d '\n')` + "\n")
+	sb.WriteString("rc=0\n")
+	sb.WriteString("CC_STATUS=$(printf 'Authorization: Basic %s\\n' \"$CC_BASIC\" | curl")
+	sb.WriteString(tlsFlags)
+	sb.WriteString(" --header @- -sS --max-time 30 --max-filesize 1048576 -o /tmp/token.json -w '%{http_code}'")
+	sb.WriteString(" --data-urlencode 'grant_type=client_credentials'")
+	if len(cc.Scopes) > 0 {
+		sb.WriteString(` --data-urlencode "scope=$CC_SCOPE"`)
+	}
+	sb.WriteString(" \"$CC_TOKEN_ENDPOINT\") || rc=$?\n")
+	sb.WriteString("unset CC_BASIC\n")
+	fmt.Fprintf(sb, "if [ \"$rc\" -ne 0 ]; then echo \"%s: token request failed (curl exit $rc)\" >&2; exit %d; fi\n",
+		name, exitCodeTokenRequestFailed)
+	sb.WriteString("case \"$CC_STATUS\" in\n")
+	sb.WriteString("  2??) ;;\n")
+	sb.WriteString("  *)\n")
+	sb.WriteString(`    CC_ERR=$(jq -r '[.error, .error_description] | map(select(. != null)) | join(": ")' /tmp/token.json 2>/dev/null) || CC_ERR=""` + "\n")
+	fmt.Fprintf(sb, "    echo \"%s: token endpoint returned HTTP $CC_STATUS ${CC_ERR}\" >&2\n", name)
+	fmt.Fprintf(sb, "    exit %d;;\n", exitCodeTokenRequestFailed)
+	sb.WriteString("esac\n")
+	sb.WriteString(`BEARER_TOKEN=$(jq -r '.access_token // empty' /tmp/token.json 2>/dev/null) || BEARER_TOKEN=""` + "\n")
+	sb.WriteString("rm -f /tmp/token.json\n")
+	fmt.Fprintf(sb, "if [ -z \"$BEARER_TOKEN\" ]; then echo \"%s: token response has no access_token\" >&2; exit %d; fi\n",
+		name, exitCodeTokenResponseInvalid)
 }
 
 // computePackagesHash returns a hex-encoded full SHA-256 of the PackageSpec
@@ -615,7 +720,7 @@ func checkPackageRefs(ctx context.Context, r client.Reader, namespace string, p 
 // packageSecretKeyRef bundles a Secret name with the keys the package
 // requires inside it. Order is significant — the slice returned by
 // packageSecretKeyRefs preserves the historical pre-check order
-// (TLS-CA, TLS-clientCert, bearerToken, basicAuth) so the first-failure
+// (TLS-CA, TLS-clientCert, bearerToken, basicAuth, clientCredentials) so the first-failure
 // message stays stable across the refactor.
 type packageSecretKeyRef struct {
 	name string
@@ -653,6 +758,10 @@ func packageSecretKeyRefs(p v1alpha1.PackageSpec) []packageSecretKeyRef {
 				name: r.Name,
 				keys: []string{r.UsernameKey, r.PasswordKey},
 			})
+		}
+		if p.Source.Auth.ClientCredentials != nil {
+			r := p.Source.Auth.ClientCredentials.ClientSecret.SecretRef
+			refs = append(refs, packageSecretKeyRef{name: r.Name, keys: []string{r.Key}})
 		}
 	}
 	return refs

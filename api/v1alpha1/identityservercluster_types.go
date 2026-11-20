@@ -9,13 +9,19 @@ import (
 // It holds cluster-wide shared configuration that IdentityServerNode resources inherit.
 // +kubebuilder:object:generate=true
 type IdentityServerClusterSpec struct {
-	// Version of the Curity Identity Server to deploy.
-	// +kubebuilder:validation:Required
+	// Version of the Curity Identity Server to deploy. Used as the tag of the
+	// default image (curity.azurecr.io/curity/idsvr:<version>, or
+	// curityfips.azurecr.io/curity/idsvr:<version> with fipsMode). Optional when
+	// image is set; at least one of version or image is required. When both are
+	// set, image decides what runs and version is informational only (it feeds
+	// the app.kubernetes.io/version label and status.version).
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
-	Version string `json:"version"`
+	Version string `json:"version,omitempty"`
 
 	// Image overrides the default container image (e.g., for private mirrors).
+	// When set, version is not required; if version is omitted, the image tag
+	// is reported as the version.
 	// +kubebuilder:validation:MaxLength=512
 	Image string `json:"image,omitempty"`
 
@@ -23,9 +29,11 @@ type IdentityServerClusterSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	ImagePullSecret string `json:"imagePullSecret,omitempty"`
 
-	// FIPSMode enables/disables FIPS mode (--fips-mode) on all admin and runtime
-	// nodes of this cluster. Defaults to false. Requires a special license and a
-	// FIPS-enabled Docker image — contact sales@curity.io for more details.
+	// FIPSMode runs the cluster on the FIPS-enabled Curity image. When image is
+	// not set, the default repository becomes
+	// curityfips.azurecr.io/curity/idsvr:<version>; when image is set, it must
+	// already point at a FIPS-enabled image. Defaults to false. Requires a
+	// special license — contact sales@curity.io for more details.
 	// +kubebuilder:default=false
 	FIPSMode bool `json:"fipsMode,omitempty"`
 
@@ -128,7 +136,8 @@ type IdentityServerClusterStatus struct {
 	// ReadyNodes is the number of nodes with Ready=True condition.
 	ReadyNodes int32 `json:"readyNodes,omitempty"`
 
-	// Version is the currently observed Curity version from the spec.
+	// Version is the Curity version in effect: spec.version when set, otherwise
+	// the tag of spec.image (empty if the image has no tag, e.g. digest only).
 	Version string `json:"version,omitempty"`
 
 	// ClusterConfigSecretName is the name of the Secret containing cluster.xml.
@@ -152,12 +161,13 @@ type IdentityServerClusterStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=isc
-// +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.version"
+// +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.version"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status"
 // +kubebuilder:printcolumn:name="Nodes",type="integer",JSONPath=".status.nodeCount"
 // +kubebuilder:printcolumn:name="Ready Nodes",type="integer",JSONPath=".status.readyNodes"
 // +kubebuilder:printcolumn:name="Issues",type="integer",JSONPath=".status.managedResourceIssueCount"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:validation:XValidation:rule="has(self.spec) && (has(self.spec.version) || (has(self.spec.image) && self.spec.image != ''))",message="spec.version or spec.image must be set"
 // +kubebuilder:validation:XValidation:rule="!self.metadata.name.contains('.')",message="cluster name must not contain '.'; the operator derives DNS-1035 Service names from it, and dots are not valid in DNS-1035 labels"
 
 // IdentityServerCluster is the Schema for the identityserverclusters API.

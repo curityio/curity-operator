@@ -16,6 +16,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
@@ -23,7 +24,8 @@ import (
 )
 
 const (
-	defaultImage = "curity.azurecr.io/curity/idsvr"
+	defaultImage     = "curity.azurecr.io/curity/idsvr"
+	defaultFIPSImage = "curityfips.azurecr.io/curity/idsvr"
 
 	portConfig             = 6789
 	portDistributedService = 6790
@@ -36,6 +38,11 @@ const (
 	portNameMetrics = "metrics"
 
 	containerName = "curity"
+
+	// labelVersion is operator-owned even when buildLabels omits it (no
+	// valid resolved version): a user podLabels value is dropped, not passed
+	// through, so the key never reports a version the operator didn't set.
+	labelVersion = "app.kubernetes.io/version"
 
 	defaultProbeInitialDelay = int32(30)
 	defaultProbePeriod       = int32(10)
@@ -91,6 +98,9 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 	podAnnotations := mergeMaps(cluster.Spec.PodAnnotations, node.Spec.PodAnnotations)
 	// Operator labels overlay last: collisions on operator-owned keys lose.
 	podLabels := mergeMaps(mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels), labels)
+	if _, ok := labels[labelVersion]; !ok {
+		delete(podLabels, labelVersion)
+	}
 
 	replicas := resolveReplicas(cluster, node)
 	resources := resolveResources(cluster, node)
@@ -100,7 +110,7 @@ func buildDeployment(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.Ide
 		Name:            containerName,
 		Image:           buildImage(cluster),
 		ImagePullPolicy: resolveImagePullPolicy(cluster, node),
-		Args:            buildContainerArgs(cluster, node),
+		Args:            buildContainerArgs(node),
 		Ports:           buildContainerPorts(node),
 		Env:             buildEnvVars(cluster, node),
 		EnvFrom:         buildEnvFrom(configs),
@@ -292,37 +302,60 @@ func resolveServiceMonitorSpec(cluster *v1alpha1.IdentityServerCluster) *v1alpha
 	return sm
 }
 
-// buildImage returns the container image string.
+// buildImage returns the container image string: spec.image when set,
+// otherwise the default repository tagged with spec.version. With fipsMode
+// enabled the default repository is the FIPS one; an explicit spec.image always
+// wins, so a mirrored FIPS image is used as-is.
 func buildImage(cluster *v1alpha1.IdentityServerCluster) string {
 	if cluster.Spec.Image != "" {
 		return cluster.Spec.Image
 	}
-	return fmt.Sprintf("%s:%s", defaultImage, cluster.Spec.Version)
+	repo := defaultImage
+	if cluster.Spec.FIPSMode {
+		repo = defaultFIPSImage
+	}
+	return fmt.Sprintf("%s:%s", repo, cluster.Spec.Version)
+}
+
+// resolvedVersion returns the Curity version in effect for the cluster:
+// spec.version when set, otherwise the tag of spec.image. Returns "" when
+// neither yields one (e.g. a digest-only image reference).
+func resolvedVersion(cluster *v1alpha1.IdentityServerCluster) string {
+	if cluster.Spec.Version != "" {
+		return cluster.Spec.Version
+	}
+	return imageTag(cluster.Spec.Image)
+}
+
+// imageTag extracts the tag from an image reference, ignoring any digest and
+// any registry port ("registry:5000/idsvr" has no tag). Returns "" if absent.
+func imageTag(image string) string {
+	if i := strings.Index(image, "@"); i >= 0 {
+		image = image[:i]
+	}
+	i := strings.LastIndex(image, ":")
+	if i < 0 || strings.Contains(image[i+1:], "/") {
+		return ""
+	}
+	return image[i+1:]
 }
 
 // buildContainerArgs returns the command arguments for the Curity container.
-// When the cluster enables FIPS mode, --fips-mode is appended for both admin
-// and runtime nodes.
-func buildContainerArgs(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []string {
-	var args []string
+// FIPS mode needs no argument: the FIPS image enables it (see buildImage).
+func buildContainerArgs(node *v1alpha1.IdentityServerNode) []string {
 	if node.Spec.Type == v1alpha1.NodeTypeAdmin {
-		args = []string{
+		return []string{
 			"/opt/idsvr/bin/idsvr",
 			"-s", node.Spec.Role,
 			"-N", node.Name,
 			"--admin",
 		}
-	} else {
-		args = []string{
-			"/opt/idsvr/bin/idsvr",
-			"-s", node.Spec.Role,
-			"--no-admin",
-		}
 	}
-	if cluster.Spec.FIPSMode {
-		args = append(args, "--fips-mode")
+	return []string{
+		"/opt/idsvr/bin/idsvr",
+		"-s", node.Spec.Role,
+		"--no-admin",
 	}
-	return args
 }
 
 // resolveHTTPPort returns the runtime http Service port: service.port when set,
@@ -646,29 +679,37 @@ func volumeDefaultMode(configType string, isSecret bool) *int32 {
 // buildLabels returns the standard Kubernetes labels for the resource.
 // `curity.io/owned-by` is the operator's private selector key (see
 // buildSelectorLabels); the `app.kubernetes.io/*` keys are informational.
+//
+// `app.kubernetes.io/version` is set only when the resolved version is a
+// valid label value (≤63 chars, alphanumeric at both ends); otherwise it is
+// omitted rather than producing objects the apiserver rejects.
 func buildLabels(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		"app.kubernetes.io/name":       "curity-identity-server",
 		"app.kubernetes.io/instance":   OwnedResourceName(cluster.Name, node.Name),
 		"app.kubernetes.io/managed-by": "curity-operator",
 		"app.kubernetes.io/component":  string(node.Spec.Type),
-		"app.kubernetes.io/version":    cluster.Spec.Version,
 		"curity.io/cluster":            cluster.Name,
 		"curity.io/role":               node.Spec.Role,
 		"curity.io/owned-by":           OwnedResourceName(cluster.Name, node.Name),
 	}
+	if v := resolvedVersion(cluster); v != "" && len(validation.IsValidLabelValue(v)) == 0 {
+		labels[labelVersion] = v
+	}
+	return labels
 }
 
 // userPodLabelsOverridden returns the sorted user-podLabels keys that the
 // operator-overlay-last merge will silently drop. Drives the
-// PodLabelsIgnored event; also covers the +2 app.kubernetes.io/{name,
-// instance} keys the CRD CEL doesn't block.
+// PodLabelsIgnored event; also covers the app.kubernetes.io/{name,
+// instance,version} keys the CRD CEL doesn't block. labelVersion counts even
+// when buildLabels omits it, since buildDeployment drops it either way.
 func userPodLabelsOverridden(cluster *v1alpha1.IdentityServerCluster, node *v1alpha1.IdentityServerNode) []string {
 	operatorKeys := buildLabels(cluster, node)
 	userKeys := mergeMaps(cluster.Spec.PodLabels, node.Spec.PodLabels)
 	var overridden []string
 	for k := range userKeys {
-		if _, isOperator := operatorKeys[k]; isOperator {
+		if _, isOperator := operatorKeys[k]; isOperator || k == labelVersion {
 			overridden = append(overridden, k)
 		}
 	}

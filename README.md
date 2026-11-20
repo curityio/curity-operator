@@ -377,10 +377,10 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 
 | Field | Type | Description |
 |---|---|---|
-| `version` | string, required | Curity Identity Server version |
-| `image` | string | Override container image (for private mirrors) |
+| `version` | string, required unless `image` is set | Curity Identity Server version; used as the tag of the default image `curity.azurecr.io/curity/idsvr:<version>` (`curityfips.azurecr.io/curity/idsvr:<version>` when `fipsMode` is on) |
+| `image` | string | Full container image reference, overriding the default (for private mirrors). When set, `version` may be omitted and the image tag is reported as the version |
 | `imagePullSecret` | string | Secret name for pulling images |
-| `fipsMode` | bool | Enable FIPS mode (`--fips-mode`). Requires a special licence and a FIPS-enabled image; contact sales@curity.io. Defaults to `false` |
+| `fipsMode` | bool | Run the FIPS-enabled Identity Server. When `image` is unset, the default image becomes `curityfips.azurecr.io/curity/idsvr:<version>`; when `image` is set, it must already be a FIPS-enabled image. Requires a special licence; contact sales@curity.io. Defaults to `false` |
 | `adminCredentials` | object | Secret ref with `ADMIN_PASSWORD`, `CONFIG_ENCRYPTION_KEY`; auto-generated if omitted |
 | `logging` | object | Log level, log streams to tail, sidecar config |
 | `resources` | object | Default CPU/memory requests/limits |
@@ -450,13 +450,23 @@ kubectl -n demo get secret my-cluster-admin-creds -o jsonpath='{.data.ADMIN_PASS
 
 Manages the Identity Server database schema. Creating one triggers a **run-once Job** that executes
 `/opt/idsvr/bin/idsvr -I` using the **same container image as the referenced
-`IdentityServerCluster`**. The Job is re-run whenever the resolved cluster image (a `version` bump
-or `image` override) **or** this resource's own spec changes — handy for re-pointing at a new
-database.
+`IdentityServerCluster`**. The Job is re-run whenever the resolved cluster image **or** this
+resource's own spec changes — handy for re-pointing at a new database. It is not re-run on every
+reconcile; a completed Job stays completed until one of those changes.
+
+What counts as an image change depends on how the cluster picks its image:
+
+- **Default image** (`image` unset): changing `version` changes the image tag
+  (`curity.azurecr.io/curity/idsvr:<version>`), so a `version` bump re-runs the Job. Toggling
+  `fipsMode` switches the repository to `curityfips.azurecr.io/curity/idsvr`, so it re-runs the
+  Job too.
+- **Custom image** (`image` set): only a change to the `image` string re-runs the Job. `version`
+  is informational in this mode, so changing it alone does not. Re-pushing a moving tag (e.g.
+  `:latest`) without changing the string isn't detected either; pin a specific tag or digest.
 
 | Field | Type | Description |
 |---|---|---|
-| `identityServerClusterRef` | object, required | `{name: "<cluster>"}` reference (same namespace). Supplies the image; a change to its `version`/`image` re-triggers the Job |
+| `identityServerClusterRef` | object, required | `{name: "<cluster>"}` reference (same namespace). Supplies the image; a change to the resolved image re-triggers the Job (see above) |
 | `connection` | object, required | JDBC settings projected onto `JDBC_URL`, `JDBC_USERNAME`, `JDBC_PASSWORD`. See below |
 | `jobTemplate` | object | Standard Kubernetes Job/Pod settings for the schema-management Job (all optional). See below |
 
@@ -844,6 +854,51 @@ spec:
       mountPath: /etc/plugins/oauth-extras
 ```
 
+### Private package with OAuth client credentials
+
+The init container first requests an access token from `tokenEndpoint` with the OAuth 2.0
+`client_credentials` grant, then downloads the package with `Authorization: Bearer <token>`. A new
+token is fetched every time a pod starts, so there is no token to rotate.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pkg-client
+type: Opaque
+stringData:
+  client-secret: "..."
+---
+apiVersion: curity.io/v1alpha1
+kind: IdentityServerCluster
+metadata:
+  name: prod
+spec:
+  version: "11.0"
+  packages:
+    - source:
+        url: https://artifacts.example.com/plugin.zip
+        auth:
+          clientCredentials:
+            tokenEndpoint: https://login.example.com/oauth/v2/oauth-token
+            clientId: package-reader
+            clientSecret:
+              secretRef:
+                name: pkg-client
+                key: client-secret
+            scopes:            # optional; omit to get the client's default scopes
+              - packages:read
+      mountPath: /etc/plugins/oauth-extras
+```
+
+- The client authenticates to the token endpoint with HTTP Basic (`client_secret_basic`).
+- `clientId` is given inline; only the client secret is read from a Secret.
+- The package's `tls` block (CA, client cert, `skipVerify`) applies to the token request as well as
+  to the download.
+- Failures to obtain a token surface as `PackagesReady=False` with reason
+  `PackageTokenRequestFailed`; the init container log carries the HTTP status and the OAuth `error`
+  / `error_description` returned by the token endpoint.
+
 ### Private endpoint with custom CA + mTLS
 
 ```yaml
@@ -874,7 +929,8 @@ spec:
   otherwise silently drop both).
 - **`tls.enabled` defaults to `false`**; the rest of the TLS block is ignored unless `enabled` is
   `true`.
-- **At most one of `auth.basicAuth` / `auth.bearerToken`** per package (rejected at admission).
+- **Exactly one of `auth.basicAuth` / `auth.bearerToken` / `auth.clientCredentials`** per package
+  when `auth` is set (rejected at admission).
 - **At most 20 packages** per cluster.
 - **The init container image is `alpine:3.19`** (the Curity image lacks `curl`/`unzip`). For
   air-gapped clusters that mirror to a private registry, override at operator install time via the
@@ -887,7 +943,8 @@ spec:
 - **Each package volume is capped at 256MiB** (emptyDir `sizeLimit`) to bound zip-bomb /
   disk-full impact.
 - **Credentials never appear on `curl` argv** — bearer tokens are piped via stdin, basic auth uses
-  a netrc file with mode 0600.
+  a netrc file with mode 0600, and client credentials are sent to the token endpoint as a Basic
+  header via stdin, with the resulting access token piped the same way as a bearer token.
 
 ### How the operator reacts to changes
 
@@ -895,8 +952,15 @@ spec:
   pod-template annotation changes → rolling restart on the next reconcile.
 - **Secret edit while the cluster is healthy** (`PackagesReady=True`): no automatic action. The
   packages hash covers refs, not Secret contents, so running pods keep their cached env value. This
-  is intentional — a routine token rotation should not churn pods. Use
-  `kubectl rollout restart deployment/<name>` if you need the new value picked up immediately.
+  is intentional — a routine token rotation should not churn pods. To pick up the new value
+  immediately, change a pod annotation on the cluster, which rolls every node's pods:
+  ```bash
+  kubectl patch isc <cluster> --type merge -p \
+    '{"spec":{"podAnnotations":{"kubectl.kubernetes.io/restartedAt":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}}}'
+  ```
+  Do not use `kubectl rollout restart deployment/<name>`: the operator owns the Deployment spec
+  and reverts the restart annotation on its next reconcile, rolling back to the old pods. If the
+  cluster is managed with GitOps, make the annotation change in Git instead.
 - **Secret edit while the cluster is failing** (`PackagesReady=False` with a recoverable reason):
   the operator deletes the failing pod automatically. The fresh pod reads the corrected Secret and
   the cluster recovers in seconds, no manual restart needed.
@@ -989,6 +1053,7 @@ code or kubelet error string. The `Reason` tells you which class of failure occu
 | `PackageClientCertInvalid` | curl exits 58/82 — the configured `tls.clientCert` Secret data could not be used. |
 | `PackageHTTPError` | curl exit 22 — the URL returned 4xx/5xx. |
 | `PackageInvalidArchive` | Download succeeded but `unzip` rejected the file (server returned HTML, partial download, corrupt archive). |
+| `PackageTokenRequestFailed` | Exit 101/102 — the `auth.clientCredentials` token request failed (unreachable endpoint, TLS error, non-2xx such as `invalid_client`), or the response had no `access_token`. The init container log has the detail. |
 | `PackageFetchFailed` | Open-set catch-all (DNS, TCP, timeout, size limit, OOMKilled, future kubelet messages). The Message includes the exit code or verbatim kubelet text. |
 | Ready overlay `PackagesNotReady` | Set on the `Ready` condition (delegating to `PackagesReady` for the detail) so `kubectl get` shows the failure at a glance. |
 
@@ -1026,6 +1091,8 @@ are:
 | 77 | CA cert file could not be read |
 | 82 | Could not initialize SSL engine (`PackageClientCertInvalid`) |
 | 100 | Operator-emitted — `unzip` failed (`PackageInvalidArchive`); the artifact downloaded but is not a valid ZIP |
+| 101 | Operator-emitted — the client-credentials token request failed (`PackageTokenRequestFailed`); the log shows the curl exit code or the HTTP status and OAuth error |
+| 102 | Operator-emitted — the token endpoint answered 2xx without an `access_token` (`PackageTokenRequestFailed`) |
 | 137 | OOMKilled — increase the init container's memory request |
 
 </details>
@@ -1039,8 +1106,10 @@ OOM eviction, or any future rolling restart.
 
 **Secret data rotation.** Editing a Secret's data in place (same name, same key, new bytes — e.g.
 rotating a token) does **not** trigger a rolling restart. The packages hash covers Secret
-*references*, not bytes. To force a fetch with new credentials, edit `spec.packages` (e.g. bump
-`mountPath`) or `kubectl delete pod`.
+*references*, not bytes. To force a fetch with new credentials, change `spec.podAnnotations` on the
+cluster (see [How the operator reacts to changes](#how-the-operator-reacts-to-changes)) for a rolling
+restart, or `kubectl delete pod` to replace specific pods. `kubectl rollout restart` does not work —
+the operator reverts it.
 
 **Other useful commands**
 

@@ -59,6 +59,52 @@ type IdentityServerNodeReconciler struct {
 	// hpaUnsatisfiableSeen gates Gate B emission to per-condition transitions.
 	// Zero value is valid (lazy init).
 	hpaUnsatisfiableSeen hpaUnsatisfiableCache
+
+	// podLabelsIgnoredSeen dedups PodLabelsIgnored per ignored-key set.
+	// Zero value is valid (lazy init).
+	podLabelsIgnoredSeen podLabelsIgnoredCache
+}
+
+// podLabelsIgnoredCache records, per node UID, the node generation and the
+// ignored podLabels key set last warned about. Kept in memory, not compared
+// against status.observedGeneration, so a reconcile reading a stale cached
+// node can't warn twice. A restart warns once more per affected node.
+type podLabelsIgnoredCache struct {
+	mu      sync.Mutex
+	entries map[types.UID]podLabelsIgnoredEntry
+}
+
+type podLabelsIgnoredEntry struct {
+	generation int64
+	keys       string
+}
+
+// shouldWarn reports whether (generation, keys) differs from what was last
+// warned about for uid, and records it. Warns once per node spec edit and
+// once per change to the ignored set (a cluster podLabels edit doesn't
+// advance the node's generation). An empty set drops the entry.
+func (c *podLabelsIgnoredCache) shouldWarn(uid types.UID, generation int64, keys string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if keys == "" {
+		delete(c.entries, uid)
+		return false
+	}
+	if c.entries == nil {
+		c.entries = make(map[types.UID]podLabelsIgnoredEntry)
+	}
+	entry := podLabelsIgnoredEntry{generation: generation, keys: keys}
+	if c.entries[uid] == entry {
+		return false
+	}
+	c.entries[uid] = entry
+	return true
+}
+
+func (c *podLabelsIgnoredCache) forget(uid types.UID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, uid)
 }
 
 // Node UID (not name) so a delete+recreate of the same name does not
@@ -142,6 +188,7 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// 2. Handle finalizer
 	if node.DeletionTimestamp != nil {
+		r.podLabelsIgnoredSeen.forget(node.UID)
 		if controllerutil.ContainsFinalizer(&node, v1alpha1.NodeFinalizer) {
 			log.Info("deleting IdentityServerNode", "name", node.Name)
 			r.Recorder.Event(&node, corev1.EventTypeNormal, "Deleting", "Node is being deleted")
@@ -492,10 +539,10 @@ func (r *IdentityServerNodeReconciler) Reconcile(ctx context.Context, req ctrl.R
 			fetcherImage = DefaultPackageFetcherImage
 		}
 
-		// Warn once per spec edit when user podLabels collide with
-		// operator-owned keys; runtime drops the user values silently.
-		if overridden := userPodLabelsOverridden(&cluster, &node); len(overridden) > 0 &&
-			node.Status.ObservedGeneration < node.Generation {
+		// Warn when user podLabels collide with operator-owned keys; runtime
+		// drops the user values silently. See podLabelsIgnoredCache for when.
+		overridden := userPodLabelsOverridden(&cluster, &node)
+		if r.podLabelsIgnoredSeen.shouldWarn(node.UID, node.Generation, strings.Join(overridden, ",")) {
 			log.Info("ignoring operator-owned keys in user podLabels",
 				"node", node.Name, "keys", overridden)
 			r.Recorder.Eventf(&node, corev1.EventTypeWarning, "PodLabelsIgnored",

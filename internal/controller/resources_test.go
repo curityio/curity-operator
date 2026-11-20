@@ -71,27 +71,47 @@ func TestBuildDeployment_RuntimeArgs(t *testing.T) {
 	assertNotContains(t, args, "-N")
 }
 
-func TestBuildDeployment_FIPSModeDefaultOff(t *testing.T) {
-	cluster := newTestCluster()
-	for _, nodeType := range []v1alpha1.NodeType{v1alpha1.NodeTypeAdmin, v1alpha1.NodeTypeRuntime} {
-		node := newTestNode(nodeType)
-		deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
-		args := deploy.Spec.Template.Spec.Containers[0].Args
-		assertNotContains(t, args, "--fips-mode")
+func TestBuildImage(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		image   string
+		fips    bool
+		want    string
+	}{
+		{"default repository", "11.1.0", "", false, "curity.azurecr.io/curity/idsvr:11.1.0"},
+		{"fips repository", "11.1.0", "", true, "curityfips.azurecr.io/curity/idsvr:11.1.0"},
+		{"explicit image wins", "11.1.0", "mirror.example.com/idsvr:11.1.0", false, "mirror.example.com/idsvr:11.1.0"},
+		{"explicit image wins over fips", "11.1.0", "mirror.example.com/idsvr-fips:11.1.0", true, "mirror.example.com/idsvr-fips:11.1.0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cluster := newTestCluster()
+			cluster.Spec.Version = tt.version
+			cluster.Spec.Image = tt.image
+			cluster.Spec.FIPSMode = tt.fips
+			if got := buildImage(cluster); got != tt.want {
+				t.Errorf("buildImage() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestBuildDeployment_FIPSModeAppendsFlag(t *testing.T) {
+// FIPS mode is selected by the image alone; the server no longer takes a
+// --fips-mode argument.
+func TestBuildDeployment_FIPSModeUsesFIPSImageWithoutFlag(t *testing.T) {
 	cluster := newTestCluster()
 	cluster.Spec.FIPSMode = true
 
 	for _, nodeType := range []v1alpha1.NodeType{v1alpha1.NodeTypeAdmin, v1alpha1.NodeTypeRuntime} {
 		node := newTestNode(nodeType)
 		deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
-		args := deploy.Spec.Template.Spec.Containers[0].Args
-		assertContains(t, args, "--fips-mode")
-		// The base idsvr invocation is preserved.
-		assertContains(t, args, "/opt/idsvr/bin/idsvr")
+		c := deploy.Spec.Template.Spec.Containers[0]
+		if !strings.HasPrefix(c.Image, defaultFIPSImage+":") {
+			t.Errorf("%s: image = %q, want prefix %q", nodeType, c.Image, defaultFIPSImage+":")
+		}
+		assertNotContains(t, c.Args, "--fips-mode")
+		assertContains(t, c.Args, "/opt/idsvr/bin/idsvr")
 	}
 }
 
@@ -174,6 +194,64 @@ func TestBuildDeployment_ImageOverride(t *testing.T) {
 
 	if image != "my-registry/curity:custom" {
 		t.Errorf("expected custom image, got %q", image)
+	}
+}
+
+func TestBuildDeployment_ImageOverrideWithoutVersion(t *testing.T) {
+	cluster := newTestCluster()
+	cluster.Spec.Version = ""
+	cluster.Spec.Image = "my-registry:5000/curity/idsvr:11.1.0"
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+
+	deploy := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage)
+	if got := deploy.Spec.Template.Spec.Containers[0].Image; got != cluster.Spec.Image {
+		t.Errorf("expected image %q, got %q", cluster.Spec.Image, got)
+	}
+	if got := deploy.Spec.Template.Labels["app.kubernetes.io/version"]; got != "11.1.0" {
+		t.Errorf("app.kubernetes.io/version = %q; want image tag %q", got, "11.1.0")
+	}
+}
+
+func TestResolvedVersion(t *testing.T) {
+	tests := []struct {
+		name, version, image, want string
+	}{
+		{"version only", "11.0", "", "11.0"},
+		{"version wins over image tag", "11.0", "reg/idsvr:custom", "11.0"},
+		{"image tag", "", "reg/idsvr:11.1.0", "11.1.0"},
+		{"registry port, tag", "", "reg:5000/curity/idsvr:11.1.0", "11.1.0"},
+		{"registry port, no tag", "", "reg:5000/curity/idsvr", ""},
+		{"no tag", "", "reg/idsvr", ""},
+		{"tag and digest", "", "reg/idsvr:11.1.0@sha256:abc", "11.1.0"},
+		{"digest only", "", "reg/idsvr@sha256:abc", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cluster := newTestCluster()
+			cluster.Spec.Version, cluster.Spec.Image = tt.version, tt.image
+			if got := resolvedVersion(cluster); got != tt.want {
+				t.Errorf("resolvedVersion() = %q; want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A version that is not a valid label value must not end up in the label,
+// or every object carrying buildLabels would be rejected by the apiserver.
+func TestBuildLabels_VersionLabelOmittedWhenInvalid(t *testing.T) {
+	node := newTestNode(v1alpha1.NodeTypeRuntime)
+	for _, v := range []string{strings.Repeat("1", 64), "11.0+build", "11.0-"} {
+		cluster := newTestCluster()
+		cluster.Spec.Version = v
+		if got, ok := buildLabels(cluster, node)["app.kubernetes.io/version"]; ok {
+			t.Errorf("version %q: label should be omitted, got %q", v, got)
+		}
+	}
+	cluster := newTestCluster()
+	cluster.Spec.Version = ""
+	cluster.Spec.Image = "reg/idsvr@sha256:abc"
+	if _, ok := buildLabels(cluster, node)["app.kubernetes.io/version"]; ok {
+		t.Error("digest-only image without version: label should be omitted")
 	}
 }
 
@@ -298,6 +376,46 @@ func TestBuildDeployment_OperatorLabelsOverlayUserPodLabelsLast(t *testing.T) {
 	}
 	if got := templateLabels["environment"]; got != "staging" {
 		t.Errorf("user-only key 'environment' lost; got %q want staging", got)
+	}
+}
+
+// When the operator omits the version label (digest-only image, or a version
+// that isn't a valid label value), a user-supplied one must not leak onto the
+// pod template from either the cluster or the node podLabels.
+func TestBuildDeployment_UserVersionLabelDroppedWhenOperatorOmitsIt(t *testing.T) {
+	cases := []struct {
+		name           string
+		version, image string
+	}{
+		{"digest-only image", "", "reg/idsvr@sha256:abc"},
+		{"invalid label value", "11.0+build", ""},
+	}
+	for _, tc := range cases {
+		for _, level := range []string{"cluster", "node"} {
+			t.Run(tc.name+"/"+level, func(t *testing.T) {
+				cluster := newTestCluster()
+				cluster.Spec.Version, cluster.Spec.Image = tc.version, tc.image
+				node := newTestNode(v1alpha1.NodeTypeRuntime)
+				user := map[string]string{labelVersion: "11.0+build", "team": "platform"}
+				if level == "cluster" {
+					cluster.Spec.PodLabels = user
+				} else {
+					node.Spec.PodLabels = user
+				}
+
+				labels := buildDeployment(cluster, node, nil, DefaultPackageFetcherImage).Spec.Template.Labels
+				if got, ok := labels[labelVersion]; ok {
+					t.Errorf("user %s label leaked onto pod template: %q", labelVersion, got)
+				}
+				if labels["team"] != "platform" {
+					t.Errorf("user-only key 'team' lost; got %v", labels)
+				}
+				got := userPodLabelsOverridden(cluster, node)
+				if len(got) != 1 || got[0] != labelVersion {
+					t.Errorf("userPodLabelsOverridden = %v; want [%s]", got, labelVersion)
+				}
+			})
+		}
 	}
 }
 
@@ -3318,6 +3436,7 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 	includedInHash := map[string]bool{
 		"Version":         true, // via buildImage(cluster)
 		"Image":           true, // via buildImage(cluster)
+		"FIPSMode":        true, // via buildImage(cluster): picks the default repository
 		"ImagePullSecret": true,
 		// Packages flows into the hash via computePackagesHash (conditional
 		// append — nil/empty packages leave the hash unchanged). Each package
@@ -3354,10 +3473,6 @@ func TestComputeClusterConfigHash_SpecFieldCoverage(t *testing.T) {
 		// consumed via envFrom on nodes; it does not affect cluster.xml, so it
 		// must not trigger a genclust Job re-run.
 		"ConvertKeystore": true,
-		// FIPSMode only appends the --fips-mode flag to the node idsvr args; it
-		// does not affect cluster.xml generation. Flipping it rolls the node
-		// Deployments via the normal Deployment diff, not a genclust Job re-run.
-		"FIPSMode": true,
 		// Observability only governs a Prometheus ServiceMonitor; it has no
 		// bearing on cluster.xml or pod config, so it must not trigger a
 		// genclust Job re-run or a Deployment rollout.

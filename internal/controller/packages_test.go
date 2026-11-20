@@ -880,6 +880,86 @@ func TestBuildPackageInitEnv_PkgURLPreservesMetacharacters(t *testing.T) {
 	}
 }
 
+// expandLikeKubelet mimics the kubelet's EnvVar.Value expansion
+// (k8s.io/kubernetes third_party/forked/golang/expansion): `$$` becomes `$`,
+// `$(NAME)` is replaced by an earlier-declared variable when one exists and
+// left as-is otherwise, and any other `$` is kept.
+func expandLikeKubelet(in string, declared map[string]string) string {
+	var out strings.Builder
+	for i := 0; i < len(in); i++ {
+		if in[i] != '$' || i+1 >= len(in) {
+			out.WriteByte(in[i])
+			continue
+		}
+		switch in[i+1] {
+		case '$':
+			out.WriteByte('$')
+			i++
+		case '(':
+			end := strings.IndexByte(in[i+2:], ')')
+			if end < 0 {
+				out.WriteString(in[i:])
+				return out.String()
+			}
+			name := in[i+2 : i+2+end]
+			if v, ok := declared[name]; ok {
+				out.WriteString(v)
+			} else {
+				out.WriteString(in[i : i+3+end])
+			}
+			i += 2 + end
+		default:
+			out.WriteByte('$')
+		}
+	}
+	return out.String()
+}
+
+// Literal env values must reach the script exactly as written in the spec:
+// a `$(VAR)` reference must not pull in an earlier env var (above all the
+// client secret), and `$$` must not be collapsed.
+func TestBuildPackageInitEnv_LiteralValuesSurviveKubeletExpansion(t *testing.T) {
+	p := clientCredentialsPackage("$(CC_CLIENT_SECRET)", "a$$b")
+	p.Source.URL = "https://a.example/x$(PKG_URL)$$y.zip"
+	p.Source.Auth.ClientCredentials.TokenEndpoint = "https://idsvr.example/t$(PKG_URL)"
+	p.Source.Auth.ClientCredentials.ClientID = "id$(CC_TOKEN_ENDPOINT)$$"
+
+	want := map[string]string{
+		"PKG_URL":           p.Source.URL,
+		"CC_TOKEN_ENDPOINT": p.Source.Auth.ClientCredentials.TokenEndpoint,
+		"CC_CLIENT_ID":      p.Source.Auth.ClientCredentials.ClientID,
+		"CC_SCOPE":          "$(CC_CLIENT_SECRET) a$$b",
+	}
+	declared := map[string]string{}
+	for _, e := range buildPackageInitEnv(p) {
+		if e.ValueFrom != nil {
+			declared[e.Name] = "THE-CLIENT-SECRET"
+			continue
+		}
+		got := expandLikeKubelet(e.Value, declared)
+		declared[e.Name] = got
+		if w, ok := want[e.Name]; ok && got != w {
+			t.Errorf("%s after kubelet expansion = %q, want %q", e.Name, got, w)
+		}
+		if strings.Contains(got, "THE-CLIENT-SECRET") {
+			t.Errorf("%s expands to the client secret: %q", e.Name, got)
+		}
+	}
+
+	// Basic auth's PKG_HOST is a literal too.
+	b := onePackage("https://h$$t.example/x.zip", "/p/b")
+	b.Source.Auth = &v1alpha1.PackageAuthSpec{BasicAuth: &v1alpha1.PackageBasicAuthRef{
+		SecretRef: v1alpha1.PackageBasicAuthSelector{Name: "bs", UsernameKey: "u", PasswordKey: "p"},
+	}}
+	for _, e := range buildPackageInitEnv(b) {
+		if e.Name == "PKG_HOST" {
+			if got := expandLikeKubelet(e.Value, nil); got != "h$$t.example" {
+				t.Errorf("PKG_HOST after kubelet expansion = %q, want %q", got, "h$$t.example")
+			}
+		}
+	}
+}
+
 // Security: the netrc construction uses a constant printf format string
 // ('%s\n') so Secret bytes can never be parsed as printf format directives.
 // The script must NOT use a multi-%s format like
@@ -1520,5 +1600,177 @@ func TestPackageReferencesSecret(t *testing.T) {
 	}
 	if packageReferencesSecret(nil, "tok") {
 		t.Error("want false for nil packages")
+	}
+}
+
+// --- auth.clientCredentials ---
+
+// clientCredentialsPackage builds a package that downloads with a token
+// obtained through the client_credentials grant.
+func clientCredentialsPackage(scopes ...string) v1alpha1.PackageSpec {
+	p := onePackage("https://a.example/x.zip", "/p/a")
+	p.Source.Auth = &v1alpha1.PackageAuthSpec{
+		ClientCredentials: &v1alpha1.PackageClientCredentialsSpec{
+			TokenEndpoint: "https://idsvr.example/oauth/v2/oauth-token",
+			ClientID:      "package-reader",
+			ClientSecret: v1alpha1.PackageSecretKeyRef{
+				SecretRef: v1alpha1.PackageSecretKeySelector{Name: "cc", Key: "client-secret"},
+			},
+			Scopes: scopes,
+		},
+	}
+	return p
+}
+
+func envByName(envs []corev1.EnvVar) map[string]corev1.EnvVar {
+	m := make(map[string]corev1.EnvVar, len(envs))
+	for _, e := range envs {
+		m[e.Name] = e
+	}
+	return m
+}
+
+// Token endpoint and client ID are inline values; the client secret is
+// projected from its Secret and never inlined.
+func TestBuildPackageInitEnv_ClientCredentials(t *testing.T) {
+	envs := envByName(buildPackageInitEnv(clientCredentialsPackage("read", "write")))
+
+	if e := envs["CC_TOKEN_ENDPOINT"]; e.Value != "https://idsvr.example/oauth/v2/oauth-token" {
+		t.Errorf("CC_TOKEN_ENDPOINT = %+v", e)
+	}
+	if e := envs["CC_CLIENT_ID"]; e.Value != "package-reader" {
+		t.Errorf("CC_CLIENT_ID = %+v", e)
+	}
+	sec, ok := envs["CC_CLIENT_SECRET"]
+	if !ok || sec.Value != "" || sec.ValueFrom == nil || sec.ValueFrom.SecretKeyRef == nil {
+		t.Fatalf("CC_CLIENT_SECRET must come from a secretKeyRef, got %+v", sec)
+	}
+	if ref := sec.ValueFrom.SecretKeyRef; ref.Name != "cc" || ref.Key != "client-secret" {
+		t.Errorf("CC_CLIENT_SECRET secretKeyRef = %+v, want {cc, client-secret}", ref)
+	}
+	if e := envs["CC_SCOPE"]; e.Value != "read write" {
+		t.Errorf("CC_SCOPE = %q, want space-separated %q", e.Value, "read write")
+	}
+	for _, unwanted := range []string{"BEARER_TOKEN", "BASIC_AUTH_USER", "BASIC_AUTH_PASS", "PKG_HOST"} {
+		if _, ok := envs[unwanted]; ok {
+			t.Errorf("env %s must not be set for clientCredentials", unwanted)
+		}
+	}
+}
+
+// Without scopes, neither CC_SCOPE nor the scope form parameter is emitted,
+// so the authorization server applies the client's default scopes.
+func TestBuildPackageInitEnv_ClientCredentialsNoScopes(t *testing.T) {
+	p := clientCredentialsPackage()
+	if _, ok := envByName(buildPackageInitEnv(p))["CC_SCOPE"]; ok {
+		t.Error("CC_SCOPE must be omitted when no scopes are configured")
+	}
+	if script := buildPackageDownloadScript(p, 0); strings.Contains(script, "scope=") {
+		t.Errorf("script must not send a scope parameter without scopes:\n%s", script)
+	}
+	if script := buildPackageDownloadScript(clientCredentialsPackage("read"), 0); !strings.Contains(script, `--data-urlencode "scope=$CC_SCOPE"`) {
+		t.Errorf("script must send scope from $CC_SCOPE when scopes are configured:\n%s", script)
+	}
+}
+
+// The script fetches the token first, then downloads with it as a bearer
+// token over stdin. No credential or endpoint is inlined in the script.
+func TestBuildPackageDownloadScript_ClientCredentials(t *testing.T) {
+	script := buildPackageDownloadScript(clientCredentialsPackage("read"), 3)
+
+	mustContain := []string{
+		"apk add --no-cache curl unzip ca-certificates jq",
+		"--data-urlencode 'grant_type=client_credentials'",
+		`"$CC_TOKEN_ENDPOINT"`,
+		"env.CC_CLIENT_ID|@uri",
+		"env.CC_CLIENT_SECRET|@uri",
+		"Authorization: Basic %s",
+		".access_token // empty",
+		"exit 101",
+		"exit 102",
+		"package-fetch-3: token",
+		`"Authorization: Bearer $BEARER_TOKEN" | curl --header @-`,
+		`"$PKG_URL"`,
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+	tokenIdx := strings.Index(script, "$CC_TOKEN_ENDPOINT")
+	downloadIdx := strings.Index(script, "$PKG_URL")
+	if tokenIdx < 0 || downloadIdx < 0 || tokenIdx > downloadIdx {
+		t.Errorf("token request must precede the package download:\n%s", script)
+	}
+	for _, leaked := range []string{"package-reader", "idsvr.example", "client-secret", "a.example"} {
+		if strings.Contains(script, leaked) {
+			t.Errorf("script inlines %q; values must come from env vars:\n%s", leaked, script)
+		}
+	}
+	for _, bad := range []string{" -u $", " -u \"$", " -H \"Authorization", "client_secret="} {
+		if strings.Contains(script, bad) {
+			t.Errorf("script contains %q (credential leak via argv):\n%s", bad, script)
+		}
+	}
+	// jq is only needed for the client_credentials flow.
+	if plain := buildPackageDownloadScript(onePackage("https://a.example/x.zip", "/p/a"), 0); strings.Contains(plain, "jq") {
+		t.Errorf("jq must not be installed without clientCredentials:\n%s", plain)
+	}
+}
+
+// The package's TLS flags apply to the token request too.
+func TestBuildPackageDownloadScript_ClientCredentialsUsesTLSFlags(t *testing.T) {
+	p := clientCredentialsPackage()
+	p.Source.TLS = &v1alpha1.PackageTLSSpec{
+		Enabled: true,
+		CA: &v1alpha1.PackageSecretKeyRef{
+			SecretRef: v1alpha1.PackageSecretKeySelector{Name: "ca", Key: "ca.crt"},
+		},
+	}
+	script := buildPackageDownloadScript(p, 0)
+	if got := strings.Count(script, "--cacert /tls/ca.crt"); got != 2 {
+		t.Errorf("expected --cacert on both the token request and the download, found %d:\n%s", got, script)
+	}
+}
+
+// The client secret is part of the pre-check and the Secret watch.
+func TestCheckPackageSecrets_ClientCredentials(t *testing.T) {
+	pkgs := []v1alpha1.PackageSpec{clientCredentialsPackage()}
+
+	if names := packageSecretNames(pkgs); len(names) != 1 || names[0] != "cc" {
+		t.Errorf("packageSecretNames = %v, want [cc]", names)
+	}
+	if !packageReferencesSecret(pkgs, "cc") {
+		t.Error("packageReferencesSecret(cc) = false, want true")
+	}
+
+	ok := fakeClientWithSecrets(t, newSecret("cc", map[string]string{"client-secret": "s3cret"}))
+	if reason, msg, err := checkPackageSecrets(context.Background(), ok, pkgs, "ns"); err != nil || reason != "" || msg != "" {
+		t.Errorf("happy path: got (reason=%q, msg=%q, err=%v)", reason, msg, err)
+	}
+
+	missing := fakeClientWithSecrets(t)
+	if reason, _, _ := checkPackageSecrets(context.Background(), missing, pkgs, "ns"); reason != v1alpha1.ReasonPackageSecretMissing {
+		t.Errorf("missing Secret: reason = %q, want %q", reason, v1alpha1.ReasonPackageSecretMissing)
+	}
+
+	wrongKey := fakeClientWithSecrets(t, newSecret("cc", map[string]string{"other": "x"}))
+	if reason, _, _ := checkPackageSecrets(context.Background(), wrongKey, pkgs, "ns"); reason != v1alpha1.ReasonPackageSecretKeyMissing {
+		t.Errorf("missing key: reason = %q, want %q", reason, v1alpha1.ReasonPackageSecretKeyMissing)
+	}
+}
+
+// Changing any clientCredentials field rolls the pods.
+func TestComputePackagesHash_ClientCredentialsChange(t *testing.T) {
+	a := clientCredentialsPackage("read")
+	b := clientCredentialsPackage("read", "write")
+	c := clientCredentialsPackage("read")
+	c.Source.Auth.ClientCredentials.ClientID = "other-client"
+	ha := computePackagesHash([]v1alpha1.PackageSpec{a})
+	if ha == computePackagesHash([]v1alpha1.PackageSpec{b}) {
+		t.Error("scope change must change the packages hash")
+	}
+	if ha == computePackagesHash([]v1alpha1.PackageSpec{c}) {
+		t.Error("clientId change must change the packages hash")
 	}
 }

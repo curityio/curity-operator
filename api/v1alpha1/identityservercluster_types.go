@@ -9,7 +9,9 @@ import (
 // It holds cluster-wide shared configuration that IdentityServerNode resources inherit.
 // +kubebuilder:object:generate=true
 type IdentityServerClusterSpec struct {
-	// Version of the Curity Identity Server to deploy.
+	// Version of the Curity Identity Server to deploy. Used as the tag of the
+	// default image (curity.azurecr.io/curity/idsvr:<version>, or
+	// curityfips.azurecr.io/curity/idsvr:<version> with fipsMode).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=128
@@ -23,9 +25,11 @@ type IdentityServerClusterSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	ImagePullSecret string `json:"imagePullSecret,omitempty"`
 
-	// FIPSMode enables/disables FIPS mode (--fips-mode) on all admin and runtime
-	// nodes of this cluster. Defaults to false. Requires a special license and a
-	// FIPS-enabled Docker image — contact sales@curity.io for more details.
+	// FIPSMode runs the cluster on the FIPS-enabled Curity image. When image is
+	// not set, the default repository becomes
+	// curityfips.azurecr.io/curity/idsvr:<version>; when image is set, it must
+	// already point at a FIPS-enabled image. Defaults to false. Requires a
+	// special license — contact sales@curity.io for more details.
 	// +kubebuilder:default=false
 	FIPSMode bool `json:"fipsMode,omitempty"`
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	"github.com/spf13/cobra"
@@ -16,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,10 +32,15 @@ import (
 var (
 	scheme = runtime.NewScheme()
 
-	healthAddr  string
-	metricsAddr string
-	leaderElect bool
+	healthAddr      string
+	metricsAddr     string
+	leaderElect     bool
+	watchNamespaces string
 )
+
+// watchNamespaceEnv is the operator-sdk/OLM convention for scoping an
+// operator; it seeds the --watch-namespaces default.
+const watchNamespaceEnv = "WATCH_NAMESPACE"
 
 func init() {
 	utilruntime.Must(corev1.AddToScheme(scheme))
@@ -56,8 +63,30 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().StringVar(&healthAddr, "health-addr", ":8081", "address for health probe endpoints")
 	cmd.Flags().StringVar(&metricsAddr, "metrics-addr", "0", "address for metrics endpoint (0 to disable)")
 	cmd.Flags().BoolVar(&leaderElect, "leader-elect", false, "enable leader election for HA deployments")
+	cmd.Flags().StringVar(&watchNamespaces, "watch-namespaces", os.Getenv(watchNamespaceEnv),
+		"comma-separated namespaces to watch; empty watches all namespaces (env "+watchNamespaceEnv+")")
 
 	return cmd
+}
+
+// parseWatchNamespaces splits a comma-separated namespace list, trimming
+// whitespace, dropping empty entries and duplicates, and rejecting names that
+// are not valid DNS-1123 labels. An empty result means "all namespaces".
+func parseWatchNamespaces(raw string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, ns := range strings.Split(raw, ",") {
+		ns = strings.TrimSpace(ns)
+		if ns == "" || seen[ns] {
+			continue
+		}
+		if errs := validation.IsDNS1123Label(ns); len(errs) > 0 {
+			return nil, fmt.Errorf("invalid namespace %q: %s", ns, strings.Join(errs, "; "))
+		}
+		seen[ns] = true
+		out = append(out, ns)
+	}
+	return out, nil
 }
 
 func run(cmd *cobra.Command, _ []string) error {
@@ -80,6 +109,24 @@ func run(cmd *cobra.Command, _ []string) error {
 		log.Info("override default toleration seconds from env", "seconds", n)
 	}
 
+	namespaces, err := parseWatchNamespaces(watchNamespaces)
+	if err != nil {
+		return fmt.Errorf("--watch-namespaces: %w", err)
+	}
+	// Empty DefaultNamespaces keeps the cache cluster-wide. When set, every
+	// informer (including the Event one below) is limited to these
+	// namespaces, so namespaced RBAC on just these is sufficient.
+	var defaultNamespaces map[string]cache.Config
+	if len(namespaces) > 0 {
+		defaultNamespaces = make(map[string]cache.Config, len(namespaces))
+		for _, ns := range namespaces {
+			defaultNamespaces[ns] = cache.Config{}
+		}
+		log.Info("watching selected namespaces only", "namespaces", namespaces)
+	} else {
+		log.Info("watching all namespaces")
+	}
+
 	cfg := ctrl.GetConfigOrDie()
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
@@ -96,6 +143,7 @@ func run(cmd *cobra.Command, _ []string) error {
 		// reach tens of thousands of objects); the field selector keeps the
 		// cache to ~tens of KB.
 		Cache: cache.Options{
+			DefaultNamespaces: defaultNamespaces,
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Event{}: {
 					Field: fields.SelectorFromSet(fields.Set{

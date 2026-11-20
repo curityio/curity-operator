@@ -48,3 +48,8 @@ jobs:
 
       - name: Helm Lint
         run: helm lint charts/curity-operator --strict
+
+      # Asserts what hack/helm/postprocess.sh produces for watchScope=cluster
+      # and namespace. helm lint alone passes even if an edit silently no-ops.
+      - name: Helm Render Checks
+        run: make helm-verify

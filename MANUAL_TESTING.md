@@ -6,7 +6,7 @@ A walkthrough for building, running, and exercising the operator by hand — loc
 
 ## Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - A working Docker daemon (Docker Desktop, Colima, or equivalent)
 - `kubectl`
 - Helm 3.x

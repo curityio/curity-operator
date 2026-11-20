@@ -44,7 +44,7 @@ Design notes worth knowing before changing things:
 
 ## Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Docker (with Buildx for multi-arch builds)
 - kubectl
 - Helm 3.x or 4.x (for the Helm-based flow and the namespace-scoped E2E suite)

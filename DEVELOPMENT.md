@@ -108,6 +108,18 @@ Against a remote cluster (AKS/EKS) — builds and pushes the image instead of lo
 make test-e2e-remote IMG=curity.azurecr.io/curity/operator:<tag>
 ```
 
+The shared AKS e2e cluster is kept stopped between runs (see [E2E cluster](#e2e-cluster)). To run
+against it locally, let `test-e2e-aks` start it, run `test-e2e-remote` and stop it again — also when
+the suite fails or you press Ctrl-C. It uses a throwaway kubeconfig holding only that cluster, so
+your current context is never touched:
+
+```bash
+export AKS_RESOURCE_GROUP=<resource group> AKS_CLUSTER_NAME=<cluster>
+make test-e2e-aks IMG=<registry you can push to>/curity-operator:<tag>
+```
+
+`make aks-start`, `make aks-stop` and `make aks-status` do the single steps.
+
 Update E2E snapshots (go-snaps reads `UPDATE_SNAPS` from the environment, so it has to be set on
 the command line — `make test-e2e-update-snapshots` runs the same suite but does not set it for you):
 
@@ -150,6 +162,7 @@ make vet   # Run go vet
 |---|---|---|---|
 | `pull_request.yaml` | PRs to `main` | generate, lint, unit tests, build, `docker build`, `helm lint`, `make helm-verify` | nothing |
 | `e2e.yaml` | `ok-to-test/e2e` label on a PR | `build-image` publishes the test image, then `e2e-tests` runs the suite against the shared AKS cluster | GHCR |
+| `aks-stop.yaml` | nightly (22:00 UTC), manual | stops the AKS e2e cluster if `e2e.yaml` left it running | nothing |
 | `push.yaml` | push to `main` | tests, build, push image, generate + push the Helm chart | GHCR |
 | `release.yaml` | tag `X.Y.Z` | multi-arch image (+ `latest`), versioned chart, `dist/install.yaml`, `dist/crds.yaml`, GitHub release | ACR |
 
@@ -235,6 +248,37 @@ derives from them:
 ```bash
 make docker-build DOCKER_REPO_BASE=my-registry.example.com/curity
 ```
+
+## E2E cluster
+
+The AKS cluster `e2e.yaml` runs on is stopped (deallocated) when no run needs it, so it only costs
+money while tests run. `start-cluster` starts it in parallel with the image build, `e2e-tests`
+waits for the nodes to be Ready, and `stop-cluster` deallocates it afterwards with
+`if: always()` — after a pass, a failure, a failed build or a cancelled run. The `e2e-aks`
+concurrency group serialises runs, so one run never stops the cluster under another; the nightly
+`aks-stop.yaml` shares the group and is the backstop if a stop ever fails. All three call
+`hack/aks-power.sh`, which is idempotent: it waits out an operation already in progress and skips a
+start or stop the cluster is already in.
+
+Stopping keeps the API server address, its CA and the service-account token, so the existing
+`KUBE_SERVER` / `KUBE_CA_CERT` / `KUBE_TOKEN` secrets keep working. Anyone using the cluster by
+hand (demos, debugging) has to start it first, and an e2e run or the nightly job will stop it
+under them.
+
+The workflows log in to Azure with OIDC, so no Azure secret is stored. One-time setup:
+
+1. Create an app registration (or user-assigned managed identity) and add two federated
+   credentials for `curityio/curity-operator`: entity type *Pull request*
+   (`repo:curityio/curity-operator:pull_request`) for `e2e.yaml`, and branch `main`
+   (`repo:curityio/curity-operator:ref:refs/heads/main`) for `aks-stop.yaml`.
+2. Give it a role scoped to the cluster resource only. The least privilege is a custom role with
+   `Microsoft.ContainerService/managedClusters/read`, `.../start/action` and `.../stop/action`;
+   the built-in *Azure Kubernetes Service Contributor Role* also works but can modify the cluster.
+3. Repository **secrets**: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`.
+4. Repository **variables**: `AKS_RESOURCE_GROUP`, `AKS_CLUSTER_NAME`. They are variables rather
+   than literals in the workflow because the repository is public.
+
+For local use, `az login` as someone with the same permissions.
 
 ## Cleanup
 

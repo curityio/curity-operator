@@ -1,0 +1,41 @@
+name: Stop E2E Cluster
+
+# Backstop for e2e.yaml's stop-cluster job: if that ever fails (Azure error,
+# runner outage), the cluster would otherwise keep running until someone
+# notices. Also runnable by hand from the Actions tab.
+on:
+  schedule:
+    - cron: "0 22 * * *"
+  workflow_dispatch:
+
+# Same group as e2e.yaml, so this queues behind a run in progress instead of
+# stopping the cluster under it.
+concurrency:
+  group: e2e-aks
+  cancel-in-progress: false
+
+env:
+  AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+  AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
+
+jobs:
+  stop-cluster:
+    name: Stop AKS Cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Stop cluster
+        run: hack/aks-power.sh stop

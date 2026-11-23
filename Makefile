@@ -290,6 +290,30 @@ cluster: kind ## Create a Kind cluster for e2e testing.
 cluster-destroy: kind ## Destroy the Kind e2e cluster.
 	$(KIND) delete cluster --name $(TEST_CLUSTER_NAME)
 
+# The shared AKS e2e cluster is kept stopped between runs. These need
+# AKS_RESOURCE_GROUP and AKS_CLUSTER_NAME in the environment and an `az login`
+# that may start and stop it. The names are not in the repository because it is
+# public; CI reads them from repository variables.
+AKS_POWER = hack/aks-power.sh
+
+.PHONY: aks-start
+aks-start: ## Start the AKS e2e cluster (no-op if it is already running).
+	$(AKS_POWER) start
+
+.PHONY: aks-stop
+aks-stop: ## Stop (deallocate) the AKS e2e cluster.
+	$(AKS_POWER) stop
+
+.PHONY: aks-status
+aks-status: ## Show the AKS e2e cluster's power and provisioning state.
+	$(AKS_POWER) status
+
+# Starts the cluster, runs test-e2e-remote against it with a kubeconfig that
+# holds only that cluster, and stops it afterwards — on failure and Ctrl-C too.
+.PHONY: test-e2e-aks
+test-e2e-aks: ## Start the AKS e2e cluster, run test-e2e-remote on it, always stop it.
+	$(AKS_POWER) run -- $(MAKE) test-e2e-remote IMG=$(IMG)
+
 .PHONY: deploy-kind
 deploy-kind: docker-build cluster ## Build and load image into Kind cluster.
 	$(KIND) load docker-image $(IMG) --name $(TEST_CLUSTER_NAME)

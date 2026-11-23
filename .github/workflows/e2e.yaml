@@ -4,9 +4,27 @@ on:
   pull_request:
     types: [labeled]
 
+# Also serialises the start/stop jobs: a run never stops the cluster while
+# another run is using it, because the next run only begins once this one —
+# stop-cluster included — has finished. aks-stop.yaml shares the group.
 concurrency:
   group: e2e-aks
   cancel-in-progress: false
+
+# The AKS cluster is kept stopped between runs. start-cluster brings it up in
+# parallel with the image build; stop-cluster always deallocates it again,
+# whether the suite passed, failed, was cancelled or never ran. Stopping keeps
+# the API server address, CA and service-account token, so the KUBE_* secrets
+# stay valid across stop/start.
+#
+# Azure access is OIDC (no stored secret): AZURE_CLIENT_ID / AZURE_TENANT_ID /
+# AZURE_SUBSCRIPTION_ID identify an app registration with a federated credential
+# for this repository and a role on the cluster allowing read, start and stop.
+# The cluster's name and resource group are repository variables, not literals,
+# because the repository is public. See DEVELOPMENT.md.
+env:
+  AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP }}
+  AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME }}
 
 # Split into two jobs on purpose. Publishing the test image needs
 # packages: write, but the job that runs the suite puts its GITHUB_TOKEN into a
@@ -66,9 +84,33 @@ jobs:
           make docker-build IMG=$IMG VERSION=$VERSION
           make docker-push IMG=$IMG
 
+  start-cluster:
+    name: Start AKS Cluster
+    if: ${{ github.event.label.name == 'ok-to-test/e2e' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Start cluster
+        run: hack/aks-power.sh start
+
   e2e-tests:
     name: Run E2E Tests (AKS)
-    needs: build-image
+    needs: [build-image, start-cluster]
     runs-on: ubuntu-latest
     # packages: read, deliberately — this job's GITHUB_TOKEN is the one stored
     # in the cluster's pull secret, so it must not be able to write packages.
@@ -107,6 +149,18 @@ jobs:
           kubectl config set-credentials aks-user --token="${KUBE_TOKEN}"
           kubectl config set-context aks --cluster=aks --user=aks-user
           kubectl config use-context aks
+
+      # The cluster was just started: wait until the API server answers and
+      # the re-created nodes are Ready before deploying anything.
+      - name: Wait for cluster
+        timeout-minutes: 15
+        run: |
+          until kubectl get --raw /readyz >/dev/null 2>&1 &&
+            [ -n "$(kubectl get nodes -o name 2>/dev/null)" ] &&
+            ! kubectl get nodes --no-headers 2>/dev/null | awk '$2 !~ /^Ready/ { bad=1 } END { exit !bad }'; do
+            echo "waiting for API server and nodes..."
+            sleep 15
+          done
 
       - name: Verify cluster connectivity
         run: |
@@ -174,3 +228,38 @@ jobs:
           make undeploy ignore-not-found=true || true
           kubectl delete secret ghcr-pull-secret -n curity-operator --ignore-not-found
           kubectl delete namespace curity-e2e curity-e2e-scoped curity-e2e-scoped-other --ignore-not-found
+
+  # Runs whatever happened before it — suite failure, build failure, a failed
+  # start, or a cancelled run — as long as start-cluster was attempted.
+  stop-cluster:
+    name: Stop AKS Cluster
+    needs: [start-cluster, e2e-tests]
+    if: ${{ always() && needs.start-cluster.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Retried because a cluster left running is the expensive failure.
+      # aks-stop.yaml is the nightly backstop if this still fails.
+      - name: Stop cluster
+        run: |
+          for attempt in 1 2 3; do
+            hack/aks-power.sh stop && exit 0
+            echo "stop attempt $attempt failed, retrying in 60s..."
+            sleep 60
+          done
+          exit 1
